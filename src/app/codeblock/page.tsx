@@ -16,6 +16,7 @@ import {
 } from "tldraw";
 import { StylePanelCodeLanguagePicker } from "@/shapes/codeblock/StylePanelCodeLanguagePicker";
 import "tldraw/tldraw.css";
+import { useSyncDemo } from '@tldraw/sync'
 
 const uiOverrides: TLUiOverrides = {
   tools(editor, tools) {
@@ -70,14 +71,19 @@ const shapeUtils = [CodeBlockShapeUtil];
 const tools = [CodeBlockShapeTool];
 
 export default function Page() {
-  return (
-    <div className="fixed inset-0">
-      <Tldraw
-        shapeUtils={shapeUtils}
-        tools={tools}
-        overrides={uiOverrides}
-        components={components}
-      />
-    </div>
+    const store = useSyncDemo({
+        roomId: '1145141919810-HOMO', // 同一个 roomId = 同一协作房间
+    })
+
+    return (
+        <div className="fixed inset-0">
+            <Tldraw
+                store={store}              // ⭐ 关键
+                shapeUtils={shapeUtils}
+                tools={tools}
+                overrides={uiOverrides}
+                components={components}
+            />
+        </div>
   );
 }
