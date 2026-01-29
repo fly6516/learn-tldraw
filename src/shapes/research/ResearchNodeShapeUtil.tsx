@@ -8,9 +8,11 @@ import {
 
 import type { ResearchNodeShape } from './ResearchNodeShape'
 import { RESEARCH_NODE_META } from '@/app/research/research-node'
+import { ResearchNodeSectionStyle } from './ResearchNodeStyles'
 
 export class ResearchNodeShapeUtil extends ShapeUtil<ResearchNodeShape> {
     static type = 'research-node' as const
+    static styles = [ResearchNodeSectionStyle]
 
     getDefaultProps(): ResearchNodeShape['props'] {
         return {

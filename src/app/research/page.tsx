@@ -8,6 +8,7 @@ import "tldraw/tldraw.css";
 
 import { ResearchNodeTool } from "@/shapes/research/ResearchNodeTool";
 import { ResearchNodeShapeUtil } from "@/shapes/research/ResearchNodeShapeUtil";
+import { ResearchNodeStylePanel } from "@/shapes/research/ResearchNodeStylePanel";
 
 import {
     DefaultKeyboardShortcutsDialog,
@@ -91,6 +92,7 @@ const components: TLComponents = {
             </DefaultKeyboardShortcutsDialog>
         );
     },
+    StylePanel: ResearchNodeStylePanel,
 };
 
 const shapeUtils = [ResearchNodeShapeUtil];
