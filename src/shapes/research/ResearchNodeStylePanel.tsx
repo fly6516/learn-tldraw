@@ -65,11 +65,17 @@ export function ResearchNodeStylePanel() {
             editor.markHistoryStoppingPoint();
             const validatedValue = value as ResearchNodeType;
 
+            // Get currently selected shapes (not the ones from closure)
+            const currentSelectedShapes = editor.getSelectedShapes();
+            const currentResearchNodes = currentSelectedShapes.filter(
+              (shape) => shape.type === 'research-node'
+            ) as ResearchNodeShape[];
+
             // Update both style and props
             editor.setStyleForSelectedShapes(ResearchNodeSectionStyle, validatedValue);
 
-            // Update props for all selected research nodes
-            researchNodes.forEach((shape) => {
+            // Update props for all currently selected research nodes
+            currentResearchNodes.forEach((shape) => {
               editor.updateShape<ResearchNodeShape>({
                 id: shape.id,
                 type: shape.type,
