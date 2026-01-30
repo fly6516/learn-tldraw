@@ -1,6 +1,6 @@
 import type { Editor } from 'tldraw'
 import type { ResearchNodeType } from '@/app/research/research-node'
-import { RESEARCH_NODE_META } from '@/app/research/research-node'
+//import { RESEARCH_NODE_META } from '@/app/research/research-node'
 import { collectResearchNodes, sortNodesBySection, groupNodesBySection } from './latex-exporter'
 
 /**
