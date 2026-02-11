@@ -4,6 +4,7 @@ import {
     Rectangle2d,
     ShapeUtil,
     TLResizeInfo,
+    T,
 } from 'tldraw'
 
 import type { ResearchNodeShape } from './ResearchNodeShape'
@@ -13,6 +14,38 @@ import { ResearchNodeSectionStyle } from './ResearchNodeStyles'
 export class ResearchNodeShapeUtil extends ShapeUtil<ResearchNodeShape> {
     static type = 'research-node' as const
     static styles = [ResearchNodeSectionStyle]
+
+    static props = {
+        section: T.literalEnum(
+            'title',
+            'abstract',
+            'keywords',
+            'introduction',
+            'related-work',
+            'method',
+            'experiment',
+            'result',
+            'discussion',
+            'conclusion',
+            'limitations',
+            'future-work',
+            'acknowledgments',
+            'reference',
+            'appendix',
+            'custom'
+        ),
+        content: T.string,
+        order: T.number,
+        customLabel: T.optional(T.string),
+        metadata: T.optional(
+            T.object({
+                originalTitle: T.optional(T.string),
+                sectionNumber: T.optional(T.string),
+                imported: T.optional(T.boolean),
+                importSource: T.optional(T.string),
+            })
+        ),
+    }
 
     getDefaultProps(): ResearchNodeShape['props'] {
         return {
@@ -32,6 +65,7 @@ export class ResearchNodeShapeUtil extends ShapeUtil<ResearchNodeShape> {
 
     component(shape: ResearchNodeShape) {
         const meta = RESEARCH_NODE_META[shape.props.section]
+        const displayLabel = shape.props.customLabel || meta.label
 
         return (
             <HTMLContainer
@@ -55,13 +89,18 @@ export class ResearchNodeShapeUtil extends ShapeUtil<ResearchNodeShape> {
                         borderBottom: '1px solid #eee',
                     }}
                 >
-                    {meta.label}
+                    {displayLabel}
+                    {shape.props.metadata?.imported && (
+                        <span style={{ marginLeft: 6, fontSize: 10, color: '#888' }}>
+                            (imported)
+                        </span>
+                    )}
                 </div>
 
                 {/* Editable content */}
                 <textarea
                     value={shape.props.content}
-                    placeholder={`Write ${meta.label} here...`}
+                    placeholder={`Write ${displayLabel} here...`}
                     onChange={(e) => {
                         this.editor.updateShape<ResearchNodeShape>({
                             id: shape.id,

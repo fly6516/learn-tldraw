@@ -18,6 +18,7 @@ interface ResearchNodeData {
     section: ResearchNodeType
     content: string
     order: number
+    customLabel?: string
 }
 
 /**
@@ -34,6 +35,7 @@ export function collectResearchNodes(editor: Editor): ResearchNodeData[] {
                 section: researchShape.props.section,
                 content: researchShape.props.content,
                 order: researchShape.props.order,
+                customLabel: researchShape.props.customLabel,
             })
         }
     }
@@ -93,7 +95,8 @@ export function escapeLatex(text: string): string {
  */
 export function formatSectionContent(
     section: ResearchNodeType,
-    content: string
+    content: string,
+    customLabel?: string
 ): string {
     const mapping = SECTION_LATEX_MAPPING[section]
     const escapedContent = escapeLatex(content.trim())
@@ -105,7 +108,7 @@ export function formatSectionContent(
 
     // For sections that need titles
     if (mapping.needsTitle) {
-        const title = getDefaultSectionTitle(section)
+        const title = customLabel || getDefaultSectionTitle(section)
         return `\\${mapping.command}{${title}}\n\n${escapedContent}`
     }
 
@@ -117,13 +120,19 @@ export function formatSectionContent(
  */
 export function groupNodesBySection(
     nodes: ResearchNodeData[]
-): Map<ResearchNodeType, string> {
-    const grouped = new Map<ResearchNodeType, string>()
+): Map<ResearchNodeType, { content: string; customLabel?: string }> {
+    const grouped = new Map<ResearchNodeType, { content: string; customLabel?: string }>()
 
     for (const node of nodes) {
-        const existing = grouped.get(node.section) || ''
-        const separator = existing ? '\n\n' : ''
-        grouped.set(node.section, existing + separator + node.content)
+        const existing = grouped.get(node.section)
+        if (existing) {
+            existing.content += '\n\n' + node.content
+        } else {
+            grouped.set(node.section, {
+                content: node.content,
+                customLabel: node.customLabel,
+            })
+        }
     }
 
     return grouped
@@ -143,9 +152,9 @@ export function generateLatexDocument(
     const groupedNodes = groupNodesBySection(sortedNodes)
 
     // Extract title if available
-    const titleContent = groupedNodes.get('title')
-    if (titleContent && !options.title) {
-        options = { ...options, title: titleContent }
+    const titleData = groupedNodes.get('title')
+    if (titleData && !options.title) {
+        options = { ...options, title: titleData.content }
     }
 
     // Build document parts
@@ -158,9 +167,16 @@ export function generateLatexDocument(
     parts.push(generateDocumentBegin())
 
     // Add abstract if available
-    const abstractContent = groupedNodes.get('abstract')
-    if (abstractContent) {
-        parts.push(formatSectionContent('abstract', abstractContent))
+    const abstractData = groupedNodes.get('abstract')
+    if (abstractData) {
+        parts.push(formatSectionContent('abstract', abstractData.content, abstractData.customLabel))
+        parts.push('')
+    }
+
+    // Add keywords if available
+    const keywordsData = groupedNodes.get('keywords')
+    if (keywordsData) {
+        parts.push(formatSectionContent('keywords', keywordsData.content, keywordsData.customLabel))
         parts.push('')
     }
 
@@ -173,20 +189,43 @@ export function generateLatexDocument(
         'result',
         'discussion',
         'conclusion',
+        'limitations',
+        'future-work',
     ]
 
     for (const sectionType of mainSections) {
-        const content = groupedNodes.get(sectionType)
-        if (content) {
-            parts.push(formatSectionContent(sectionType, content))
+        const sectionData = groupedNodes.get(sectionType)
+        if (sectionData) {
+            parts.push(formatSectionContent(sectionType, sectionData.content, sectionData.customLabel))
             parts.push('')
         }
     }
 
+    // Add acknowledgments if available
+    const acknowledgementsData = groupedNodes.get('acknowledgments')
+    if (acknowledgementsData) {
+        parts.push(formatSectionContent('acknowledgments', acknowledgementsData.content, acknowledgementsData.customLabel))
+        parts.push('')
+    }
+
     // Add references if available
-    const referenceContent = groupedNodes.get('reference')
-    if (referenceContent) {
-        parts.push(formatSectionContent('reference', referenceContent))
+    const referenceData = groupedNodes.get('reference')
+    if (referenceData) {
+        parts.push(formatSectionContent('reference', referenceData.content, referenceData.customLabel))
+        parts.push('')
+    }
+
+    // Add appendix if available
+    const appendixData = groupedNodes.get('appendix')
+    if (appendixData) {
+        parts.push(formatSectionContent('appendix', appendixData.content, appendixData.customLabel))
+        parts.push('')
+    }
+
+    // Add custom sections if available
+    const customData = groupedNodes.get('custom')
+    if (customData) {
+        parts.push(formatSectionContent('custom', customData.content, customData.customLabel))
         parts.push('')
     }
 

@@ -15,6 +15,89 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
+import * as React from "react";
+import type { Editor } from "tldraw";
+
+/**
+ * Custom Label Input Component with IME support
+ */
+function CustomLabelInput({
+  editor,
+  researchNodes,
+  currentCustomLabel,
+  currentSection,
+}: {
+  editor: Editor;
+  researchNodes: ResearchNodeShape[];
+  currentCustomLabel: string;
+  currentSection: ResearchNodeType | "";
+}) {
+  const [localValue, setLocalValue] = React.useState(currentCustomLabel);
+  const [isComposing, setIsComposing] = React.useState(false);
+
+  // Update local value when selection changes
+  React.useEffect(() => {
+    setLocalValue(currentCustomLabel);
+  }, [currentCustomLabel]);
+
+  const updateShapes = (newLabel: string) => {
+    const currentSelectedShapes = editor.getSelectedShapes();
+    const currentResearchNodes = currentSelectedShapes.filter(
+      (shape) => shape.type === 'research-node'
+    ) as ResearchNodeShape[];
+
+    currentResearchNodes.forEach((shape) => {
+      editor.updateShape<ResearchNodeShape>({
+        id: shape.id,
+        type: shape.type,
+        props: {
+          ...shape.props,
+          customLabel: newLabel || undefined,
+        },
+      });
+    });
+  };
+
+  return (
+    <div className="mt-3">
+      <div className="text-xs text-muted-foreground mb-1 font-medium">
+        Custom Label
+      </div>
+      <Input
+        type="text"
+        placeholder="Enter custom section name"
+        value={localValue}
+        onChange={(e) => {
+          setLocalValue(e.target.value);
+          // Only update shapes if not composing (for IME support)
+          if (!isComposing) {
+            updateShapes(e.target.value);
+          }
+        }}
+        onCompositionStart={() => {
+          setIsComposing(true);
+        }}
+        onCompositionEnd={(e) => {
+          setIsComposing(false);
+          // Update shapes after composition ends
+          const target = e.target as HTMLInputElement;
+          updateShapes(target.value);
+        }}
+        onBlur={(e) => {
+          // Ensure update on blur
+          updateShapes(e.target.value);
+        }}
+        className="h-8 text-sm"
+      />
+      <div className="text-xs text-muted-foreground mt-1">
+        {currentSection === 'custom'
+          ? 'Required for custom sections'
+          : 'Optional: Override default section name'}
+      </div>
+    </div>
+  );
+}
 
 /**
  * Style panel component for selecting research node section type.
@@ -51,6 +134,12 @@ export function ResearchNodeStylePanel() {
   const sections = researchNodes.map((node) => node.props.section);
   const allSame = sections.every((s) => s === sections[0]);
   const currentSection = allSame ? sections[0] : "";
+
+  // Get custom label
+  const customLabels = researchNodes.map((node) => node.props.customLabel || '');
+  const allSameLabel = customLabels.every((l) => l === customLabels[0]);
+  const currentCustomLabel = allSameLabel ? customLabels[0] : "";
+  const showCustomLabel = currentSection === 'custom' || researchNodes.some(n => n.props.customLabel);
 
   return (
     <DefaultStylePanel>
@@ -121,6 +210,16 @@ export function ResearchNodeStylePanel() {
             ))}
           </SelectContent>
         </Select>
+
+        {/* Custom Label Input */}
+        {showCustomLabel && (
+          <CustomLabelInput
+            editor={editor}
+            researchNodes={researchNodes}
+            currentCustomLabel={currentCustomLabel}
+            currentSection={currentSection}
+          />
+        )}
       </div>
     </DefaultStylePanel>
   );

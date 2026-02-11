@@ -19,9 +19,6 @@ export function generatePreamble(options: LatexTemplateOptions = {}): string {
 
     return `\\documentclass[12pt,a4paper,UTF8]{ctexart}
 
-% 检查编译器
-\\RequireXeTeX
-
 % GB/T 7714 packages and settings
 \\usepackage[top=2.5cm,bottom=2.5cm,left=3cm,right=2.5cm]{geometry}
 \\usepackage{setspace}
@@ -97,6 +94,12 @@ export const SECTION_LATEX_MAPPING: Record<
         customFormat: (content: string) =>
             `\\begin{abstract}\n${content}\n\\end{abstract}`,
     },
+    keywords: {
+        command: 'keywords',
+        needsTitle: false,
+        customFormat: (content: string) =>
+            `\\noindent\\textbf{关键词：} ${content}`,
+    },
     introduction: {
         command: 'section',
         needsTitle: true,
@@ -125,6 +128,20 @@ export const SECTION_LATEX_MAPPING: Record<
         command: 'section',
         needsTitle: true,
     },
+    limitations: {
+        command: 'section',
+        needsTitle: true,
+    },
+    'future-work': {
+        command: 'section',
+        needsTitle: true,
+    },
+    acknowledgments: {
+        command: 'section',
+        needsTitle: false,
+        customFormat: (content: string) =>
+            `\\section*{致谢}\n\n${content}`,
+    },
     reference: {
         command: 'bibliography',
         needsTitle: false,
@@ -136,6 +153,16 @@ export const SECTION_LATEX_MAPPING: Record<
             return ''
         },
     },
+    appendix: {
+        command: 'section',
+        needsTitle: false,
+        customFormat: (content: string) =>
+            `\\appendix\n\\section{附录}\n\n${content}`,
+    },
+    custom: {
+        command: 'section',
+        needsTitle: true,
+    },
 }
 
 /**
@@ -145,6 +172,7 @@ export function getDefaultSectionTitle(sectionType: ResearchNodeType): string {
     const titles: Record<ResearchNodeType, string> = {
         title: '',
         abstract: '',
+        keywords: '',
         introduction: '引言',
         'related-work': '相关工作',
         method: '方法',
@@ -152,7 +180,12 @@ export function getDefaultSectionTitle(sectionType: ResearchNodeType): string {
         result: '结果',
         discussion: '讨论',
         conclusion: '结论',
+        limitations: '局限性',
+        'future-work': '未来工作',
+        acknowledgments: '致谢',
         reference: '参考文献',
+        appendix: '附录',
+        custom: '自定义章节',
     }
     return titles[sectionType]
 }

@@ -7,5 +7,12 @@ export type ResearchNodeShape = TLBaseShape<
         section: ResearchNodeType
         content: string
         order: number
+        customLabel?: string
+        metadata?: {
+            originalTitle?: string
+            sectionNumber?: string
+            imported?: boolean
+            importSource?: string
+        }
     }
 >
