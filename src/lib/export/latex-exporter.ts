@@ -18,7 +18,13 @@ interface ResearchNodeData {
     section: ResearchNodeType
     content: string
     order: number
+    level: number
+    parentId?: string
     customLabel?: string
+    tags?: string[]
+    metadata?: {
+        sectionNumber?: string
+    }
 }
 
 /**
@@ -35,7 +41,13 @@ export function collectResearchNodes(editor: Editor): ResearchNodeData[] {
                 section: researchShape.props.section,
                 content: researchShape.props.content,
                 order: researchShape.props.order,
+                level: researchShape.props.level || 1,
+                parentId: researchShape.props.parentId,
                 customLabel: researchShape.props.customLabel,
+                tags: researchShape.props.tags,
+                metadata: {
+                    sectionNumber: researchShape.props.metadata?.sectionNumber,
+                },
             })
         }
     }
@@ -96,7 +108,9 @@ export function escapeLatex(text: string): string {
 export function formatSectionContent(
     section: ResearchNodeType,
     content: string,
-    customLabel?: string
+    customLabel?: string,
+    level?: number,
+    sectionNumber?: string
 ): string {
     const mapping = SECTION_LATEX_MAPPING[section]
     const escapedContent = escapeLatex(content.trim())
@@ -109,7 +123,16 @@ export function formatSectionContent(
     // For sections that need titles
     if (mapping.needsTitle) {
         const title = customLabel || getDefaultSectionTitle(section)
-        return `\\${mapping.command}{${title}}\n\n${escapedContent}`
+        const sectionNumberPrefix = sectionNumber ? `${sectionNumber} ` : ''
+
+        // Determine section command based on level
+        let command = mapping.command
+        if (level && level > 1) {
+            const levelCommands = ['section', 'subsection', 'subsubsection', 'paragraph']
+            command = levelCommands[Math.min(level - 1, levelCommands.length - 1)]
+        }
+
+        return `\\${command}{${sectionNumberPrefix}${title}}\n\n${escapedContent}`
     }
 
     return escapedContent
@@ -120,8 +143,8 @@ export function formatSectionContent(
  */
 export function groupNodesBySection(
     nodes: ResearchNodeData[]
-): Map<ResearchNodeType, { content: string; customLabel?: string }> {
-    const grouped = new Map<ResearchNodeType, { content: string; customLabel?: string }>()
+): Map<ResearchNodeType, { content: string; customLabel?: string; level?: number; sectionNumber?: string }> {
+    const grouped = new Map<ResearchNodeType, { content: string; customLabel?: string; level?: number; sectionNumber?: string }>()
 
     for (const node of nodes) {
         const existing = grouped.get(node.section)
@@ -131,6 +154,8 @@ export function groupNodesBySection(
             grouped.set(node.section, {
                 content: node.content,
                 customLabel: node.customLabel,
+                level: node.level,
+                sectionNumber: node.metadata?.sectionNumber,
             })
         }
     }
@@ -169,14 +194,14 @@ export function generateLatexDocument(
     // Add abstract if available
     const abstractData = groupedNodes.get('abstract')
     if (abstractData) {
-        parts.push(formatSectionContent('abstract', abstractData.content, abstractData.customLabel))
+        parts.push(formatSectionContent('abstract', abstractData.content, abstractData.customLabel, abstractData.level, abstractData.sectionNumber))
         parts.push('')
     }
 
     // Add keywords if available
     const keywordsData = groupedNodes.get('keywords')
     if (keywordsData) {
-        parts.push(formatSectionContent('keywords', keywordsData.content, keywordsData.customLabel))
+        parts.push(formatSectionContent('keywords', keywordsData.content, keywordsData.customLabel, keywordsData.level, keywordsData.sectionNumber))
         parts.push('')
     }
 
@@ -196,7 +221,7 @@ export function generateLatexDocument(
     for (const sectionType of mainSections) {
         const sectionData = groupedNodes.get(sectionType)
         if (sectionData) {
-            parts.push(formatSectionContent(sectionType, sectionData.content, sectionData.customLabel))
+            parts.push(formatSectionContent(sectionType, sectionData.content, sectionData.customLabel, sectionData.level, sectionData.sectionNumber))
             parts.push('')
         }
     }
@@ -204,28 +229,28 @@ export function generateLatexDocument(
     // Add acknowledgments if available
     const acknowledgementsData = groupedNodes.get('acknowledgments')
     if (acknowledgementsData) {
-        parts.push(formatSectionContent('acknowledgments', acknowledgementsData.content, acknowledgementsData.customLabel))
+        parts.push(formatSectionContent('acknowledgments', acknowledgementsData.content, acknowledgementsData.customLabel, acknowledgementsData.level, acknowledgementsData.sectionNumber))
         parts.push('')
     }
 
     // Add references if available
     const referenceData = groupedNodes.get('reference')
     if (referenceData) {
-        parts.push(formatSectionContent('reference', referenceData.content, referenceData.customLabel))
+        parts.push(formatSectionContent('reference', referenceData.content, referenceData.customLabel, referenceData.level, referenceData.sectionNumber))
         parts.push('')
     }
 
     // Add appendix if available
     const appendixData = groupedNodes.get('appendix')
     if (appendixData) {
-        parts.push(formatSectionContent('appendix', appendixData.content, appendixData.customLabel))
+        parts.push(formatSectionContent('appendix', appendixData.content, appendixData.customLabel, appendixData.level, appendixData.sectionNumber))
         parts.push('')
     }
 
     // Add custom sections if available
     const customData = groupedNodes.get('custom')
     if (customData) {
-        parts.push(formatSectionContent('custom', customData.content, customData.customLabel))
+        parts.push(formatSectionContent('custom', customData.content, customData.customLabel, customData.level, customData.sectionNumber))
         parts.push('')
     }
 

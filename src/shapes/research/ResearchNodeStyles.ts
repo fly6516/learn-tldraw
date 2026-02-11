@@ -13,6 +13,7 @@ export const ResearchNodeSectionStyle = StyleProp.defineEnum(
     values: [
       "title",
       "abstract",
+      "keywords",
       "introduction",
       "related-work",
       "method",
@@ -20,7 +21,12 @@ export const ResearchNodeSectionStyle = StyleProp.defineEnum(
       "result",
       "discussion",
       "conclusion",
+      "limitations",
+      "future-work",
+      "acknowledgments",
       "reference",
+      "appendix",
+      "custom",
     ] as const,
   }
 );

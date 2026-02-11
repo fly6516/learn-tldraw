@@ -58,7 +58,7 @@ const uiOverrides: TLUiOverrides = {
         // 添加 Research Node 按钮
         tools["research-node"] = {
             id: "research-node",
-            icon: "note",
+            icon: "tool-note",
             label: "Research Node",
             kbd: "r",
             onSelect: () => {
