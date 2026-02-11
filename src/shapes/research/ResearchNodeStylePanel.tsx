@@ -34,7 +34,7 @@ function CustomLabelInput({
   const [localValue, setLocalValue] = React.useState(currentCustomLabel);
   const [isComposing, setIsComposing] = React.useState(false);
 
-  // Update local value when selection changes
+  // Update local value when selection changes or currentCustomLabel changes
   React.useEffect(() => {
     setLocalValue(currentCustomLabel);
   }, [currentCustomLabel]);
@@ -190,7 +190,7 @@ function HierarchyControl({
           </div>
           <Select
             key={`parent-${currentParentId}-${researchNodes.map(n => n.id).join('-')}`}
-            value={currentParentId}
+            value={currentParentId || "none"}
             onValueChange={(value) => {
               editor.markHistoryStoppingPoint();
 
@@ -205,7 +205,7 @@ function HierarchyControl({
                   type: shape.type,
                   props: {
                     ...shape.props,
-                    parentId: value || undefined,
+                    parentId: value === "none" ? undefined : value,
                     metadata: {
                       ...shape.props.metadata,
                       updatedAt: new Date().toISOString(),
@@ -226,7 +226,7 @@ function HierarchyControl({
               <SelectValue placeholder="None (top-level)" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="">None (top-level)</SelectItem>
+              <SelectItem value="none">None (top-level)</SelectItem>
               {potentialParents.map((parent) => {
                 const meta = RESEARCH_NODE_META[parent.props.section];
                 const label = parent.props.customLabel || meta.label;
@@ -447,6 +447,22 @@ export function ResearchNodeStylePanel() {
   const editor = useEditor();
   const styles = useRelevantStyles();
 
+  // Force re-render when selection changes
+  const [, forceUpdate] = React.useReducer(x => x + 1, 0);
+
+  React.useEffect(() => {
+    // Listen to selection changes
+    const handleSelectionChange = () => {
+      forceUpdate();
+    };
+
+    editor.on('change', handleSelectionChange);
+
+    return () => {
+      editor.off('change', handleSelectionChange);
+    };
+  }, [editor]);
+
   // This check is important - if no styles, return default panel
   if (!styles) {
     return (
@@ -470,6 +486,9 @@ export function ResearchNodeStylePanel() {
     );
   }
 
+  // Create a unique key based on selected node IDs to force re-render on selection change
+  const selectionKey = researchNodes.map(n => n.id).sort().join('-');
+
   // Get current section from props (not style)
   const sections = researchNodes.map((node) => node.props.section);
   const allSame = sections.every((s) => s === sections[0]);
@@ -489,6 +508,7 @@ export function ResearchNodeStylePanel() {
           Paper Section
         </div>
         <Select
+          key={`section-${selectionKey}`}
           value={currentSection}
           onValueChange={(value) => {
             editor.markHistoryStoppingPoint();
@@ -530,7 +550,7 @@ export function ResearchNodeStylePanel() {
           </SelectTrigger>
           <SelectContent className="min-w-[280px]">
             {!allSame && (
-              <SelectItem value="" disabled>
+              <SelectItem value="mixed" disabled>
                 Mixed
               </SelectItem>
             )}
@@ -554,6 +574,7 @@ export function ResearchNodeStylePanel() {
         {/* Custom Label Input */}
         {showCustomLabel && (
           <CustomLabelInput
+            key={`label-${selectionKey}`}
             editor={editor}
             currentCustomLabel={currentCustomLabel}
             currentSection={currentSection}
@@ -562,12 +583,14 @@ export function ResearchNodeStylePanel() {
 
         {/* Hierarchy Control */}
         <HierarchyControl
+          key={`hierarchy-${selectionKey}`}
           editor={editor}
           researchNodes={researchNodes}
         />
 
         {/* Tags Control */}
         <TagsControl
+          key={`tags-${selectionKey}`}
           editor={editor}
           researchNodes={researchNodes}
         />

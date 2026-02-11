@@ -15,12 +15,13 @@ interface LatexRenderedViewProps {
 function parseLatexDocument(latex: string) {
     const lines = latex.split("\n");
     const sections: Array<{
-        type: "title" | "abstract" | "section" | "paragraph" | "math";
+        type: "title" | "abstract" | "keywords" | "section" | "paragraph" | "math" | "bibliography";
         content: string;
         level?: number;
     }> = [];
 
     let inAbstract = false;
+    let inBibliography = false;
     let inDocument = false;
     let currentParagraph = "";
 
@@ -65,8 +66,37 @@ function parseLatexDocument(latex: string) {
             continue;
         }
 
-        // Extract sections
-        const sectionMatch = line.match(/\\section\{([^}]+)}/);
+        // Handle bibliography
+        if (line.includes("\\begin{thebibliography}")) {
+            inBibliography = true;
+            if (currentParagraph) {
+                sections.push({ type: "paragraph", content: currentParagraph.trim() });
+                currentParagraph = "";
+            }
+            continue;
+        }
+        if (line.includes("\\end{thebibliography}")) {
+            inBibliography = false;
+            if (currentParagraph) {
+                sections.push({ type: "bibliography", content: currentParagraph.trim() });
+                currentParagraph = "";
+            }
+            continue;
+        }
+
+        // Handle keywords (special format)
+        if (line.includes("\\noindent\\textbf{关键词：}") || line.includes("\\noindent\\textbf{Keywords:}")) {
+            if (currentParagraph) {
+                sections.push({ type: "paragraph", content: currentParagraph.trim() });
+                currentParagraph = "";
+            }
+            const keywordsContent = line.replace(/\\noindent\\textbf\{[^}]+}\s*/, "");
+            sections.push({ type: "keywords", content: keywordsContent });
+            continue;
+        }
+
+        // Extract sections (including numbered and unnumbered)
+        const sectionMatch = line.match(/\\section\*?\{([^}]+)}/);
         if (sectionMatch) {
             if (currentParagraph) {
                 sections.push({ type: "paragraph", content: currentParagraph.trim() });
@@ -76,13 +106,23 @@ function parseLatexDocument(latex: string) {
             continue;
         }
 
-        const subsectionMatch = line.match(/\\subsection\{([^}]+)}/);
+        const subsectionMatch = line.match(/\\subsection\*?\{([^}]+)}/);
         if (subsectionMatch) {
             if (currentParagraph) {
                 sections.push({ type: "paragraph", content: currentParagraph.trim() });
                 currentParagraph = "";
             }
             sections.push({ type: "section", content: subsectionMatch[1], level: 2 });
+            continue;
+        }
+
+        const subsubsectionMatch = line.match(/\\subsubsection\*?\{([^}]+)}/);
+        if (subsubsectionMatch) {
+            if (currentParagraph) {
+                sections.push({ type: "paragraph", content: currentParagraph.trim() });
+                currentParagraph = "";
+            }
+            sections.push({ type: "section", content: subsubsectionMatch[1], level: 3 });
             continue;
         }
 
@@ -98,23 +138,40 @@ function parseLatexDocument(latex: string) {
             continue;
         }
 
+        // Skip LaTeX commands that don't need rendering
+        if (line.startsWith("\\") && (
+            line.includes("\\appendix") ||
+            line.includes("\\bibliographystyle") ||
+            line.includes("\\bibliography{")
+        )) {
+            continue;
+        }
+
         // Accumulate paragraph content
         if (line && !line.startsWith("%")) {
-            if (inAbstract) {
+            if (inAbstract || inBibliography) {
                 currentParagraph += (currentParagraph ? " " : "") + line;
             } else {
                 currentParagraph += (currentParagraph ? " " : "") + line;
             }
         } else if (currentParagraph && line === "") {
             // Empty line marks end of paragraph
-            sections.push({ type: "paragraph", content: currentParagraph.trim() });
-            currentParagraph = "";
+            if (inBibliography) {
+                // Don't push yet, accumulate all bibliography content
+            } else {
+                sections.push({ type: "paragraph", content: currentParagraph.trim() });
+                currentParagraph = "";
+            }
         }
     }
 
     // Add remaining paragraph
     if (currentParagraph) {
-        sections.push({ type: "paragraph", content: currentParagraph.trim() });
+        if (inBibliography) {
+            sections.push({ type: "bibliography", content: currentParagraph.trim() });
+        } else {
+            sections.push({ type: "paragraph", content: currentParagraph.trim() });
+        }
     }
 
     return sections;
@@ -206,6 +263,15 @@ export function LatexRenderedView({ latexContent }: LatexRenderedViewProps) {
                                     </p>
                                 </div>
                             );
+                        case "keywords":
+                            return (
+                                <div key={index} className="mb-6">
+                                    <p className="text-sm">
+                                        <strong>关键词：</strong>
+                                        {renderTextWithMath(section.content)}
+                                    </p>
+                                </div>
+                            );
                         case "section":
                             if (section.level === 1) {
                                 return (
@@ -213,11 +279,17 @@ export function LatexRenderedView({ latexContent }: LatexRenderedViewProps) {
                                         {renderTextWithMath(section.content)}
                                     </h2>
                                 );
-                            } else {
+                            } else if (section.level === 2) {
                                 return (
                                     <h3 key={index} className="mb-3 mt-4 text-xl font-semibold">
                                         {renderTextWithMath(section.content)}
                                     </h3>
+                                );
+                            } else {
+                                return (
+                                    <h4 key={index} className="mb-2 mt-3 text-lg font-medium">
+                                        {renderTextWithMath(section.content)}
+                                    </h4>
                                 );
                             }
                         case "paragraph":
@@ -230,6 +302,23 @@ export function LatexRenderedView({ latexContent }: LatexRenderedViewProps) {
                             return (
                                 <div key={index} className="my-4 overflow-x-auto text-center">
                                     <BlockMath math={section.content} />
+                                </div>
+                            );
+                        case "bibliography":
+                            return (
+                                <div key={index} className="mt-8">
+                                    <h2 className="mb-4 text-2xl font-bold">参考文献</h2>
+                                    <div className="space-y-2 text-sm">
+                                        {section.content.split('\n').map((ref, refIndex) => {
+                                            const trimmedRef = ref.trim();
+                                            if (!trimmedRef) return null;
+                                            return (
+                                                <p key={refIndex} className="pl-4 text-justify">
+                                                    {renderTextWithMath(trimmedRef)}
+                                                </p>
+                                            );
+                                        })}
+                                    </div>
                                 </div>
                             );
                         default:
