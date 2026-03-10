@@ -11,6 +11,7 @@ import { ResearchNodeShapeUtil } from "@/shapes/research/ResearchNodeShapeUtil";
 import { ResearchNodeStylePanel } from "@/shapes/research/ResearchNodeStylePanel";
 import { exportResearchToLatex, exportResearchToMarkdown, exportResearchToPdf } from "@/lib/export/export-actions";
 import { LatexPreviewDialog } from "@/components/research/LatexPreviewDialog";
+import { LatexImportDialog } from "@/components/research/LatexImportDialog";
 
 import {
     DefaultKeyboardShortcutsDialog,
@@ -69,6 +70,16 @@ const uiOverrides: TLUiOverrides = {
         return tools;
     },
     actions(editor, actions) {
+        // Add import LaTeX action
+        actions["import-latex"] = {
+            id: "import-latex",
+            label: "Import LaTeX",
+            kbd: "$!i",
+            onSelect() {
+                const event = new CustomEvent("open-latex-import");
+                window.dispatchEvent(event);
+            },
+        };
         // Add preview LaTeX action
         actions["preview-latex"] = {
             id: "preview-latex",
@@ -112,6 +123,7 @@ const uiOverrides: TLUiOverrides = {
     translations: {
         en: {
             "tool.research-node": "Research Node",
+            "action.import-latex": "Import LaTeX",
             "action.preview-latex": "Preview LaTeX",
             "action.export-latex": "Export to LaTeX",
             "action.export-markdown": "Export to Markdown",
@@ -119,6 +131,7 @@ const uiOverrides: TLUiOverrides = {
         },
         zh: {
             "tool.research-node": "科研节点",
+            "action.import-latex": "导入 LaTeX",
             "action.preview-latex": "预览 LaTeX",
             "action.export-latex": "导出为 LaTeX",
             "action.export-markdown": "导出为 Markdown",
@@ -150,6 +163,11 @@ const components: TLComponents = {
     MainMenu: () => {
         return (
             <DefaultMainMenu>
+                <TldrawUiMenuGroup id="import">
+                    <TldrawUiMenuSubmenu id="import-submenu" label="Import">
+                        <TldrawUiMenuActionItem actionId="import-latex" />
+                    </TldrawUiMenuSubmenu>
+                </TldrawUiMenuGroup>
                 <TldrawUiMenuGroup id="preview">
                     <TldrawUiMenuSubmenu id="preview-submenu" label="Preview">
                         <TldrawUiMenuActionItem actionId="preview-latex" />
@@ -173,6 +191,7 @@ const tools = [ResearchNodeTool];
 
 function ResearchCanvas() {
     const [previewOpen, setPreviewOpen] = React.useState(false);
+    const [importOpen, setImportOpen] = React.useState(false);
     const [editor, setEditor] = React.useState<Editor | null>(null);
 
     React.useEffect(() => {
@@ -180,9 +199,15 @@ function ResearchCanvas() {
             setPreviewOpen(true);
         };
 
+        const handleOpenImport = () => {
+            setImportOpen(true);
+        };
+
         window.addEventListener("open-latex-preview", handleOpenPreview);
+        window.addEventListener("open-latex-import", handleOpenImport);
         return () => {
             window.removeEventListener("open-latex-preview", handleOpenPreview);
+            window.removeEventListener("open-latex-import", handleOpenImport);
         };
     }, []);
 
@@ -198,11 +223,18 @@ function ResearchCanvas() {
                 components={components}
             />
             {editor && (
-                <LatexPreviewDialog
-                    editor={editor}
-                    open={previewOpen}
-                    onOpenChange={setPreviewOpen}
-                />
+                <>
+                    <LatexImportDialog
+                        editor={editor}
+                        open={importOpen}
+                        onOpenChange={setImportOpen}
+                    />
+                    <LatexPreviewDialog
+                        editor={editor}
+                        open={previewOpen}
+                        onOpenChange={setPreviewOpen}
+                    />
+                </>
             )}
         </>
     );
