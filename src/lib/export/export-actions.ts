@@ -3,6 +3,9 @@ import { exportToLatex } from './latex-exporter'
 import { exportToMarkdown } from './markdown-exporter'
 import { exportToPdf } from './pdf-exporter'
 import JSZip from 'jszip'
+import type { ProjectFileSystem, ResearchNodeData } from '@/lib/project/types'
+import { collectResearchNodes } from './latex-exporter'
+import { exportToLatexZip } from '@/lib/project/exporter'
 
 /**
  * Download a file in the browser
@@ -24,6 +27,49 @@ export function downloadFile(content: string, filename: string, mimeType: string
     // Cleanup
     document.body.removeChild(link)
     URL.revokeObjectURL(url)
+}
+
+/**
+ * Export research nodes to LaTeX using file system and download as zip file
+ */
+export async function exportResearchToLatexWithFileSystem(
+    editor: Editor,
+    fileSystem: ProjectFileSystem | null
+): Promise<void> {
+    try {
+        if (!fileSystem) {
+            // Fallback to old method if no file system
+            return exportResearchToLatex(editor)
+        }
+
+        // Collect nodes from editor
+        const nodes = collectResearchNodes(editor) as ResearchNodeData[]
+
+        // Export to zip using the enhanced exporter
+        const zipBlob = await exportToLatexZip(nodes, fileSystem, {
+            format: 'zip',
+            includeFigures: true,
+            includeReferences: true,
+        })
+
+        // Download the zip file
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)
+        const projectName = fileSystem.metadata.projectName || `research-paper-${timestamp}`
+
+        const url = URL.createObjectURL(zipBlob)
+        const link = document.createElement('a')
+        link.href = url
+        link.download = `${projectName}.zip`
+        document.body.appendChild(link)
+        link.click()
+        document.body.removeChild(link)
+        URL.revokeObjectURL(url)
+
+        console.log('LaTeX export with file system successful')
+    } catch (error) {
+        console.error('Failed to export LaTeX with file system:', error)
+        alert(`导出失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    }
 }
 
 /**

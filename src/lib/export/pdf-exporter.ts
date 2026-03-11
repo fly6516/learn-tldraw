@@ -18,6 +18,7 @@ function getSectionTitle(sectionType: ResearchNodeType): string {
     const titles: Record<ResearchNodeType, string> = {
         title: '',
         abstract: '摘要',
+        keywords: '关键词',
         introduction: '1 引言',
         'related-work': '2 相关工作',
         method: '3 方法',
@@ -25,7 +26,12 @@ function getSectionTitle(sectionType: ResearchNodeType): string {
         result: '5 结果',
         discussion: '6 讨论',
         conclusion: '7 结论',
+        limitations: '局限性',
+        'future-work': '未来工作',
+        acknowledgments: '致谢',
         reference: '参考文献',
+        appendix: '附录',
+        custom: '自定义',
     }
     return titles[sectionType]
 }
@@ -149,9 +155,9 @@ function generatePdfHtml(editor: Editor, options: PdfExportOptions = {}): string
 `)
 
     // Add title
-    const titleContent = groupedNodes.get('title')
-    if (titleContent) {
-        parts.push(`    <div class="title">${escapeHtml(titleContent)}</div>`)
+    const titleData = groupedNodes.get('title')
+    if (titleData) {
+        parts.push(`    <div class="title">${escapeHtml(titleData.content)}</div>`)
     }
 
     // Add author
@@ -160,10 +166,10 @@ function generatePdfHtml(editor: Editor, options: PdfExportOptions = {}): string
     }
 
     // Add abstract
-    const abstractContent = groupedNodes.get('abstract')
-    if (abstractContent) {
+    const abstractData = groupedNodes.get('abstract')
+    if (abstractData) {
         parts.push(`    <div class="abstract-title">摘要</div>`)
-        parts.push(`    <div class="abstract-content">${escapeHtml(abstractContent)}</div>`)
+        parts.push(`    <div class="abstract-content">${escapeHtml(abstractData.content)}</div>`)
     }
 
     // Add main sections
@@ -178,14 +184,14 @@ function generatePdfHtml(editor: Editor, options: PdfExportOptions = {}): string
     ]
 
     for (const sectionType of mainSections) {
-        const sectionContent = groupedNodes.get(sectionType)
-        if (sectionContent) {
+        const sectionData = groupedNodes.get(sectionType)
+        if (sectionData) {
             const sectionTitle = getSectionTitle(sectionType)
             parts.push(`    <div class="section-title">${escapeHtml(sectionTitle)}</div>`)
             parts.push(`    <div class="section-content">`)
 
             // Split into paragraphs
-            const paragraphs = sectionContent.split('\n\n').filter(p => p.trim())
+            const paragraphs = sectionData.content.split('\n\n').filter(p => p.trim())
             paragraphs.forEach(paragraph => {
                 parts.push(`        <p>${escapeHtml(paragraph.trim())}</p>`)
             })
@@ -195,11 +201,11 @@ function generatePdfHtml(editor: Editor, options: PdfExportOptions = {}): string
     }
 
     // Add references
-    const referenceContent = groupedNodes.get('reference')
-    if (referenceContent) {
+    const referenceData = groupedNodes.get('reference')
+    if (referenceData) {
         parts.push(`    <div class="reference-title">参考文献</div>`)
 
-        const references = referenceContent.split('\n').filter(line => line.trim())
+        const references = referenceData.content.split('\n').filter(line => line.trim())
         references.forEach((ref, index) => {
             parts.push(`    <div class="reference-item">[${index + 1}] ${escapeHtml(ref.trim())}</div>`)
         })

@@ -1,15 +1,17 @@
 "use client";
 
 import * as React from "react";
-import {Editor, Tldraw, createShapeId} from "tldraw";
+import {Editor, Tldraw, createShapeId, TLShape} from "tldraw";
 import "tldraw/tldraw.css";
 
 import { ResearchNodeTool } from "@/shapes/research/ResearchNodeTool";
 import { ResearchNodeShapeUtil } from "@/shapes/research/ResearchNodeShapeUtil";
 import { ResearchNodeStylePanel } from "@/shapes/research/ResearchNodeStylePanel";
-import { exportResearchToLatex, exportResearchToMarkdown, exportResearchToPdf } from "@/lib/export/export-actions";
+import { exportResearchToLatex, exportResearchToMarkdown, exportResearchToPdf, exportResearchToLatexWithFileSystem } from "@/lib/export/export-actions";
 import { LatexPreviewDialog } from "@/components/research/LatexPreviewDialog";
 import { LatexImportDialog } from "@/components/research/LatexImportDialog";
+import { ProjectFileSystemProvider, useProjectFileSystem } from "@/contexts/ProjectFileSystemContext";
+import { ProjectPanel } from "@/components/project/ProjectPanel";
 import type { ResearchNodeShape } from "@/shapes/research/ResearchNodeShape";
 import type { ResearchNodeType } from "@/app/research/research-node";
 
@@ -28,6 +30,11 @@ import {
     TldrawUiMenuSubmenu,
     TldrawUiMenuActionItem,
 } from "tldraw";
+
+// Type guard for ResearchNodeShape
+function isResearchNodeShape(shape: TLShape): shape is ResearchNodeShape {
+    return shape.type === 'research-node';
+}
 
 const uiOverrides: TLUiOverrides = {
     tools(editor, tools) {
@@ -69,7 +76,7 @@ const uiOverrides: TLUiOverrides = {
 
         return tools;
     },
-    actions(editor, actions) {
+    actions(editor, actions, helpers) {
         // Add import LaTeX action
         actions["import-latex"] = {
             id: "import-latex",
@@ -117,6 +124,16 @@ const uiOverrides: TLUiOverrides = {
                 await exportResearchToPdf(editor);
             },
         };
+        // Add toggle file panel action
+        actions["toggle-file-panel"] = {
+            id: "toggle-file-panel",
+            label: "Toggle File Panel",
+            kbd: "$shift+f",
+            onSelect() {
+                const event = new CustomEvent("toggle-file-panel");
+                window.dispatchEvent(event);
+            },
+        };
         return actions;
     },
     translations: {
@@ -127,6 +144,7 @@ const uiOverrides: TLUiOverrides = {
             "action.export-latex": "Export to LaTeX",
             "action.export-markdown": "Export to Markdown",
             "action.export-pdf": "Export to PDF",
+            "action.toggle-file-panel": "Toggle File Panel",
         },
         zh: {
             "tool.research-node": "科研节点",
@@ -135,6 +153,7 @@ const uiOverrides: TLUiOverrides = {
             "action.export-latex": "导出为 LaTeX",
             "action.export-markdown": "导出为 Markdown",
             "action.export-pdf": "导出为 PDF",
+            "action.toggle-file-panel": "切换文件面板",
         },
     },
 };
@@ -177,6 +196,11 @@ const components: TLComponents = {
                         <TldrawUiMenuActionItem actionId="export-markdown" />
                         <TldrawUiMenuActionItem actionId="export-latex" />
                         <TldrawUiMenuActionItem actionId="export-pdf" />
+                    </TldrawUiMenuSubmenu>
+                </TldrawUiMenuGroup>
+                <TldrawUiMenuGroup id="project">
+                    <TldrawUiMenuSubmenu id="project-submenu" label="Project">
+                        <TldrawUiMenuActionItem actionId="toggle-file-panel" />
                     </TldrawUiMenuSubmenu>
                 </TldrawUiMenuGroup>
             </DefaultMainMenu>
@@ -345,6 +369,72 @@ function ResearchDevCanvas() {
     const [importOpen, setImportOpen] = React.useState(false);
     const [editor, setEditor] = React.useState<Editor | null>(null);
     const [dataLoaded, setDataLoaded] = React.useState(false);
+    const [showFilePanel, setShowFilePanel] = React.useState(false);
+    const { fileSystem, initializeProject, setFileSystem } = useProjectFileSystem();
+
+    // Initialize file system on mount
+    React.useEffect(() => {
+        if (!fileSystem) {
+            initializeProject(undefined, 'My Research Project');
+        }
+    }, [fileSystem, initializeProject]);
+
+    // Sync editor changes to file system
+    React.useEffect(() => {
+        if (!editor || !fileSystem) return;
+
+        const handleChange = () => {
+            // Collect nodes from editor
+            const shapes = editor.getCurrentPageShapes();
+            const researchNodes = shapes
+                .filter(isResearchNodeShape)
+                .map((shape) => ({
+                    section: shape.props.section,
+                    content: shape.props.content,
+                    order: shape.props.order,
+                    level: shape.props.level || 1,
+                    parentId: shape.props.parentId,
+                    customLabel: shape.props.customLabel,
+                    tags: shape.props.tags,
+                    metadata: {
+                        sectionNumber: shape.props.metadata?.sectionNumber,
+                    },
+                }));
+
+            // Update main.tex in file system
+            import('@/lib/project/file-system').then(({ updateMainTex }) => {
+                const updatedFs = updateMainTex(fileSystem, researchNodes);
+                setFileSystem(updatedFs);
+            });
+        };
+
+        // Listen to store changes
+        const unsubscribe = editor.store.listen(handleChange, { scope: 'document' });
+
+        return () => {
+            unsubscribe();
+        };
+    }, [editor, fileSystem, setFileSystem]);
+
+    // Create dynamic overrides that can access fileSystem
+    const dynamicOverrides = React.useMemo<TLUiOverrides>(() => ({
+        ...uiOverrides,
+        actions(editor, actions, helpers) {
+            const baseActions = uiOverrides.actions?.(editor, actions, helpers) || actions;
+
+            // Override export-latex to use file system
+            baseActions["export-latex"] = {
+                id: "export-latex",
+                label: "Export to LaTeX",
+                kbd: "$e",
+                async onSelect() {
+                    await exportResearchToLatexWithFileSystem(editor, fileSystem);
+                },
+            };
+
+            return baseActions;
+        },
+    }), [fileSystem]);
 
     React.useEffect(() => {
         const handleOpenPreview = () => {
@@ -355,11 +445,17 @@ function ResearchDevCanvas() {
             setImportOpen(true);
         };
 
+        const handleToggleFilePanel = () => {
+            setShowFilePanel(prev => !prev);
+        };
+
         window.addEventListener("open-latex-preview", handleOpenPreview);
         window.addEventListener("open-latex-import", handleOpenImport);
+        window.addEventListener("toggle-file-panel", handleToggleFilePanel);
         return () => {
             window.removeEventListener("open-latex-preview", handleOpenPreview);
             window.removeEventListener("open-latex-import", handleOpenImport);
+            window.removeEventListener("toggle-file-panel", handleToggleFilePanel);
         };
     }, []);
 
@@ -376,15 +472,29 @@ function ResearchDevCanvas() {
 
     return (
         <>
-            <Tldraw
-                onMount={(editor) => {
-                    setEditor(editor);
-                }}
-                shapeUtils={shapeUtils}
-                tools={tools}
-                overrides={uiOverrides}
-                components={components}
-            />
+            <div style={{ display: 'flex', width: '100%', height: '100%' }}>
+                <div style={{ flex: 1, position: 'relative' }}>
+                    <Tldraw
+                        onMount={(editor) => {
+                            setEditor(editor);
+                        }}
+                        shapeUtils={shapeUtils}
+                        tools={tools}
+                        overrides={dynamicOverrides}
+                        components={components}
+                    />
+                </div>
+                {showFilePanel && (
+                    <div style={{
+                        width: '320px',
+                        height: '100%',
+                        borderLeft: '1px solid #e5e7eb',
+                        background: 'white'
+                    }}>
+                        <ProjectPanel />
+                    </div>
+                )}
+            </div>
             {editor && (
                 <>
                     <LatexImportDialog
@@ -421,8 +531,10 @@ function ResearchDevCanvas() {
 
 export default function ResearchDevPage() {
     return (
-        <div className="fixed inset-0" style={{background: "#f9f9f9"}}>
-            <ResearchDevCanvas />
-        </div>
+        <ProjectFileSystemProvider>
+            <div className="fixed inset-0" style={{background: "#f9f9f9"}}>
+                <ResearchDevCanvas />
+            </div>
+        </ProjectFileSystemProvider>
     );
 }

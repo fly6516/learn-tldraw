@@ -13,6 +13,8 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { importLatexToEditor, importLatexZip, validateLatexContent } from "@/lib/import/latex-importer";
+import { importLatexZip as importLatexZipToFileSystem } from "@/lib/project/importer";
+import { useProjectFileSystem } from "@/contexts/ProjectFileSystemContext";
 
 interface LatexImportDialogProps {
     editor: Editor;
@@ -31,6 +33,7 @@ export function LatexImportDialog({
     const [uploadedFileName, setUploadedFileName] = React.useState<string | null>(null);
     const texFileInputRef = React.useRef<HTMLInputElement>(null);
     const zipFileInputRef = React.useRef<HTMLInputElement>(null);
+    const { setFileSystem } = useProjectFileSystem();
 
     const handleImport = () => {
         setError(null);
@@ -86,6 +89,26 @@ export function LatexImportDialog({
         setUploadedFileName(file.name);
 
         try {
+            // Import to file system
+            const result = await importLatexZipToFileSystem(file);
+
+            // Create file system from import result
+            const { createProjectFileSystem } = await import('@/lib/project/file-system');
+            const fs = createProjectFileSystem(result.template, file.name.replace('.zip', ''));
+
+            // Add figures if any
+            if (result.files.figures) {
+                const { addFigure } = await import('@/lib/project/file-system');
+                let updatedFs = fs;
+                for (const [name, blob] of result.files.figures.entries()) {
+                    updatedFs = addFigure(updatedFs, name, blob);
+                }
+                setFileSystem(updatedFs);
+            } else {
+                setFileSystem(fs);
+            }
+
+            // Import nodes to editor
             await importLatexZip(editor, file);
 
             // Success - close dialog

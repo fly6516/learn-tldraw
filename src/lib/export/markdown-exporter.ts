@@ -19,6 +19,7 @@ function getMarkdownSectionTitle(sectionType: ResearchNodeType, level: number = 
     const titles: Record<ResearchNodeType, string> = {
         title: '',
         abstract: '摘要',
+        keywords: '关键词',
         introduction: '引言',
         'related-work': '相关工作',
         method: '方法',
@@ -26,7 +27,12 @@ function getMarkdownSectionTitle(sectionType: ResearchNodeType, level: number = 
         result: '结果',
         discussion: '讨论',
         conclusion: '结论',
+        limitations: '局限性',
+        'future-work': '未来工作',
+        acknowledgments: '致谢',
         reference: '参考文献',
+        appendix: '附录',
+        custom: '自定义',
     }
 
     const title = titles[sectionType]
@@ -111,9 +117,9 @@ export function generateMarkdownDocument(
     const parts: string[] = []
 
     // Add title
-    const titleContent = groupedNodes.get('title')
-    if (titleContent) {
-        parts.push(formatMarkdownSection('title', titleContent))
+    const titleData = groupedNodes.get('title')
+    if (titleData) {
+        parts.push(formatMarkdownSection('title', titleData.content))
     }
 
     // Add author if provided
@@ -135,9 +141,9 @@ export function generateMarkdownDocument(
     }
 
     // Add abstract
-    const abstractContent = groupedNodes.get('abstract')
-    if (abstractContent) {
-        parts.push(formatMarkdownSection('abstract', abstractContent))
+    const abstractData = groupedNodes.get('abstract')
+    if (abstractData) {
+        parts.push(formatMarkdownSection('abstract', abstractData.content))
     }
 
     // Add main sections
@@ -152,16 +158,16 @@ export function generateMarkdownDocument(
     ]
 
     for (const sectionType of mainSections) {
-        const sectionContent = groupedNodes.get(sectionType)
-        if (sectionContent) {
-            parts.push(formatMarkdownSection(sectionType, sectionContent))
+        const sectionData = groupedNodes.get(sectionType)
+        if (sectionData) {
+            parts.push(formatMarkdownSection(sectionType, sectionData.content))
         }
     }
 
     // Add references
-    const referenceContent = groupedNodes.get('reference')
-    if (referenceContent) {
-        parts.push(formatMarkdownSection('reference', referenceContent))
+    const referenceData = groupedNodes.get('reference')
+    if (referenceData) {
+        parts.push(formatMarkdownSection('reference', referenceData.content))
     }
 
     return parts.join('\n')
