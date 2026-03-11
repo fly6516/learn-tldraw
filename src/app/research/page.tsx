@@ -12,7 +12,7 @@ import { ResearchNodeStylePanel } from "@/shapes/research/ResearchNodeStylePanel
 import type { ResearchNodeShape } from "@/shapes/research/ResearchNodeShape";
 import type { TLShape } from "tldraw";
 import { exportResearchToLatex, exportResearchToMarkdown, exportResearchToPdf, exportResearchToLatexWithFileSystem } from "@/lib/export/export-actions";
-import { LatexPreviewDialog } from "@/components/research/LatexPreviewDialog";
+import { LatexPreviewPanel } from "@/components/research/LatexPreviewPanel";
 import { LatexImportDialog } from "@/components/research/LatexImportDialog";
 import { ProjectFileSystemProvider, useProjectFileSystem } from "@/contexts/ProjectFileSystemContext";
 import { ProjectPanel } from "@/components/project/ProjectPanel";
@@ -93,10 +93,9 @@ const uiOverrides: TLUiOverrides = {
         actions["preview-latex"] = {
             id: "preview-latex",
             label: "Preview LaTeX",
-            kbd: "$!p",
+            kbd: "$shift+p",
             onSelect() {
-                // This will be handled by the component state
-                const event = new CustomEvent("open-latex-preview");
+                const event = new CustomEvent("toggle-latex-panel");
                 window.dispatchEvent(event);
             },
         };
@@ -220,6 +219,7 @@ function ResearchCanvas() {
     const [importOpen, setImportOpen] = React.useState(false);
     const [editor, setEditor] = React.useState<Editor | null>(null);
     const [showFilePanel, setShowFilePanel] = React.useState(false);
+    const [showLatexPanel, setShowLatexPanel] = React.useState(false);
     const { fileSystem, initializeProject, setFileSystem } = useProjectFileSystem();
 
     // Initialize file system on mount
@@ -288,7 +288,7 @@ function ResearchCanvas() {
 
     React.useEffect(() => {
         const handleOpenPreview = () => {
-            setPreviewOpen(true);
+            setShowLatexPanel(prev => !prev);
         };
 
         const handleOpenImport = () => {
@@ -299,19 +299,35 @@ function ResearchCanvas() {
             setShowFilePanel(prev => !prev);
         };
 
+        const handleToggleLatexPanel = () => {
+            setShowLatexPanel(prev => !prev);
+        };
+
         window.addEventListener("open-latex-preview", handleOpenPreview);
         window.addEventListener("open-latex-import", handleOpenImport);
         window.addEventListener("toggle-file-panel", handleToggleFilePanel);
+        window.addEventListener("toggle-latex-panel", handleToggleLatexPanel);
         return () => {
             window.removeEventListener("open-latex-preview", handleOpenPreview);
             window.removeEventListener("open-latex-import", handleOpenImport);
             window.removeEventListener("toggle-file-panel", handleToggleFilePanel);
+            window.removeEventListener("toggle-latex-panel", handleToggleLatexPanel);
         };
     }, []);
 
     return (
         <>
             <div style={{ display: 'flex', width: '100%', height: '100%' }}>
+                {showFilePanel && (
+                    <div style={{
+                        width: '320px',
+                        height: '100%',
+                        borderRight: '1px solid #e5e7eb',
+                        background: 'white'
+                    }}>
+                        <ProjectPanel />
+                    </div>
+                )}
                 <div style={{ flex: 1, position: 'relative' }}>
                     <Tldraw
                         onMount={(editor) => {
@@ -323,30 +339,23 @@ function ResearchCanvas() {
                         components={components}
                     />
                 </div>
-                {showFilePanel && (
+                {showLatexPanel && editor && (
                     <div style={{
-                        width: '320px',
+                        width: '480px',
                         height: '100%',
                         borderLeft: '1px solid #e5e7eb',
                         background: 'white'
                     }}>
-                        <ProjectPanel />
+                        <LatexPreviewPanel editor={editor} onClose={() => setShowLatexPanel(false)} />
                     </div>
                 )}
             </div>
             {editor && (
-                <>
-                    <LatexImportDialog
-                        editor={editor}
-                        open={importOpen}
-                        onOpenChange={setImportOpen}
-                    />
-                    <LatexPreviewDialog
-                        editor={editor}
-                        open={previewOpen}
-                        onOpenChange={setPreviewOpen}
-                    />
-                </>
+                <LatexImportDialog
+                    editor={editor}
+                    open={importOpen}
+                    onOpenChange={setImportOpen}
+                />
             )}
         </>
     );
