@@ -1,6 +1,8 @@
 import type { Editor } from 'tldraw'
 import type { ResearchNodeType } from '@/app/research/research-node'
 import { collectResearchNodes, sortNodesBySection, groupNodesBySection } from './latex-exporter'
+import { collectArrowOrderedNodes } from './arrow-ordering'
+import type { ResearchNodeShape } from '@/shapes/research/ResearchNodeShape'
 
 /**
  * PDF export options
@@ -14,18 +16,19 @@ export interface PdfExportOptions {
 /**
  * Get section title for PDF
  */
-function getSectionTitle(sectionType: ResearchNodeType): string {
+function getSectionTitle(sectionType: ResearchNodeType, customLabel?: string): string {
+    if (customLabel) return customLabel
     const titles: Record<ResearchNodeType, string> = {
         title: '',
         abstract: '摘要',
         keywords: '关键词',
-        introduction: '1 引言',
-        'related-work': '2 相关工作',
-        method: '3 方法',
-        experiment: '4 实验',
-        result: '5 结果',
-        discussion: '6 讨论',
-        conclusion: '7 结论',
+        introduction: '引言',
+        'related-work': '相关工作',
+        method: '方法',
+        experiment: '实验',
+        result: '结果',
+        discussion: '讨论',
+        conclusion: '结论',
         limitations: '局限性',
         'future-work': '未来工作',
         acknowledgments: '致谢',
@@ -37,186 +40,162 @@ function getSectionTitle(sectionType: ResearchNodeType): string {
 }
 
 /**
- * Generate HTML content for PDF
+ * PDF HTML head with GB/T 7714 styles
  */
-function generatePdfHtml(editor: Editor, options: PdfExportOptions = {}): string {
-    // Collect and sort nodes
-    const nodes = collectResearchNodes(editor)
-
-    if (nodes.length === 0) {
-        throw new Error('没有找到可导出的研究节点')
-    }
-
-    const sortedNodes = sortNodesBySection(nodes)
-    const groupedNodes = groupNodesBySection(sortedNodes)
-
-    // Build HTML
-    const parts: string[] = []
-
-    // Add CSS for GB/T 7714 standards
-    parts.push(`
-<!DOCTYPE html>
+function PDF_HTML_HEAD(title: string): string {
+    return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>${options.title || '研究论文'}</title>
+    <title>${escapeHtml(title)}</title>
     <style>
-        @page {
-            size: A4;
-            margin: 2.5cm 2.5cm 2.5cm 3cm; /* GB标准：上下2.5cm，左3cm，右2.5cm */
-        }
-
-        body {
-            font-family: "SimSun", "宋体", serif;
-            font-size: 12pt; /* 小四号 */
-            line-height: 1.5;
-            color: #000;
-            margin: 0;
-            padding: 20px;
-        }
-
-        .title {
-            font-size: 22pt; /* 二号 */
-            font-weight: bold;
-            text-align: center;
-            margin-bottom: 20px;
-            font-family: "SimHei", "黑体", sans-serif;
-        }
-
-        .author {
-            font-size: 14pt; /* 小四 */
-            text-align: center;
-            margin-bottom: 30px;
-        }
-
-        .abstract-title {
-            font-size: 15pt; /* 小三 */
-            font-weight: bold;
-            text-align: center;
-            margin-top: 20px;
-            margin-bottom: 10px;
-            font-family: "SimHei", "黑体", sans-serif;
-        }
-
-        .abstract-content {
-            font-size: 12pt;
-            line-height: 1.5;
-            margin-bottom: 20px;
-            text-align: justify;
-        }
-
-        .section-title {
-            font-size: 16pt; /* 三号 */
-            font-weight: bold;
-            margin-top: 20px;
-            margin-bottom: 10px;
-            font-family: "SimHei", "黑体", sans-serif;
-        }
-
-        .section-content {
-            font-size: 12pt;
-            line-height: 1.5;
-            text-align: justify;
-            margin-bottom: 15px;
-        }
-
-        .section-content p {
-            margin: 10px 0;
-            text-indent: 2em; /* 首行缩进2字符 */
-        }
-
-        .reference-title {
-            font-size: 16pt;
-            font-weight: bold;
-            margin-top: 20px;
-            margin-bottom: 10px;
-            font-family: "SimHei", "黑体", sans-serif;
-        }
-
-        .reference-item {
-            font-size: 10.5pt; /* 五号 */
-            line-height: 1.5;
-            margin: 5px 0;
-        }
-
-        @media print {
-            body {
-                padding: 0;
-            }
-
-            .no-print {
-                display: none;
-            }
-        }
+        @page { size: A4; margin: 2.5cm 2.5cm 2.5cm 3cm; }
+        body { font-family: "SimSun","宋体",serif; font-size: 12pt; line-height: 1.5; color: #000; margin: 0; padding: 20px; }
+        .title { font-size: 22pt; font-weight: bold; text-align: center; margin-bottom: 20px; font-family: "SimHei","黑体",sans-serif; }
+        .author { font-size: 14pt; text-align: center; margin-bottom: 30px; }
+        .abstract-title { font-size: 15pt; font-weight: bold; text-align: center; margin-top: 20px; margin-bottom: 10px; font-family: "SimHei","黑体",sans-serif; }
+        .abstract-content { font-size: 12pt; line-height: 1.5; margin-bottom: 20px; text-align: justify; }
+        .keywords { font-size: 12pt; margin-bottom: 20px; }
+        .section-title { font-size: 16pt; font-weight: bold; margin-top: 20px; margin-bottom: 10px; font-family: "SimHei","黑体",sans-serif; }
+        .section-content { font-size: 12pt; line-height: 1.5; text-align: justify; margin-bottom: 15px; }
+        .section-content p { margin: 10px 0; text-indent: 2em; }
+        .reference-title { font-size: 16pt; font-weight: bold; margin-top: 20px; margin-bottom: 10px; font-family: "SimHei","黑体",sans-serif; }
+        .reference-item { font-size: 10.5pt; line-height: 1.5; margin: 5px 0; }
+        @media print { body { padding: 0; } .no-print { display: none; } }
     </style>
 </head>
-<body>
-`)
+<body>`
+}
 
-    // Add title
-    const titleData = groupedNodes.get('title')
-    if (titleData) {
-        parts.push(`    <div class="title">${escapeHtml(titleData.content)}</div>`)
+/**
+ * Render a single research node as HTML block
+ */
+function renderNodeHtml(shape: ResearchNodeShape): string {
+    const { section, content, customLabel } = shape.props
+    const parts: string[] = []
+
+    if (section === 'title') return '' // handled separately in header
+
+    if (section === 'abstract') {
+        parts.push(`    <div class="abstract-title">摘要</div>`)
+        parts.push(`    <div class="abstract-content">${escapeHtml(content)}</div>`)
+        return parts.join('\n')
     }
 
-    // Add author
+    if (section === 'keywords') {
+        parts.push(`    <div class="keywords"><strong>关键词：</strong>${escapeHtml(content)}</div>`)
+        return parts.join('\n')
+    }
+
+    if (section === 'reference') {
+        parts.push(`    <div class="reference-title">参考文献</div>`)
+        const refs = content.split('\n').filter(l => l.trim())
+        refs.forEach((ref, i) => {
+            parts.push(`    <div class="reference-item">[${i + 1}] ${escapeHtml(ref.trim())}</div>`)
+        })
+        return parts.join('\n')
+    }
+
+    const sectionTitle = getSectionTitle(section, customLabel)
+    if (sectionTitle) {
+        parts.push(`    <div class="section-title">${escapeHtml(sectionTitle)}</div>`)
+    }
+    parts.push(`    <div class="section-content">`)
+    content.split('\n\n').filter(p => p.trim()).forEach(p => {
+        parts.push(`        <p>${escapeHtml(p.trim())}</p>`)
+    })
+    parts.push(`    </div>`)
+    return parts.join('\n')
+}
+
+/**
+ * Generate HTML content for PDF from arrow-ordered shapes
+ */
+function generatePdfHtmlFromShapes(shapes: ResearchNodeShape[], options: PdfExportOptions = {}): string {
+    const parts: string[] = []
+
+    const titleShape = shapes.find(s => s.props.section === 'title')
+    const titleText = options.title || titleShape?.props.content || '研究论文'
+
+    parts.push(PDF_HTML_HEAD(titleText))
+
+    if (titleShape) {
+        parts.push(`    <div class="title">${escapeHtml(titleShape.props.content)}</div>`)
+    }
     if (options.author) {
         parts.push(`    <div class="author">${escapeHtml(options.author)}</div>`)
     }
 
-    // Add abstract
-    const abstractData = groupedNodes.get('abstract')
-    if (abstractData) {
-        parts.push(`    <div class="abstract-title">摘要</div>`)
-        parts.push(`    <div class="abstract-content">${escapeHtml(abstractData.content)}</div>`)
+    for (const shape of shapes) {
+        if (shape.props.section === 'title') continue
+        const html = renderNodeHtml(shape)
+        if (html) parts.push(html)
     }
 
-    // Add main sections
-    const mainSections: ResearchNodeType[] = [
-        'introduction',
-        'related-work',
-        'method',
-        'experiment',
-        'result',
-        'discussion',
-        'conclusion',
+    parts.push(`\n</body>\n</html>\n`)
+    return parts.join('\n')
+}
+
+/**
+ * Generate HTML content for PDF (fallback: section-type order, grouped)
+ */
+function generatePdfHtmlFallback(editor: Editor, options: PdfExportOptions = {}): string {
+    const nodes = collectResearchNodes(editor)
+    if (nodes.length === 0) throw new Error('没有找到可导出的研究节点')
+
+    const sortedNodes = sortNodesBySection(nodes)
+    const groupedNodes = groupNodesBySection(sortedNodes)
+
+    const titleText = options.title || groupedNodes.get('title')?.content || '研究论文'
+    const parts: string[] = []
+    parts.push(PDF_HTML_HEAD(titleText))
+
+    const titleData = groupedNodes.get('title')
+    if (titleData) {
+        parts.push(`    <div class="title">${escapeHtml(titleData.content)}</div>`)
+    }
+    if (options.author) {
+        parts.push(`    <div class="author">${escapeHtml(options.author)}</div>`)
+    }
+
+    const allSections: ResearchNodeType[] = [
+        'abstract', 'keywords',
+        'introduction', 'related-work', 'method', 'experiment',
+        'result', 'discussion', 'conclusion', 'limitations',
+        'future-work', 'acknowledgments', 'reference', 'appendix', 'custom',
     ]
 
-    for (const sectionType of mainSections) {
-        const sectionData = groupedNodes.get(sectionType)
-        if (sectionData) {
-            const sectionTitle = getSectionTitle(sectionType)
-            parts.push(`    <div class="section-title">${escapeHtml(sectionTitle)}</div>`)
-            parts.push(`    <div class="section-content">`)
+    for (const sectionType of allSections) {
+        const data = groupedNodes.get(sectionType)
+        if (!data) continue
 
-            // Split into paragraphs
-            const paragraphs = sectionData.content.split('\n\n').filter(p => p.trim())
-            paragraphs.forEach(paragraph => {
-                parts.push(`        <p>${escapeHtml(paragraph.trim())}</p>`)
-            })
-
-            parts.push(`    </div>`)
-        }
+        // Synthesise a minimal shape-like object to reuse renderNodeHtml
+        const fakeShape = {
+            props: {
+                section: sectionType,
+                content: data.content,
+                customLabel: data.customLabel,
+                level: data.level ?? 1,
+            },
+        } as ResearchNodeShape
+        const html = renderNodeHtml(fakeShape)
+        if (html) parts.push(html)
     }
 
-    // Add references
-    const referenceData = groupedNodes.get('reference')
-    if (referenceData) {
-        parts.push(`    <div class="reference-title">参考文献</div>`)
-
-        const references = referenceData.content.split('\n').filter(line => line.trim())
-        references.forEach((ref, index) => {
-            parts.push(`    <div class="reference-item">[${index + 1}] ${escapeHtml(ref.trim())}</div>`)
-        })
-    }
-
-    parts.push(`
-</body>
-</html>
-`)
-
+    parts.push(`\n</body>\n</html>\n`)
     return parts.join('\n')
+}
+
+/**
+ * Generate HTML content for PDF
+ */
+function generatePdfHtml(editor: Editor, options: PdfExportOptions = {}): string {
+    const arrowOrdered = collectArrowOrderedNodes(editor)
+    if (arrowOrdered && arrowOrdered.length > 0) {
+        return generatePdfHtmlFromShapes(arrowOrdered, options)
+    }
+    return generatePdfHtmlFallback(editor, options)
 }
 
 /**

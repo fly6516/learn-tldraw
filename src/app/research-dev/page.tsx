@@ -43,7 +43,6 @@ const uiOverrides: TLUiOverrides = {
             if (
                 [
                     "draw",
-                    "arrow",
                     "line",
                     "highlight",
                     "eraser",
@@ -162,9 +161,11 @@ const components: TLComponents = {
     Toolbar: (props) => {
         const tools = useTools();
         const isSelected = useIsToolSelected(tools["research-node"]);
+        const isArrowSelected = useIsToolSelected(tools["arrow"]);
         return (
             <DefaultToolbar {...props}>
                 <TldrawUiMenuItem {...tools["research-node"]} isSelected={isSelected} />
+                <TldrawUiMenuItem {...tools["arrow"]} isSelected={isArrowSelected} />
                 <DefaultToolbarContent />
             </DefaultToolbar>
         );
@@ -338,9 +339,11 @@ function createTestData(editor: Editor) {
         },
     ];
 
-    // Create shapes
+    // Create shapes and track IDs in order
+    const shapeIds: ReturnType<typeof createShapeId>[] = [];
     testNodes.forEach((node) => {
         const shapeId = createShapeId();
+        shapeIds.push(shapeId);
         editor.createShape<ResearchNodeShape>({
             id: shapeId,
             type: 'research-node',
@@ -359,6 +362,57 @@ function createTestData(editor: Editor) {
             },
         });
     });
+
+    // Create arrows connecting nodes in logical paper order:
+    // title(0) → abstract(1) → keywords(2) → introduction(3) →
+    // related-work(4) → method-main(5) → method-sub(6) →
+    // experiment(7) → result(8) → discussion(9) →
+    // limitations(10) → future-work(11) → conclusion(12) →
+    // acknowledgments(13) → reference(14)
+    const arrowChain = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+
+    for (let i = 0; i < arrowChain.length - 1; i++) {
+        const fromId = shapeIds[arrowChain[i]];
+        const toId = shapeIds[arrowChain[i + 1]];
+        const arrowId = createShapeId();
+
+        editor.createShape({
+            id: arrowId,
+            type: 'arrow',
+            x: 0,
+            y: 0,
+            props: {
+                start: { x: 0, y: 0 },
+                end: { x: 0, y: 0 },
+            },
+        } as never);
+
+        editor.createBinding({
+            type: 'arrow',
+            fromId: arrowId,
+            toId: fromId,
+            props: {
+                terminal: 'start',
+                normalizedAnchor: { x: 0.5, y: 0.5 },
+                isExact: false,
+                isPrecise: false,
+                snap: 'none',
+            },
+        } as never);
+
+        editor.createBinding({
+            type: 'arrow',
+            fromId: arrowId,
+            toId: toId,
+            props: {
+                terminal: 'end',
+                normalizedAnchor: { x: 0.5, y: 0.5 },
+                isExact: false,
+                isPrecise: false,
+                snap: 'none',
+            },
+        } as never);
+    }
 
     // Zoom to fit
     editor.zoomToFit({ animation: { duration: 500 } });

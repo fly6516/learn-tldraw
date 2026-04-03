@@ -45,7 +45,6 @@ const uiOverrides: TLUiOverrides = {
             if (
                 [
                     "draw",
-                    "arrow",
                     "line",
                     "highlight",
                     "eraser",
@@ -164,9 +163,11 @@ const components: TLComponents = {
     Toolbar: (props) => {
         const tools = useTools();
         const isSelected = useIsToolSelected(tools["research-node"]);
+        const isArrowSelected = useIsToolSelected(tools["arrow"]);
         return (
             <DefaultToolbar {...props}>
                 <TldrawUiMenuItem {...tools["research-node"]} isSelected={isSelected} />
+                <TldrawUiMenuItem {...tools["arrow"]} isSelected={isArrowSelected} />
                 <DefaultToolbarContent />
             </DefaultToolbar>
         );

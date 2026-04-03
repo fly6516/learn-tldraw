@@ -2,6 +2,8 @@ import type { Editor } from 'tldraw'
 import type { ResearchNodeType } from '@/app/research/research-node'
 //import { RESEARCH_NODE_META } from '@/app/research/research-node'
 import { collectResearchNodes, sortNodesBySection, groupNodesBySection } from './latex-exporter'
+import { collectArrowOrderedNodes } from './arrow-ordering'
+import type { ResearchNodeShape } from '@/shapes/research/ResearchNodeShape'
 
 /**
  * Markdown export options
@@ -97,12 +99,56 @@ function formatMarkdownSection(sectionType: ResearchNodeType, content: string): 
 }
 
 /**
+ * Generate Markdown document from arrow-ordered shapes.
+ * Each node appears in arrow-topology order.
+ */
+function generateArrowOrderedMarkdown(
+    orderedShapes: ResearchNodeShape[],
+    options: MarkdownExportOptions = {}
+): string {
+    const parts: string[] = []
+
+    const titleShape = orderedShapes.find((s) => s.props.section === 'title')
+    if (titleShape) {
+        parts.push(formatMarkdownSection('title', titleShape.props.content))
+    }
+
+    if (options.author) {
+        parts.push(`**作者**: ${options.author}`)
+        parts.push('')
+    }
+    if (options.date) {
+        parts.push(`**日期**: ${options.date}`)
+        parts.push('')
+    }
+    if (options.author || options.date) {
+        parts.push('---')
+        parts.push('')
+    }
+
+    const emittedTitle = !!titleShape
+
+    for (const shape of orderedShapes) {
+        if (shape.props.section === 'title' && emittedTitle) continue
+        parts.push(formatMarkdownSection(shape.props.section, shape.props.content))
+    }
+
+    return parts.join('\n')
+}
+
+/**
  * Generate complete Markdown document from research nodes
  */
 export function generateMarkdownDocument(
     editor: Editor,
     options: MarkdownExportOptions = {}
 ): string {
+    // Try arrow-ordered export first
+    const arrowOrdered = collectArrowOrderedNodes(editor)
+    if (arrowOrdered && arrowOrdered.length > 0) {
+        return generateArrowOrderedMarkdown(arrowOrdered, options)
+    }
+
     // Collect and sort nodes
     const nodes = collectResearchNodes(editor)
 
@@ -146,28 +192,19 @@ export function generateMarkdownDocument(
         parts.push(formatMarkdownSection('abstract', abstractData.content))
     }
 
-    // Add main sections
-    const mainSections: ResearchNodeType[] = [
-        'introduction',
-        'related-work',
-        'method',
-        'experiment',
-        'result',
-        'discussion',
-        'conclusion',
+    // Add all sections in default order
+    const allSections: ResearchNodeType[] = [
+        'keywords',
+        'introduction', 'related-work', 'method', 'experiment',
+        'result', 'discussion', 'conclusion', 'limitations',
+        'future-work', 'acknowledgments', 'reference', 'appendix', 'custom',
     ]
 
-    for (const sectionType of mainSections) {
+    for (const sectionType of allSections) {
         const sectionData = groupedNodes.get(sectionType)
         if (sectionData) {
             parts.push(formatMarkdownSection(sectionType, sectionData.content))
         }
-    }
-
-    // Add references
-    const referenceData = groupedNodes.get('reference')
-    if (referenceData) {
-        parts.push(formatMarkdownSection('reference', referenceData.content))
     }
 
     return parts.join('\n')

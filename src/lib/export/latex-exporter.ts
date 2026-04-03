@@ -10,6 +10,7 @@ import {
     getDefaultSectionTitle,
     type LatexTemplateOptions,
 } from './latex-template'
+import { collectArrowOrderedNodes } from './arrow-ordering'
 
 /**
  * Collected research node data
@@ -261,12 +262,62 @@ export function generateLatexDocument(
 }
 
 /**
- * Main export function - generates LaTeX from editor
+ * Generate LaTeX document ordered by arrow topology.
+ * Each node appears exactly in the order defined by arrows.
+ * Only `title` is hoisted to the preamble; all other nodes
+ * (including abstract/keywords) follow the arrow chain order.
+ */
+export function generateArrowOrderedLatexDocument(
+    orderedShapes: ResearchNodeShape[],
+    options: LatexTemplateOptions = {}
+): string {
+    if (orderedShapes.length === 0) {
+        throw new Error('No research nodes found to export')
+    }
+
+    // Extract title for the preamble \title{} command
+    const titleShape = orderedShapes.find((s) => s.props.section === 'title')
+    if (titleShape && !options.title) {
+        options = { ...options, title: titleShape.props.content }
+    }
+
+    const parts: string[] = []
+    parts.push(generatePreamble(options))
+    parts.push(generateDocumentBegin())
+
+    // Emit every node in arrow-topology order; skip title (already in preamble)
+    for (const shape of orderedShapes) {
+        if (shape.props.section === 'title') continue
+
+        parts.push(formatSectionContent(
+            shape.props.section,
+            shape.props.content,
+            shape.props.customLabel,
+            shape.props.level,
+            shape.props.metadata?.sectionNumber,
+        ))
+        parts.push('')
+    }
+
+    parts.push(generateDocumentEnd())
+    return parts.join('\n')
+}
+
+/**
+ * Main export function - generates LaTeX from editor.
+ * If arrows connect research nodes, uses arrow-topology order.
+ * Otherwise falls back to fixed section-type order.
  */
 export function exportToLatex(
     editor: Editor,
     options: LatexTemplateOptions = {}
 ): string {
+    // Try arrow-ordered export first
+    const arrowOrdered = collectArrowOrderedNodes(editor)
+    if (arrowOrdered && arrowOrdered.length > 0) {
+        return generateArrowOrderedLatexDocument(arrowOrdered, options)
+    }
+
     const nodes = collectResearchNodes(editor)
 
     if (nodes.length === 0) {
