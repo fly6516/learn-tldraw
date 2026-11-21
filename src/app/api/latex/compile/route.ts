@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { importSourceArchive, isProjectPath } from '@/lib/project/source-archive'
+import { parseCompileDiagnostics } from '@/lib/project/compile-diagnostics'
 
 export const runtime = 'nodejs'
 
@@ -72,8 +73,11 @@ export async function POST(request: Request) {
         ? 'Tectonic executable not found. Install it or set TECTONIC_BIN.'
         : failure.killed ? 'LaTeX compilation timed out.' : 'LaTeX compilation failed.'
       const log = await readFile(join(output, basename(mainFile).replace(/\.tex$/i, '.log')), 'utf8').catch(() => '')
+      const outputText = [failure.stderr, failure.stdout].filter(Boolean).join('\n')
       return Response.json({
-        error, log: (log || [failure.stderr, failure.stdout].filter(Boolean).join('\n')).slice(-50_000),
+        error,
+        diagnostics: parseCompileDiagnostics(outputText, mainFile, project.files.keys()),
+        log: (outputText + (log ? '\n\n' + log : '')).slice(-50_000),
       }, { status: 422 })
     }
     const pdf = await readFile(join(output, basename(mainFile).replace(/\.tex$/i, '.pdf')))

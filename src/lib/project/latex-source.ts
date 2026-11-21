@@ -9,6 +9,12 @@ export function lineNumber(source: string, offset: number) {
   return source.slice(0, offset).split(/\r\n|\n|\r/).length
 }
 
+export function sourcePosition(source: string, offset: number) {
+  const from = source.charCodeAt(0) === 0xfeff ? 1 : 0
+  const lines = source.slice(from, offset).split(/\r\n|\n|\r/)
+  return { lineNumber: lines.length, column: lines[lines.length - 1].length + 1 }
+}
+
 // Replace comments and literal code with spaces while retaining source offsets.
 export function maskLatexCode(source: string) {
   return source.replace(

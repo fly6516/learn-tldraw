@@ -27,11 +27,14 @@ Set `TECTONIC_ONLY_CACHED=1` to compile offline once the required files are cach
 
 1. In `/research`, choose **Import LaTeX → Import Project ZIP**. A Prism or ordinary
    LaTeX ZIP keeps its directory paths, original source bytes, and attachments.
-2. In the files panel, choose **Edit and Compile LaTeX**. Select the main `.tex` file and the
-   chapter to edit. The compiler runs from the main file's directory, so its relative references
-   keep their original meaning.
-3. Choose **Compile PDF** to save the current edit and compile the whole project. The PDF and
-   compile errors appear next to the editor. **Export → LaTeX ZIP** downloads the edited source tree.
+2. In the files panel, choose **Edit and Compile LaTeX**. Set the **Main file** in the toolbar
+   and select a chapter or bibliography from **Files**. Monaco highlights LaTeX and BibTeX,
+   and drafts remain available when you switch files. Use **Save** or Ctrl/Cmd+S to save them.
+3. Choose **Compile PDF** to save your drafts and compile the whole project from the main
+   file's directory. **PDF Preview** shows the latest successful build. Citation issues and
+   compiler errors with a source location are underlined in the editor. Select an entry in
+   **Problems** to jump to its file and line, or expand **Compiler log** for more detail.
+   **Export → LaTeX ZIP** downloads the edited source tree.
 
 The compile endpoint accepts ZIPs up to 32 MB, including after extraction. The standard compiler
 supports XeLaTeX and BibTeX workflows. Documents that require a different engine, Biber, or
@@ -46,7 +49,7 @@ Set `DEEPSEEK_API_KEY` on the local Next.js server to use the official DeepSeek 
 `OPENAI_BASE_URL` optionally points to a compatible Responses server. Keep the key on the
 server and run the workbench on loopback.
 
-Select a `.tex` file in **Edit source**, open **Chapter AI**, then choose **Review Chapter**
+Select a `.tex` file in **Files**, open **Chapter AI**, then choose **Review Chapter**
 or **Rewrite Chapter**. The request includes the selected draft, related source excerpts such
 as the main file, bibliography and local macros, and the end of the most recent compile log.
 Review the before/after passages and choose **Apply to Source** to save the edits to that file.
@@ -58,7 +61,7 @@ Open **References** in the LaTeX editor to search project `.bib` entries by key,
 author, or year. **Insert** adds `\cite{key}` at the source editor's caret or replaces its
 current selection. Citation issues list missing keys in project `.tex` files and each
 definition of a duplicate key. Click an issue to select the key in its source file.
-The check uses all project bibliographies and includes the currently edited draft. AI
+The check uses all project bibliographies and includes unsaved drafts. AI
 suggestions flag new citation keys that have no matching project bibliography entry.
 
 Open **Outline** to browse headings from the selected main file and its statically linked

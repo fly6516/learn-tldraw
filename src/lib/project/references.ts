@@ -106,7 +106,7 @@ export function collectBibliography(project: ProjectFileSystem, active?: { path:
 }
 
 export function checkCitations(
-  project: ProjectFileSystem, entries: BibliographyEntry[], active: { path: string; source: string },
+  project: ProjectFileSystem, entries: BibliographyEntry[], active?: { path: string; source: string },
 ): CitationIssue[] {
   const counts = new Map<string, number>()
   for (const entry of entries) counts.set(entry.key, (counts.get(entry.key) ?? 0) + 1)
@@ -114,7 +114,7 @@ export function checkCitations(
     .map(entry => ({ ...entry, kind: 'duplicate' as const }))
   const missing = [...project.files.values()].flatMap(file => {
     if (!('content' in file) || !/\.tex$/i.test(file.path)) return []
-    const source = file.path === active.path ? active.source : file.content ?? ''
+    const source = file.path === active?.path ? active.source : file.content ?? ''
     return findCitations(file.path, source).filter(citation => !counts.has(citation.key))
       .map(citation => ({ ...citation, kind: 'missing' as const }))
   })

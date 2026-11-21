@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test'
 import JSZip from 'jszip'
 import { exportSourceArchive, importSourceArchive } from './source-archive'
 import { updateFileContent } from './file-system'
+import { checkCitations, collectBibliography } from './references'
 import { POST } from '../../app/api/latex/compile/route'
 
 const root = 'prism-paper'
@@ -58,4 +59,36 @@ test.skipIf(process.env.LATEX_COMPILE_ENABLED !== '1')('edits a chapter and comp
   const pdf = await response.arrayBuffer()
   expect(new TextDecoder().decode(pdf.slice(0, 5))).toBe('%PDF-')
   if (process.env.LATEX_TEST_PDF) await Bun.write(process.env.LATEX_TEST_PDF, pdf)
+}, 150_000)
+
+test.skipIf(process.env.LATEX_COMPILE_ENABLED !== '1')('locates citation and compiler errors in a nested chapter, then recompiles the fixed project', async () => {
+  const project = await importSourceArchive(await fixture())
+  const broken = updateFileContent(project, chapter, String.raw`\section{Results}
+\cite{sampl}
+\undefinedResearchCommand
+`)
+  const issues = checkCitations(broken, collectBibliography(broken))
+  expect(issues).toContainEqual(expect.objectContaining({ kind: 'missing', key: 'sampl', path: chapter, line: 2 }))
+  const compile = async project => {
+    const zip = await exportSourceArchive(project)
+    return POST(new Request(`http://localhost:3000/api/latex/compile?main=${encodeURIComponent(main)}`, {
+      method: 'POST',
+      headers: { host: 'localhost:3000', origin: 'http://localhost:3000', 'content-length': String(zip.size) },
+      body: zip,
+    }))
+  }
+  const failure = await compile(broken)
+  expect(failure.status).toBe(422)
+  const result = await failure.json()
+  expect(result.diagnostics, result.log).toContainEqual(expect.objectContaining({ path: chapter, line: 3, severity: 'error' }))
+
+  const fixed = updateFileContent(broken, chapter, String.raw`\section{Results}
+Corrected result \cite{sample}.
+`)
+  expect(checkCitations(fixed, collectBibliography(fixed))).toHaveLength(0)
+  const response = await compile(fixed)
+  if (!response.ok) throw new Error(await response.text())
+  expect(response.headers.get('content-type')).toBe('application/pdf')
+  const pdf = await response.arrayBuffer()
+  expect(new TextDecoder().decode(pdf.slice(0, 5))).toBe('%PDF-')
 }, 150_000)
