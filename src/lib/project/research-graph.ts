@@ -14,6 +14,11 @@ const nodeSchema = z.object({
     parentId: z.string().optional(),
     customLabel: z.string().optional(),
     tags: z.array(z.string()).optional(),
+    sourceAnchor: z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('label'), project: z.string().min(1), label: z.string().min(1) }),
+      z.object({ kind: z.literal('heading'), project: z.string().min(1), path: z.string().min(1),
+        command: z.string().min(1), titleSource: z.string().min(1) }),
+    ]).optional(),
     metadata: z.object({
       originalTitle: z.string().optional(), sectionNumber: z.string().optional(),
       imported: z.boolean().optional(), importSource: z.string().optional(),
@@ -54,6 +59,7 @@ export const researchCanvasSchema = z.object({
 })
 
 export type ResearchNode = z.infer<typeof nodeSchema>
+export type SectionAnchor = NonNullable<ResearchNode['data']['sourceAnchor']>
 export type ResearchEdge = z.infer<typeof edgeSchema>
 export type ResearchPage = z.infer<typeof pageSchema>
 export type ResearchCanvas = z.infer<typeof researchCanvasSchema>

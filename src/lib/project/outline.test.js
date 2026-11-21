@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
 import { buildProjectOutline } from './outline'
+import { anchorHeading, indexOutline, resolveSectionAnchor } from './section-links'
 
 const path = 'paper/chapters/results.tex'
 
@@ -50,4 +51,36 @@ test('uses the active draft and ignores commented, literal, missing and cyclic s
   expect(first.children).toMatchObject([{ title: 'Live title', path, line: 2, children: [] }])
   const [child] = first.children
   expect(draft.slice(child.start, child.end)).toBe('Live title')
+})
+
+test('resolves a bound label against draft headings after inserting lines and renaming the title', () => {
+  const main = 'paper/main.tex'
+  const root = String.raw`\input{chapters/results}`
+  const source = String.raw`\section{Results} % keep this comment
+\label{sec:results}
+\begin{figure}\label{fig:results}\end{figure}`
+  const [heading] = buildProjectOutline(project({ [main]: root, [path]: source }), main)
+  const anchor = anchorHeading(indexOutline([heading]), 'example', heading)
+  expect(anchor).toEqual({ kind: 'label', project: 'example', label: 'sec:results' })
+
+  const draft = '\n% added before heading\n' + source.replace('{Results}', '{Revised results}')
+  const changed = indexOutline(buildProjectOutline(project({ [main]: root, [path]: draft }), main))
+  expect(resolveSectionAnchor(changed, 'example', anchor)).toMatchObject({ path, line: 3, title: 'Revised results' })
+  expect(resolveSectionAnchor(changed, 'different project', anchor)).toBeUndefined()
+  expect(changed.labels.has('fig:results')).toBe(false)
+  const duplicate = indexOutline(buildProjectOutline(project({ [main]: root, [path]: draft + '\n' + source }), main))
+  expect(resolveSectionAnchor(duplicate, 'example', anchor)).toBeUndefined()
+})
+
+test('unlabeled anchors stay within their original file and refuse ambiguous headings', () => {
+  const main = 'paper/main.tex'
+  const root = String.raw`\input{chapters/results}\section{Results}`
+  const body = String.raw`\section{Results}`
+  const make = source => buildProjectOutline(project({ [main]: root, [path]: source }), main)
+  const headings = make(body)
+  const anchor = anchorHeading(indexOutline(headings), 'example', headings[0])
+  expect(anchor).toMatchObject({ kind: 'heading', path })
+  expect(resolveSectionAnchor(indexOutline(make('\n' + body)), 'example', anchor)).toMatchObject({ path, line: 2 })
+  expect(resolveSectionAnchor(indexOutline(make(body.replace('Results', 'Renamed'))), 'example', anchor)).toBeUndefined()
+  expect(resolveSectionAnchor(indexOutline(make(body + '\n' + body)), 'example', anchor)).toBeUndefined()
 })

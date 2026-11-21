@@ -86,13 +86,15 @@ function canSetParent(page: ResearchPage, nodeId: string, parentId: string) {
   return true
 }
 
-function NodeDetails({ node, page, onEdit, onFinishEdit, onConnect, onOpenSource }: {
+function NodeDetails({ node, page, onEdit, onFinishEdit, onConnect, onOpenSource, sourceUnavailable, onUnlinkSource }: {
   node: ResearchNode
   page: ResearchPage
   onEdit: (data: ResearchNode['data'], field?: string) => void
   onFinishEdit: () => void
   onConnect: (target: string) => void
   onOpenSource?: () => void
+  sourceUnavailable: boolean
+  onUnlinkSource?: () => void
 }) {
   const { data } = node
   const others = page.nodes.filter(other => other.id !== node.id)
@@ -100,7 +102,11 @@ function NodeDetails({ node, page, onEdit, onFinishEdit, onConnect, onOpenSource
   return (
     <aside aria-label="Research node properties" className="min-h-0 w-full shrink-0 space-y-3 overflow-auto border-t bg-background p-3 max-sm:max-h-[45%] max-sm:shrink sm:w-72 sm:border-t-0 sm:border-l">
       <h2 className="font-semibold">Research Node</h2>
-      {onOpenSource && <Button size="sm" variant="outline" onClick={onOpenSource}>Open source</Button>}
+      {(onOpenSource || onUnlinkSource) && <div className="flex flex-wrap gap-2">
+        {onOpenSource && <Button size="sm" variant="outline" onClick={onOpenSource}>Open source</Button>}
+        {onUnlinkSource && <Button size="sm" variant="ghost" onClick={onUnlinkSource}>Remove source link</Button>}
+      </div>}
+      {sourceUnavailable && <p className="text-sm text-muted-foreground">Linked section unavailable. Use the Writing outline to bind this node again.</p>}
       <label className="grid gap-1 text-sm">Section type
         <select className="rounded border bg-background p-2" value={data.section}
           onChange={event => onEdit({ ...data, section: event.target.value as ResearchNodeType })}>
@@ -175,7 +181,7 @@ function NodeDetails({ node, page, onEdit, onFinishEdit, onConnect, onOpenSource
 }
 
 export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, onHistory, canUndo, canRedo,
-  sample, actions, sourceNodes, onOpenSource, jumpTo, onJumpHandled }: {
+  sample, actions, sourceStatus, onOpenSource, onUnlinkSource, jumpTo, onJumpHandled }: {
   page: ResearchPage
   updatePage: (update: (current: ResearchPage) => ResearchPage) => void
   editPage: (update: (current: ResearchPage) => ResearchPage, group?: string) => void
@@ -185,8 +191,9 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
   canRedo: boolean
   sample: boolean
   actions: HTMLElement | null
-  sourceNodes: ReadonlySet<ResearchNode['data']>
+  sourceStatus: (node: ResearchNode['data']) => 'available' | 'unavailable' | undefined
   onOpenSource: (node: ResearchNode['data']) => void
+  onUnlinkSource: (nodeId: string) => void
   jumpTo?: string
   onJumpHandled: () => void
 }) {
@@ -447,7 +454,9 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
         </div>
         {activeNode && (
           <NodeDetails key={activeNode.id} node={activeNode} page={page}
-            onOpenSource={sourceNodes.has(activeNode.data) ? () => onOpenSource(activeNode.data) : undefined}
+            onOpenSource={sourceStatus(activeNode.data) === 'available' ? () => onOpenSource(activeNode.data) : undefined}
+            sourceUnavailable={sourceStatus(activeNode.data) === 'unavailable'}
+            onUnlinkSource={activeNode.data.sourceAnchor ? () => onUnlinkSource(activeNode.id) : undefined}
             onFinishEdit={onFinishEdit}
             onEdit={(data, field) => editPage(current => ({
               ...current, nodes: current.nodes.map(node => node.id === activeNode.id ? { ...node, data } : node),

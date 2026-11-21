@@ -90,4 +90,10 @@ Open **Outline** to browse headings from the selected main file and its statical
 their parents. Click any title to select it in the source editor. Unsaved title edits update
 the outline as you type.
 
+For imported ZIP projects, use a heading's **Canvas actions** to add a node to any
+page or bind an existing node. **Locate on Canvas** selects the linked node, and
+**Open source** in its properties selects the heading in Writing. A unique `\label`
+immediately after the heading keeps the link working when the title changes. For an
+unlabeled heading, changing its title or making it ambiguous requires binding it again.
+
 Run `bun run lint`, `bun run build`, and `bun test` to check the project.

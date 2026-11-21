@@ -10,6 +10,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
 import { ProjectPanel } from '@/components/project/ProjectPanel'
+import type { OutlineCanvasActions } from '@/components/project/OutlinePanel'
 import { SourceProjectWorkspace, type SourceWorkspaceHandle } from '@/components/project/SourceProjectWorkspace'
 import type { ProjectFileSystem, ResearchNodeData } from '@/lib/project/types'
 import { ProjectFileSystemProvider, useProjectFileSystem } from '@/contexts/ProjectFileSystemContext'
@@ -27,6 +28,8 @@ import { ResearchGraphEditor } from './ResearchGraphEditor'
 import { CanvasSearchDialog } from './CanvasSearchDialog'
 import type { CanvasLocation } from '@/lib/project/canvas-search'
 import { emptyCanvasHistory, recordCanvasEdit, stepCanvasHistory, type CanvasHistory, type CanvasSnapshot } from '@/lib/project/canvas-history'
+import type { OutlineHeading } from '@/lib/project/outline'
+import { anchorHeading, headingKey, indexOutline, resolveSectionAnchor } from '@/lib/project/section-links'
 
 function Workspace({ sample }: { sample?: ResearchCanvas }) {
   const { fileSystem, initializeProject, setFileSystem } = useProjectFileSystem()
@@ -42,6 +45,7 @@ function Workspace({ sample }: { sample?: ResearchCanvas }) {
   const [sourceVersion, setSourceVersion] = useState(0)
   const [canvasActions, setCanvasActions] = useState<HTMLDivElement | null>(null)
   const [writingActions, setWritingActions] = useState<HTMLDivElement | null>(null)
+  const [archiveOutline, setArchiveOutline] = useState<{ project: string; index: ReturnType<typeof indexOutline> }>()
   const writing = useRef<SourceWorkspaceHandle>(null)
   const initialCanvas = sample ?? emptyCanvas
   const canvas = fileSystem?.canvas ?? initialCanvas
@@ -53,11 +57,36 @@ function Workspace({ sample }: { sample?: ResearchCanvas }) {
   const generateSource = useCallback((project: ProjectFileSystem, onNode?: Parameters<typeof generateProjectSource>[2]) =>
     generateProjectSource(page, project, onNode), [page])
   const generated = useMemo(() => {
-    const nodes = new Set<ResearchNodeData>()
+    const nodes = new Map<ResearchNodeData, number>()
     const source = fileSystem && fileSystem.metadata.sourceMode !== 'archive'
-      ? generateSource(fileSystem, node => nodes.add(node)) : undefined
+      ? generateSource(fileSystem, (node, line) => nodes.set(node, line)) : undefined
     return { source, nodes }
   }, [fileSystem, generateSource])
+  const archiveProject = fileSystem?.metadata.sourceMode === 'archive' ? fileSystem.metadata.createdAt : undefined
+  const archiveIndex = archiveOutline?.project === archiveProject ? archiveOutline?.index : undefined
+  const sectionLinks = useMemo(() => {
+    const byNode = new Map<ResearchNodeData, OutlineHeading>()
+    const byHeading = new Map<string, CanvasLocation>()
+    if (archiveProject && archiveIndex) {
+      for (const page of canvas.pages) {
+        for (const node of page.nodes) {
+          const heading = resolveSectionAnchor(archiveIndex, archiveProject, node.data.sourceAnchor)
+          if (!heading) continue
+          byNode.set(node.data, heading)
+          if (!byHeading.has(headingKey(heading))) byHeading.set(headingKey(heading), { pageId: page.id, nodeId: node.id })
+        }
+      }
+    }
+    return { byNode, byHeading }
+  }, [archiveIndex, archiveProject, canvas.pages])
+  const generatedLinks = useMemo(() => {
+    const byLine = new Map<number, CanvasLocation>()
+    for (const node of page.nodes) {
+      const line = generated.nodes.get(node.data)
+      if (line !== undefined) byLine.set(line, { pageId: page.id, nodeId: node.id })
+    }
+    return byLine
+  }, [generated.nodes, page])
 
   useEffect(() => {
     if (!fileSystem) initializeProject(undefined, sample ? 'Sample paper' : 'My Research Project')
@@ -94,13 +123,13 @@ function Workspace({ sample }: { sample?: ResearchCanvas }) {
     })
   }
 
-  function updatePage(update: (current: ResearchPage) => ResearchPage) {
+  function updatePage(update: (current: ResearchPage) => ResearchPage, pageId = page.id) {
     updateCanvas(current => {
-      const previous = current.pages.find(item => item.id === page.id)
+      const previous = current.pages.find(item => item.id === pageId)
       if (!previous) return current
       const next = update(previous)
       return next === previous ? current : {
-        ...current, pages: current.pages.map(item => item.id === page.id ? next : item),
+        ...current, pages: current.pages.map(item => item.id === pageId ? next : item),
       }
     })
   }
@@ -109,17 +138,19 @@ function Workspace({ sample }: { sample?: ResearchCanvas }) {
     return { nodes: current.nodes, edges: current.edges }
   }
 
-  function applySnapshot(next: CanvasSnapshot) {
-    livePage.current = { ...livePage.current, ...next }
-    updatePage(current => ({ ...current, ...next }))
+  function applySnapshot(next: CanvasSnapshot, pageId = page.id) {
+    if (livePage.current.id === pageId) livePage.current = { ...livePage.current, ...next }
+    updatePage(current => ({ ...current, ...next }), pageId)
   }
 
-  function editPage(update: (current: ResearchPage) => ResearchPage, group?: string) {
-    const previous = snapshot(livePage.current)
-    const next = snapshot(update(livePage.current))
+  function editPage(update: (current: ResearchPage) => ResearchPage, group?: string, pageId = page.id) {
+    const target = livePage.current.id === pageId ? livePage.current : canvas.pages.find(item => item.id === pageId)
+    if (!target) return
+    const previous = snapshot(target)
+    const next = snapshot(update(target))
     if (previous.nodes === next.nodes && previous.edges === next.edges) return
-    setHistories(current => ({ ...current, [page.id]: recordCanvasEdit(current[page.id] ?? emptyCanvasHistory, previous, next, group) }))
-    applySnapshot(next)
+    setHistories(current => ({ ...current, [pageId]: recordCanvasEdit(current[pageId] ?? emptyCanvasHistory, previous, next, group) }))
+    applySnapshot(next, pageId)
   }
 
   function finishEditGroup() {
@@ -147,6 +178,35 @@ function Workspace({ sample }: { sample?: ResearchCanvas }) {
     updateCanvas(current => current.activePageId === location.pageId ? current : { ...current, activePageId: location.pageId })
     setNodeJump(location)
     setSearchOpen(false)
+  }
+
+  const outlineCanvas: OutlineCanvasActions = {
+    canvas,
+    linked: heading => sectionLinks.byHeading.get(headingKey(heading))
+      ?? (heading.path === 'main.tex' ? generatedLinks.get(heading.line) : undefined),
+    canLink: heading => Boolean(archiveProject && archiveIndex && anchorHeading(archiveIndex, archiveProject, heading)),
+    canBindNode: (pageId, nodeId) => {
+      const node = canvas.pages.find(item => item.id === pageId)?.nodes.find(item => item.id === nodeId)
+      return Boolean(node && !sectionLinks.byNode.has(node.data))
+    },
+    onLocate: location => {
+      switchView('canvas')
+      locateNode(location)
+    },
+    onLink: (heading, pageId, nodeId) => {
+      if (!archiveProject || !archiveIndex || sectionLinks.byHeading.has(headingKey(heading))) return
+      const anchor = anchorHeading(archiveIndex, archiveProject, heading)
+      if (!anchor || (nodeId && !outlineCanvas.canBindNode(pageId, nodeId))) return
+      const id = nodeId ?? crypto.randomUUID()
+      editPage(current => {
+        if (nodeId) return { ...current, nodes: current.nodes.map(node => node.id === nodeId
+          ? { ...node, data: { ...node.data, sourceAnchor: anchor } } : node) }
+        const y = current.nodes.reduce((bottom, node) => Math.max(bottom, node.position.y + 340), 50)
+        const order = current.nodes.reduce((max, node) => Math.max(max, node.data.order + 1), 0)
+        const data = { section: 'custom' as const, content: '', customLabel: heading.title, order, level: 1, sourceAnchor: anchor }
+        return { ...current, nodes: [...current.nodes, { id, position: { x: 50, y }, data }] }
+      }, undefined, pageId)
+    },
   }
 
   function importNodes(nodes: ResearchNode[]) {
@@ -223,10 +283,19 @@ function Workspace({ sample }: { sample?: ResearchCanvas }) {
           <ResearchGraphEditor key={`${canvasVersion}:${page.id}`} page={page} updatePage={updatePage} actions={canvasActions}
             editPage={editPage} onFinishEdit={finishEditGroup} onHistory={stepHistory} canUndo={history.undo.length > 0} canRedo={history.redo.length > 0}
             jumpTo={nodeJump?.pageId === page.id ? nodeJump.nodeId : undefined} onJumpHandled={clearNodeJump}
-            sourceNodes={generated.nodes} onOpenSource={node => {
+            sourceStatus={node => {
+              if (generated.nodes.has(node) || sectionLinks.byNode.has(node)) return 'available'
+              if (node.sourceAnchor && archiveIndex) return 'unavailable'
+            }} onOpenSource={node => {
+              const heading = sectionLinks.byNode.get(node)
+              if (heading) writing.current?.locate(heading)
+              else if (generated.nodes.has(node)) writing.current?.openGeneratedNode(node)
+              else return
               switchView('write')
-              writing.current?.openGeneratedNode(node)
-            }} sample={view === 'canvas' && Boolean(sample) && fileSystem.canvas === undefined} />
+            }} onUnlinkSource={nodeId => editPage(current => ({
+              ...current, nodes: current.nodes.map(node => node.id === nodeId
+                ? { ...node, data: { ...node.data, sourceAnchor: undefined } } : node),
+            }))} sample={view === 'canvas' && Boolean(sample) && fileSystem.canvas === undefined} />
           {showPreview && <div className="h-64 w-full shrink-0 border-l lg:h-full lg:w-96">
             <LatexPreviewPanel page={page} onClose={() => setShowPreview(false)} />
           </div>}
@@ -235,7 +304,7 @@ function Workspace({ sample }: { sample?: ResearchCanvas }) {
       <div className={view === 'write' ? 'flex min-h-0 min-w-0 flex-1 flex-col' : 'hidden'}>
         <SourceProjectWorkspace key={sourceVersion} ref={writing} project={fileSystem} actions={writingActions}
           active={view === 'write'} generateSource={fileSystem.metadata.sourceMode === 'archive' ? undefined : generateSource}
-          onOpenCanvas={() => switchView('canvas')} />
+          onOpenCanvas={() => switchView('canvas')} outlineCanvas={outlineCanvas} onArchiveOutline={setArchiveOutline} />
       </div>
       {searchOpen && <CanvasSearchDialog pages={canvas.pages} onOpenChange={setSearchOpen} onLocate={locateNode} />}
       <LatexImportDialog open={importOpen} onOpenChange={setImportOpen} onImportNodes={importNodes}

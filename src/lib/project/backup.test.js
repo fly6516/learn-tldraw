@@ -14,7 +14,8 @@ const canvas = {
     { ...emptyPage(), nodes: [node('intro', 120)] },
     {
       ...emptyPage('Results', 'results'), viewport: { x: 25, y: 30, zoom: 0.7 },
-      nodes: [node('results', 620), node('detail', 100, { parentId: 'results', level: 2, tags: ['test'] })],
+      nodes: [node('results', 620, { sourceAnchor: { kind: 'label', project: 'example', label: 'sec:results' } }),
+        node('detail', 100, { parentId: 'results', level: 2, tags: ['test'] })],
       edges: [{ id: 'order', source: 'results', target: 'detail' }],
     },
   ],

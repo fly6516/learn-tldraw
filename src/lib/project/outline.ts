@@ -7,6 +7,8 @@ type Heading = typeof headingLevels[number]
 export interface OutlineHeading extends SourceLocation {
   command: Heading
   title: string
+  titleSource: string
+  label?: string
   children: OutlineHeading[]
 }
 
@@ -15,6 +17,7 @@ type OutlineEvent = Omit<OutlineHeading, 'children'> | { include: string }
 function analyzeSource(path: string, source: string): OutlineEvent[] {
   const text = maskLatexCode(source)
   const commands = /\\(?:\\|(begin|end|input|include|part|chapter|section|subsection|subsubsection|paragraph|subparagraph)(?![A-Za-z@])(\s*\*)?)/g
+  const adjacentLabel = /\s*\\label\s*\{([^\s{}\\]+)\}/y
   let events: OutlineEvent[] = []
   for (let match = commands.exec(text); match; match = commands.exec(text)) {
     const command = match[1] as Heading | 'begin' | 'end' | 'input' | 'include' | undefined
@@ -43,7 +46,11 @@ function analyzeSource(path: string, source: string): OutlineEvent[] {
     } else {
       const title = argument.replace(/\\(?:textbf|textit|emph|texttt|textrm)\s*\{([^{}]*)\}/g, '$1')
         .replace(/\s+/g, ' ')
+      // An adjacent label belongs to this heading. Labels in the body can belong to figures or lists.
+      adjacentLabel.lastIndex = commands.lastIndex
+      const label = adjacentLabel.exec(text)?.[1]
       events.push({ path, start: argumentStart, end, command, title: title || '(Untitled heading)',
+        titleSource: argument, label,
         line: lineNumber(source, match.index) })
     }
   }
@@ -68,12 +75,12 @@ function resolveInclude(main: string, target: string, files: Map<string, string>
 }
 
 export function buildProjectOutline(
-  project: ProjectFileSystem, main: string, active: { path: string; source: string },
+  project: Pick<ProjectFileSystem, 'files'>, main: string, active?: { path: string; source: string },
 ): OutlineHeading[] {
   const files = new Map<string, string>()
   for (const file of project.files.values()) {
     if ('content' in file && /\.tex$/i.test(file.path)) {
-      files.set(file.path, file.path === active.path ? active.source : file.content ?? '')
+      files.set(file.path, file.path === active?.path ? active.source : file.content ?? '')
     }
   }
   const headings: OutlineHeading[] = []

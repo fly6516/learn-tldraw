@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type Ref } from 'react'
+import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type Ref } from 'react'
 import { createPortal } from 'react-dom'
 import dynamic from 'next/dynamic'
 import type { editor, IPosition } from 'monaco-editor'
@@ -16,7 +16,9 @@ import { exportSourceArchive } from '@/lib/project/source-archive'
 import type { ProjectFile, ProjectFileSystem, ResearchNodeData } from '@/lib/project/types'
 import { ChapterAiPanel } from './ChapterAiPanel'
 import { ReferencesPanel } from './ReferencesPanel'
-import { OutlinePanel } from './OutlinePanel'
+import { OutlinePanel, type OutlineCanvasActions } from './OutlinePanel'
+import { buildProjectOutline } from '@/lib/project/outline'
+import { indexOutline } from '@/lib/project/section-links'
 import { checkCitations, collectBibliography } from '@/lib/project/references'
 import { sourcePosition, type SourceLocation } from '@/lib/project/latex-source'
 import type { SourceProblem } from './MonacoSourceEditor'
@@ -92,6 +94,7 @@ type GenerateSource = (project: ProjectFileSystem, onNode?: (node: ResearchNodeD
 
 export interface SourceWorkspaceHandle {
   openFile: (path: string, line?: number) => void
+  locate: (location: SourceLocation) => void
   openGeneratedNode: (node: ResearchNodeData) => void
   confirmLeave: () => boolean
   prepareReplacement: () => Promise<boolean>
@@ -114,13 +117,15 @@ function editorSourcePath(model: editor.ITextModel | null) {
   return path.slice(path.indexOf('/', 1) + 1)
 }
 
-export function SourceProjectWorkspace({ project, ref, active, actions, generateSource, onOpenCanvas }: {
+export function SourceProjectWorkspace({ project, ref, active, actions, generateSource, onOpenCanvas, outlineCanvas, onArchiveOutline }: {
   project: ProjectFileSystem
   ref: Ref<SourceWorkspaceHandle>
   active: boolean
   actions: HTMLElement | null
   generateSource?: GenerateSource
   onOpenCanvas: () => void
+  outlineCanvas: OutlineCanvasActions
+  onArchiveOutline: (outline: { project: string; index: ReturnType<typeof indexOutline> } | undefined) => void
 }) {
   const { setFileSystem, storage, storageKey, acceptStoredProject } = useProjectFileSystem()
   const journal = useWritingDrafts(storage, storageKey, project.metadata.createdAt)
@@ -179,6 +184,13 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     return source === generated.content ? next : updateFileContent(next, 'main.tex', source)
   }, [generateSource])
   const workingProject = useMemo(() => withGeneratedSource(applyWritingDrafts(project, drafts)), [drafts, project, withGeneratedSource])
+  const workingFiles = workingProject.files
+  const headings = useMemo(() => buildProjectOutline({ files: workingFiles }, main), [workingFiles, main])
+  const archiveIndex = useMemo(() => project.metadata.sourceMode === 'archive' && journal.ready
+    ? indexOutline(headings) : undefined, [headings, journal.ready, project.metadata.sourceMode])
+  useLayoutEffect(() => {
+    onArchiveOutline(archiveIndex ? { project: project.metadata.createdAt, index: archiveIndex } : undefined)
+  }, [archiveIndex, onArchiveOutline, project.metadata.createdAt])
   const source = currentFile?.content ?? ''
   const workingFile = workingProject.files.get(selected)
   const draft = workingFile && 'content' in workingFile ? workingFile.content ?? '' : ''
@@ -281,6 +293,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
 
   useImperativeHandle(ref, () => ({
     openFile,
+    locate,
     confirmLeave: () => !unprotected || window.confirm('Some drafts have not been saved locally. Leave this page?'),
     async prepareReplacement() {
       if (writeInProgress.current || !journal.ready || !confirmDiscard()) return false
@@ -533,7 +546,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
                   {navigation === 'files'
                     ? <Files nodes={tree} selected={selected} main={main} dirty={drafts} sourcePaths={sourcePaths}
                         onSelect={openFile} onSetMain={setMain} />
-                    : <OutlinePanel project={workingProject} main={main} path={selected} draft={draft} onLocate={locate} />}
+                    : <OutlinePanel headings={headings} main={main} onLocate={locate} canvas={outlineCanvas} />}
                 </div>
               )}
             </aside>
