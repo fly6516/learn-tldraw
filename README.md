@@ -7,10 +7,15 @@ Open http://localhost:3000 to choose a workspace.
   in the current browser. **Writing** uses `/research?view=write` and is part of the same project.
 - `/research-dev` uses the same views with a sample paper.
 
-Use **Add node** to create a card and select it to edit its content and section
-properties. Draw directed connections from a card's outgoing handle, or choose a target in
-the node properties. **Add Page** creates another graph in the project. Canvas exports use
-the selected page and its directed connections.
+Use **Add node** to create a card. **Select** moves nodes and box-selects them, **Pan** moves
+the viewport, and **Connect** links two cards in click order or by dragging from an outgoing
+handle. The toolbar offers **Undo**, **Redo**, **Delete selection**, and **Fit View**.
+Undo and redo apply to edits on the current canvas page, including moves, node edits, and
+connections. Use Ctrl/Cmd+Z or Ctrl/Cmd+Shift+Z when the canvas has focus. **Add Page** creates
+another graph in the project. Canvas exports use the selected page and its directed connections.
+
+**Search canvas** finds nodes by title, content, tags, or section number across all
+canvas pages. Select a result to open its page and center the node.
 
 Use **Project menu → Project Backup** to download a `.research-canvas` file. In another browser, choose the
 file from the same dialog and confirm **Replace Project**. The backup includes all canvas
@@ -75,6 +80,10 @@ current selection. Citation issues list missing keys in project `.tex` files and
 definition of a duplicate key. Click an issue to select the key in its source file.
 The check uses all project bibliographies and includes unsaved drafts. AI
 suggestions flag new citation keys that have no matching project bibliography entry.
+
+Open **Search** beside **Files** and **Outline** to find literal text across project
+`.tex` and `.bib` files, including local drafts shown in the editor. Select a result
+to open its file and select the matching text.
 
 Open **Outline** to browse headings from the selected main file and its statically linked
 `\input` and `\include` files. The outline follows document order and nests subheadings under

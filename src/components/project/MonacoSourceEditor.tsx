@@ -98,6 +98,7 @@ export function MonacoSourceEditor({ path, value, readOnly, problems, onChange, 
   const namespace = useId()
   const modelPath = (path: string) => `inmemory://research/${namespace}/${path.split('/').map(encodeURIComponent).join('/')}`
   const uri = modelPath(path)
+  const activeUri = monaco.Uri.parse(uri).toString()
   const [editor, setEditor] = useState<monaco.editor.IStandaloneCodeEditor>()
   const [model, setModel] = useState<monaco.editor.ITextModel | null>(null)
 
@@ -116,12 +117,11 @@ export function MonacoSourceEditor({ path, value, readOnly, problems, onChange, 
 
   useEffect(() => {
     if (!editor) return
-    const currentUri = monaco.Uri.parse(uri).toString()
     const cursor = editor.onDidChangeCursorPosition(({ position }) => {
-      if (editor.getModel()?.uri.toString() === currentUri) onCursor(path, position)
+      if (editor.getModel()?.uri.toString() === activeUri) onCursor(path, position)
     })
     return () => cursor.dispose()
-  }, [editor, onCursor, path, uri])
+  }, [activeUri, editor, onCursor, path])
 
   useEffect(() => () => {
     for (const item of monaco.editor.getModels()) {
@@ -130,7 +130,7 @@ export function MonacoSourceEditor({ path, value, readOnly, problems, onChange, 
   }, [namespace])
 
   useEffect(() => {
-    if (!model || model.isDisposed() || model.uri.toString() !== monaco.Uri.parse(uri).toString()) return
+    if (!model || model.isDisposed() || model.uri.toString() !== activeUri) return
     const markers = problems.filter(problem => problem.path === path).map(problem => {
       const start = problem.location ? sourcePosition(value, problem.location.start) : {
         lineNumber: Math.min(problem.line, model.getLineCount()), column: 1,
@@ -146,7 +146,7 @@ export function MonacoSourceEditor({ path, value, readOnly, problems, onChange, 
       }
     })
     monaco.editor.setModelMarkers(model, 'research-diagnostics', markers)
-  }, [model, path, problems, uri, value])
+  }, [activeUri, model, path, problems, value])
 
   const language = /\.bib$/i.test(path) ? 'research-bib'
     : /\.(tex|sty|cls|ltx|bst|def)$/i.test(path) ? 'research-tex' : 'plaintext'
@@ -154,7 +154,12 @@ export function MonacoSourceEditor({ path, value, readOnly, problems, onChange, 
   return (
     <Editor height="100%" path={uri} language={language} value={value.slice(bom.length)} theme="research-paper" keepCurrentModel saveViewState
       onMount={instance => { setEditor(instance); setModel(instance.getModel()); onEditor(instance) }}
-      onChange={next => { if (next !== undefined) onChange(bom + next) }}
+      onChange={next => {
+        // A controlled update can arrive while the wrapper is switching models.
+        if (next === undefined || editor?.getModel()?.uri.toString() !== activeUri
+          || editor.getOption(monaco.editor.EditorOption.readOnly)) return
+        onChange(bom + next)
+      }}
       loading={<p role="status" className="p-4 text-sm text-muted-foreground">Loading source editor…</p>}
       options={{
         ariaLabel: 'Project source editor', automaticLayout: true, fontSize: 14, lineHeight: 23,

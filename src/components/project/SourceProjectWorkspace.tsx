@@ -25,6 +25,7 @@ import { findPdfRegion, type SyncRegion } from '@/lib/project/source-sync'
 import { applyWritingDrafts, draftConflicts, editableSource, type WritingDrafts } from '@/lib/project/writing-drafts'
 import { clearWritingState, commitWritingDrafts } from '@/lib/project/storage'
 import { useWritingDrafts } from './useWritingDrafts'
+import { SourceSearchPanel } from './SourceSearchPanel'
 
 const MonacoSourceEditor = dynamic(() => import('./MonacoSourceEditor').then(module => module.MonacoSourceEditor), {
   ssr: false,
@@ -107,6 +108,12 @@ function sameSources(previous: ProjectFileSystem['files'], current: ProjectFileS
   })
 }
 
+function editorSourcePath(model: editor.ITextModel | null) {
+  const path = model?.uri.path ?? ''
+  // The first segment scopes the Monaco model to this workspace.
+  return path.slice(path.indexOf('/', 1) + 1)
+}
+
 export function SourceProjectWorkspace({ project, ref, active, actions, generateSource, onOpenCanvas }: {
   project: ProjectFileSystem
   ref: Ref<SourceWorkspaceHandle>
@@ -144,7 +151,8 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const [pdfTarget, setPdfTarget] = useState<SyncRegion | null>(null)
   const [syncMessage, setSyncMessage] = useState('')
   const [panel, setPanel] = useState<'problems' | 'references' | 'ai' | null>(null)
-  const [navigation, setNavigation] = useState<'files' | 'outline'>('files')
+  const [navigation, setNavigation] = useState<'files' | 'outline' | 'search'>('files')
+  const [searchQuery, setSearchQuery] = useState('')
   const [narrowView, setNarrowView] = useState<'source' | 'pdf'>('source')
   const [mobileFiles, setMobileFiles] = useState(false)
   const [desktopFiles, setDesktopFiles] = useState(true)
@@ -212,22 +220,26 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     editorRef.current = instance
     if (!instance) return
     requestAnimationFrame(() => {
+      const container = instance.getDomNode()
+      if (!container?.clientWidth || !container.clientHeight) return
       const pending = pendingJump.current
       const model = instance.getModel()
       if (!model) return
       if (!pending) {
-        if (!restoredCursor.current && restoredView && model.uri.path.endsWith('/' + restoredView.path)) {
+        if (!restoredCursor.current && restoredView && editorSourcePath(model) === restoredView.path) {
           restoredCursor.current = true
+          instance.layout()
           const position = model.validatePosition(restoredView)
           instance.setPosition(position)
           instance.revealLineInCenter(position.lineNumber)
         }
         return
       }
-      if (!model.uri.path.endsWith('/' + pending.path)) return
+      if (editorSourcePath(model) !== pending.path) return
       restoredCursor.current = true
       pendingJump.current = null
       if (pending.range) {
+        instance.layout()
         const start = model.validatePosition(pending.range.start)
         const end = model.validatePosition(pending.range.end)
         instance.setSelection({
@@ -241,6 +253,10 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       instance.focus()
     })
   }, [captureCursor, restoredView])
+
+  useEffect(() => {
+    if (active) applyPendingJump(editorRef.current)
+  }, [active, narrowView, applyPendingJump])
 
   function openFile(path: string, line?: number, location?: SourceLocation, selectLine = false) {
     if (!sourcePaths.has(path)) return
@@ -372,7 +388,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   function insertReference(key: string) {
     const instance = editorRef.current
     const range = instance?.getSelection()
-    if (!instance || !range || !isTex || readOnly || locked || !instance.getModel()?.uri.path.endsWith('/' + selected)) return
+    if (!instance || !range || !isTex || readOnly || locked || editorSourcePath(instance.getModel()) !== selected) return
     setNarrowView('source')
     instance.pushUndoStop()
     instance.executeEdits('citation', [{ range, text: `\\cite{${key}}`, forceMoveMarkers: true }])
@@ -501,19 +517,25 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
             <aside id="writing-files" aria-label="Project navigation"
               className={'flex h-full min-h-0 flex-col overflow-hidden bg-slate-50 text-sm ' + (desktopFiles ? '' : 'lg:hidden')}
               onKeyDown={event => { if (event.key === 'Escape' && mobileFiles) closeMobileFiles(true) }}>
-              <div className="flex shrink-0 items-center gap-1 border-b p-2">
-                {(['files', 'outline'] as const).map(tab => <Button key={tab} ref={tab === 'files' ? firstFileTab : undefined}
-                  size="sm" variant={navigation === tab ? 'secondary' : 'ghost'}
-                  aria-pressed={navigation === tab} onClick={() => setNavigation(tab)}>{tab === 'files' ? 'Files' : 'Outline'}</Button>)}
+              <div className="flex shrink-0 flex-wrap items-center gap-1 border-b p-2">
+                {([['files', 'Files'], ['outline', 'Outline'], ['search', 'Search']] as const).map(([tab, label]) => (
+                  <Button key={tab} ref={tab === 'files' ? firstFileTab : undefined}
+                    size="sm" className="px-1.5 text-xs" variant={navigation === tab ? 'secondary' : 'ghost'}
+                    aria-pressed={navigation === tab} onClick={() => setNavigation(tab)}>{label}</Button>
+                ))}
                 <Button size="icon-sm" variant="ghost" aria-label="Close file navigation" className="ml-auto lg:hidden"
                   onClick={() => closeMobileFiles(true)}><X /></Button>
               </div>
-              <div className="min-h-0 flex-1 overflow-auto p-2">
-                {navigation === 'files'
-                  ? <Files nodes={tree} selected={selected} main={main} dirty={drafts} sourcePaths={sourcePaths}
-                      onSelect={openFile} onSetMain={setMain} />
-                  : <OutlinePanel project={workingProject} main={main} path={selected} draft={draft} onLocate={locate} />}
-              </div>
+              {navigation === 'search' ? (
+                <SourceSearchPanel files={workingProject.files} query={searchQuery} onQuery={setSearchQuery} onLocate={locate} />
+              ) : (
+                <div className="min-h-0 flex-1 overflow-auto p-2">
+                  {navigation === 'files'
+                    ? <Files nodes={tree} selected={selected} main={main} dirty={drafts} sourcePaths={sourcePaths}
+                        onSelect={openFile} onSetMain={setMain} />
+                    : <OutlinePanel project={workingProject} main={main} path={selected} draft={draft} onLocate={locate} />}
+                </div>
+              )}
             </aside>
           </ResizablePanel>
           <ResizableHandle className="hidden lg:flex" />

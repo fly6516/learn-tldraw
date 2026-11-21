@@ -1,12 +1,12 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
-import { Plus } from 'lucide-react'
+import { Cable, Hand, Maximize, MousePointer2, Plus, Redo2, Trash2, Undo2 } from 'lucide-react'
 import {
-  Background, Controls, Handle, MarkerType, Position, ReactFlow,
+  Background, Controls, getViewportForBounds, Handle, MarkerType, Position, ReactFlow,
   type Connection, type EdgeChangeset, type Node, type NodeChangeset, type NodeProps,
-  type ReactFlowInstance, type XYPosition,
+  type ReactFlowInstance,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { Button } from '@/components/ui/button'
@@ -16,28 +16,65 @@ import { RESEARCH_NODE_META, type ResearchNodeType } from '@/app/research/resear
 import {
   removeResearchNodes, validResearchConnection, type ResearchPage, type ResearchNode,
 } from '@/lib/project/research-graph'
+import { researchNodeTitle as nodeTitle } from '@/lib/project/canvas-search'
 
 type FlowNode = Node<ResearchNode['data'], 'research'>
+type CanvasTool = 'select' | 'pan' | 'connect'
+const alternatePanButtons = [1, 2]
+const canvasTools = [
+  ['select', 'Select', 'V', MousePointer2],
+  ['pan', 'Pan', 'H', Hand],
+  ['connect', 'Connect', 'C', Cable],
+] as const
 
-function nodeTitle(data: ResearchNode['data']) {
-  return data.customLabel || RESEARCH_NODE_META[data.section].label
-}
-
-function ResearchCard({ data, selected }: NodeProps<FlowNode>) {
+const ResearchCard = memo(function ResearchCard({ data, selected }: NodeProps<FlowNode>) {
+  const subsection = Boolean(data.parentId)
+  const title = nodeTitle(data)
   return (
-    <article className={`w-80 rounded-lg border bg-card p-4 text-card-foreground shadow-sm ${selected ? 'ring-2 ring-primary' : ''}`}>
+    <article className={`w-80 rounded-lg border bg-card text-card-foreground shadow-sm ${subsection ? 'border-blue-500' : ''} ${selected ? 'ring-2 ring-primary' : ''}`}>
       <Handle type="target" position={Position.Left} aria-label="Incoming connection" />
-      <h3 className="break-words font-semibold">{nodeTitle(data)}</h3>
-      {data.customLabel && <p className="text-xs text-muted-foreground">{RESEARCH_NODE_META[data.section].label}</p>}
-      <p className="mt-2 line-clamp-5 whitespace-pre-wrap break-words text-sm">{data.content || 'Select this node to edit its content.'}</p>
-      {data.tags?.length ? <p className="mt-2 truncate text-xs text-muted-foreground">{data.tags.join(' · ')}</p> : null}
+      <header className={`flex items-start gap-2 rounded-t-lg border-b px-3 py-2 ${subsection ? 'bg-blue-50 dark:bg-blue-950' : 'bg-muted/60'}`}>
+        <div className="min-w-0 flex-1">
+          <h3 className="flex flex-wrap items-baseline gap-x-1.5 text-sm font-semibold">
+            {data.level > 1 && <span aria-label={`Heading level ${data.level}`} className="text-xs text-muted-foreground">{'└'.repeat(data.level - 1)}</span>}
+            <span className="[overflow-wrap:anywhere]">{title}</span>
+            {data.metadata?.sectionNumber && <span className="text-xs text-muted-foreground">({data.metadata.sectionNumber})</span>}
+          </h3>
+          {data.customLabel && <p className="text-xs text-muted-foreground">{RESEARCH_NODE_META[data.section].label}</p>}
+        </div>
+        <div className="flex shrink-0 flex-wrap gap-1">
+          {data.metadata?.imported && <span title={data.metadata.importSource}
+            className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] text-indigo-900">imported</span>}
+          {subsection && <span aria-label="Subsection" className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] text-blue-900">sub</span>}
+        </div>
+      </header>
+      {Boolean(data.tags?.length) && <ul aria-label="Node tags" className="flex flex-wrap gap-1 border-b px-3 py-1.5">
+        {data.tags?.map((tag, index) => <li key={index}
+          className="max-w-full rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground [overflow-wrap:anywhere]">{tag}</li>)}
+      </ul>}
+      <p className="nowheel max-h-28 overflow-auto px-3 py-2.5 text-sm whitespace-pre-wrap [overflow-wrap:anywhere]">
+        {data.content || 'Select this node to edit its content.'}
+      </p>
       <Handle type="source" position={Position.Right} aria-label="Outgoing connection" />
     </article>
   )
-}
+})
 
 const nodeTypes = { research: ResearchCard }
 const edgeDefaults = { markerEnd: { type: MarkerType.ArrowClosed } }
+
+function reconcileFlowNodes(projectNodes: ResearchNode[], selectedIds: string[], current: FlowNode[]) {
+  const existing = new Map(current.map(node => [node.id, node]))
+  const selection = new Set(selectedIds)
+  return projectNodes.map(node => {
+    const previous = existing.get(node.id)
+    const position = previous?.dragging ? previous.position : node.position
+    const selected = selection.has(node.id)
+    if (previous && previous.data === node.data && previous.selected === selected
+      && previous.position.x === position.x && previous.position.y === position.y) return previous
+    return { ...previous, ...node, type: 'research' as const, position, selected, ariaLabel: nodeTitle(node.data) }
+  })
+}
 
 function canSetParent(page: ResearchPage, nodeId: string, parentId: string) {
   const byId = new Map(page.nodes.map(node => [node.id, node.data.parentId]))
@@ -49,10 +86,11 @@ function canSetParent(page: ResearchPage, nodeId: string, parentId: string) {
   return true
 }
 
-function NodeDetails({ node, page, onEdit, onConnect, onOpenSource }: {
+function NodeDetails({ node, page, onEdit, onFinishEdit, onConnect, onOpenSource }: {
   node: ResearchNode
   page: ResearchPage
-  onEdit: (data: ResearchNode['data']) => void
+  onEdit: (data: ResearchNode['data'], field?: string) => void
+  onFinishEdit: () => void
   onConnect: (target: string) => void
   onOpenSource?: () => void
 }) {
@@ -70,10 +108,12 @@ function NodeDetails({ node, page, onEdit, onConnect, onOpenSource }: {
         </select>
       </label>
       <label className="grid gap-1 text-sm">Section title
-        <Input value={data.customLabel ?? ''} onChange={event => onEdit({ ...data, customLabel: event.target.value })} />
+        <Input value={data.customLabel ?? ''} onBlur={onFinishEdit}
+          onChange={event => onEdit({ ...data, customLabel: event.target.value }, 'title')} />
       </label>
       <label className="grid gap-1 text-sm">Node content
-        <Textarea rows={7} value={data.content} onChange={event => onEdit({ ...data, content: event.target.value })} />
+        <Textarea rows={7} value={data.content} onBlur={onFinishEdit}
+          onChange={event => onEdit({ ...data, content: event.target.value }, 'content')} />
       </label>
       <div className="grid grid-cols-2 gap-2">
         <label className="grid gap-1 text-sm">Level
@@ -83,8 +123,8 @@ function NodeDetails({ node, page, onEdit, onConnect, onOpenSource }: {
           </select>
         </label>
         <label className="grid gap-1 text-sm">Order
-          <Input type="number" value={data.order} onChange={event => {
-            if (Number.isFinite(event.target.valueAsNumber)) onEdit({ ...data, order: event.target.valueAsNumber })
+          <Input type="number" value={data.order} onBlur={onFinishEdit} onChange={event => {
+            if (Number.isFinite(event.target.valueAsNumber)) onEdit({ ...data, order: event.target.valueAsNumber }, 'order')
           }} />
         </label>
       </div>
@@ -97,9 +137,9 @@ function NodeDetails({ node, page, onEdit, onConnect, onOpenSource }: {
         </select>
       </label>
       <label className="grid gap-1 text-sm">Section number
-        <Input value={data.metadata?.sectionNumber ?? ''} onChange={event => onEdit({
+        <Input value={data.metadata?.sectionNumber ?? ''} onBlur={onFinishEdit} onChange={event => onEdit({
           ...data, metadata: { ...data.metadata, sectionNumber: event.target.value || undefined },
-        })} />
+        }, 'number')} />
       </label>
       <div className="space-y-1 text-sm">
         <label className="grid gap-1">Add tag
@@ -134,33 +174,86 @@ function NodeDetails({ node, page, onEdit, onConnect, onOpenSource }: {
   )
 }
 
-export function ResearchGraphEditor({ page, updatePage, sample, actions, sourceNodes, onOpenSource }: {
+export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, onHistory, canUndo, canRedo,
+  sample, actions, sourceNodes, onOpenSource, jumpTo, onJumpHandled }: {
   page: ResearchPage
   updatePage: (update: (current: ResearchPage) => ResearchPage) => void
+  editPage: (update: (current: ResearchPage) => ResearchPage, group?: string) => void
+  onFinishEdit: () => void
+  onHistory: (direction: 'undo' | 'redo') => void
+  canUndo: boolean
+  canRedo: boolean
   sample: boolean
   actions: HTMLElement | null
   sourceNodes: ReadonlySet<ResearchNode['data']>
   onOpenSource: (node: ResearchNode['data']) => void
+  jumpTo?: string
+  onJumpHandled: () => void
 }) {
   const [selectedNodes, setSelectedNodes] = useState<string[]>([])
   const [selectedEdges, setSelectedEdges] = useState<string[]>([])
-  const [dragPositions, setDragPositions] = useState<Record<string, XYPosition>>({})
+  const [nodeState, setNodeState] = useState(() => ({
+    projectNodes: page.nodes, selection: selectedNodes, nodes: reconcileFlowNodes(page.nodes, selectedNodes, []),
+  }))
   const [flow, setFlow] = useState<ReactFlowInstance<FlowNode>>()
   const [error, setError] = useState('')
+  const [tool, setTool] = useState<CanvasTool>('select')
+  const [connectionStart, setConnectionStart] = useState<string>()
+  const canvasElement = useRef<HTMLDivElement>(null)
+  const canJump = jumpTo !== undefined && page.nodes.some(node => node.id === jumpTo)
   const activeNode = selectedNodes.length === 1 ? page.nodes.find(node => node.id === selectedNodes[0]) : undefined
-  const nodes = useMemo<FlowNode[]>(() => page.nodes.map(node => ({
-    ...node, type: 'research', position: dragPositions[node.id] ?? node.position,
-    selected: selectedNodes.includes(node.id), ariaLabel: nodeTitle(node.data),
-  })), [page.nodes, selectedNodes, dragPositions])
+  if (nodeState.projectNodes !== page.nodes || nodeState.selection !== selectedNodes) {
+    setNodeState({
+      projectNodes: page.nodes, selection: selectedNodes,
+      nodes: reconcileFlowNodes(page.nodes, selectedNodes, nodeState.nodes),
+    })
+  }
   const edges = useMemo(() => page.edges.map(edge => ({
     ...edge, selected: selectedEdges.includes(edge.id), reconnectable: false,
   })), [page.edges, selectedEdges])
+  const sourceNode = page.nodes.find(node => node.id === connectionStart)
+  const nodes = useMemo(() => tool === 'connect' && sourceNode
+    ? nodeState.nodes.map(node => node.id === sourceNode.id ? { ...node, className: 'rounded-lg ring-2 ring-indigo-500' } : node)
+    : nodeState.nodes, [nodeState.nodes, sourceNode, tool])
+
+  useEffect(() => {
+    if (!canJump || !jumpTo || activeNode?.id === jumpTo) return
+    const selectFrame = requestAnimationFrame(() => {
+      setSelectedNodes([jumpTo])
+      setSelectedEdges([])
+    })
+    return () => cancelAnimationFrame(selectFrame)
+  }, [activeNode?.id, canJump, jumpTo])
+
+  useEffect(() => {
+    if (!flow?.viewportInitialized || !jumpTo || activeNode?.id !== jumpTo) return
+    // Selecting the node opens its properties and changes the usable canvas size.
+    const frame = requestAnimationFrame(() => {
+      const container = canvasElement.current
+      const target = flow.getInternalNode(jumpTo)
+      if (container && target && container.clientWidth && container.clientHeight) {
+        const bounds = {
+          ...target.internals.positionAbsolute,
+          width: target.measured.width ?? 320, height: target.measured.height ?? 104,
+        }
+        const viewport = getViewportForBounds(bounds, container.clientWidth, container.clientHeight, 0.15, 1.1, 0.2)
+        void flow.setViewport(viewport)
+        updatePage(current => ({ ...current, viewport }))
+        container.focus({ preventScroll: true })
+      }
+      onJumpHandled()
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [activeNode?.id, flow, jumpTo, onJumpHandled, updatePage])
 
   function changeNodes(changes: NodeChangeset<FlowNode>) {
+    // React Flow uses measured dimensions to keep controlled nodes visible.
+    // Keep its transient changes in the canvas instead of rebuilding every node.
+    setNodeState(current => ({ ...current, nodes: changes.applyTo(current.nodes) }))
     const selected = changes.getByType('select')
     const removed = new Set(changes.getByType('remove').map(change => change.id))
-    const positions = changes.getByType('position').filter(change => change.position)
-    const committed = new Map(positions.filter(change => !change.dragging).map(change => [change.id, change.position!]))
+    const committed = new Map(changes.getByType('position').flatMap(change =>
+      change.position && !change.dragging ? [[change.id, change.position] as const] : []))
     if (selected.length || removed.size) setSelectedNodes(current => {
       const next = new Set(current.filter(id => !removed.has(id)))
       for (const change of selected) {
@@ -169,28 +262,26 @@ export function ResearchGraphEditor({ page, updatePage, sample, actions, sourceN
       }
       return [...next]
     })
-    if (positions.length || removed.size) setDragPositions(current => {
-      const next = { ...current }
-      for (const id of removed) delete next[id]
-      for (const change of positions) {
-        if (change.dragging) next[change.id] = change.position!
-        else delete next[change.id]
-      }
-      return next
-    })
-    if (removed.size || committed.size) updatePage(current => {
+    if (removed.size || committed.size) editPage(current => {
       const next = removed.size ? removeResearchNodes(current, removed) : current
-      return { ...next, nodes: next.nodes.map(node => {
+      let moved = false
+      const nodes = next.nodes.map(node => {
         const position = committed.get(node.id)
-        return position ? { ...node, position } : node
-      }) }
+        if (!position || (position.x === node.position.x && position.y === node.position.y)) return node
+        moved = true
+        return { ...node, position }
+      })
+      return moved ? { ...next, nodes } : next
     })
   }
 
   function changeEdges(changes: EdgeChangeset) {
     const removed = new Set(changes.getByType('remove').map(change => change.id))
     const selected = changes.getByType('select')
-    if (removed.size) updatePage(current => ({ ...current, edges: current.edges.filter(edge => !removed.has(edge.id)) }))
+    if (removed.size) editPage(current => {
+      const edges = current.edges.filter(edge => !removed.has(edge.id))
+      return edges.length === current.edges.length ? current : { ...current, edges }
+    })
     if (selected.length || removed.size) setSelectedEdges(current => {
       const next = new Set(current.filter(id => !removed.has(id)))
       for (const change of selected) {
@@ -204,12 +295,29 @@ export function ResearchGraphEditor({ page, updatePage, sample, actions, sourceN
   function connect({ source, target }: Pick<Connection, 'source' | 'target'>) {
     if (!validResearchConnection(page, source, target)) {
       setError('Choose a different target. Connections cannot repeat, point to themselves, or create a cycle.')
-      return
+      return false
     }
     setError('')
     const edge = { id: crypto.randomUUID(), source, target }
-    updatePage(current => validResearchConnection(current, source, target)
+    editPage(current => validResearchConnection(current, source, target)
       ? { ...current, edges: [...current.edges, edge] } : current)
+    setConnectionStart(undefined)
+    return true
+  }
+
+  function pickTool(next: CanvasTool) {
+    setTool(next)
+    setConnectionStart(undefined)
+    setError('')
+  }
+
+  function chooseEndpoint(id: string) {
+    if (tool !== 'connect') return
+    if (sourceNode) connect({ source: sourceNode.id, target: id })
+    else {
+      setConnectionStart(id)
+      setError('')
+    }
   }
 
   function addNode() {
@@ -218,7 +326,7 @@ export function ResearchGraphEditor({ page, updatePage, sample, actions, sourceN
     const position = box && flow ? flow.screenToFlowPosition({
       x: box.left + box.width / 2 - 160, y: box.top + box.height / 2 - 50,
     }) : { x: 50, y: 50 }
-    updatePage(current => {
+    editPage(current => {
       let y = position.y
       while (current.nodes.some(node => Math.abs(node.position.x - position.x) < 330 && Math.abs(node.position.y - y) < 170)) y += 190
       return {
@@ -233,34 +341,98 @@ export function ResearchGraphEditor({ page, updatePage, sample, actions, sourceN
 
   function deleteSelection() {
     const ids = new Set(selectedNodes)
-    updatePage(current => {
-      const next = removeResearchNodes(current, ids)
-      return { ...next, edges: next.edges.filter(edge => !selectedEdges.includes(edge.id)) }
+    editPage(current => {
+      const next = current.nodes.some(node => ids.has(node.id)) ? removeResearchNodes(current, ids) : current
+      const edges = next.edges.filter(edge => !selectedEdges.includes(edge.id))
+      return edges.length === next.edges.length ? next : { ...next, edges }
     })
     setSelectedNodes([])
     setSelectedEdges([])
+    setConnectionStart(undefined)
+    canvasElement.current?.focus({ preventScroll: true })
+  }
+
+  const canDelete = page.nodes.some(node => selectedNodes.includes(node.id)) || page.edges.some(edge => selectedEdges.includes(edge.id))
+
+  function moveHistory(direction: 'undo' | 'redo') {
+    setSelectedNodes([])
+    setSelectedEdges([])
+    setConnectionStart(undefined)
+    setError('')
+    onHistory(direction)
+    canvasElement.current?.focus({ preventScroll: true })
+  }
+
+  function handleKey(event: KeyboardEvent<HTMLDivElement>) {
+    const target = event.target
+    if (!(target instanceof Element) || target.closest('input, textarea, select, [contenteditable="true"]')) return
+    const key = event.key.toLowerCase()
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && (key === 'z' || key === 'y')) {
+      event.preventDefault()
+      const redo = key === 'y' || event.shiftKey
+      if (redo ? canRedo : canUndo) moveHistory(redo ? 'redo' : 'undo')
+      return
+    }
+    if (event.ctrlKey || event.metaKey || event.altKey) return
+    if (key === 'escape' && tool === 'connect') {
+      pickTool('select')
+    } else if ((key === 'delete' || key === 'backspace') && tool === 'select' && canDelete) {
+      event.preventDefault()
+      deleteSelection()
+    } else if (key === 'enter' && tool === 'connect') {
+      const id = target.closest<HTMLElement>('.react-flow__node')?.dataset.id
+      if (id) {
+        event.preventDefault()
+        event.stopPropagation()
+        chooseEndpoint(id)
+      }
+    } else {
+      const shortcut = canvasTools.find(([, , letter]) => letter.toLowerCase() === key)
+      if (shortcut) pickTool(shortcut[0])
+    }
   }
 
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col" onKeyDownCapture={handleKey}>
       {actions && createPortal(
         <Button size="sm" onClick={addNode}><Plus /> Add node</Button>, actions,
       )}
-      <div className="flex flex-wrap items-center gap-2 border-b p-2">
-        <Button size="sm" variant="outline" onClick={() => void flow?.fitView()} disabled={!page.nodes.length}>Fit View</Button>
-        <Button size="sm" variant="outline" onClick={deleteSelection}
-          disabled={!page.nodes.some(node => selectedNodes.includes(node.id)) && !page.edges.some(edge => selectedEdges.includes(edge.id))}>
-          Delete Selection
-        </Button>
-        {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+      <div className="shrink-0 border-b bg-background p-2">
+        <div role="group" aria-label="Canvas tools" className="flex flex-wrap items-center gap-2">
+          <div className="flex gap-0.5 rounded-lg bg-muted p-0.5">
+            {canvasTools.map(([mode, label, shortcut, Icon]) => (
+              <Button key={mode} size="sm" variant={tool === mode ? 'outline' : 'ghost'} aria-pressed={tool === mode}
+                aria-label={label} title={`${label} (${shortcut})`} onClick={() => pickTool(mode)}><Icon /><span className="hidden sm:inline">{label}</span></Button>
+            ))}
+          </div>
+          <div className="flex gap-0.5">
+            <Button size="icon-sm" variant="ghost" aria-label="Undo" title="Undo (Ctrl / Cmd + Z)" disabled={!canUndo}
+              onClick={() => moveHistory('undo')}><Undo2 /></Button>
+            <Button size="icon-sm" variant="ghost" aria-label="Redo" title="Redo (Ctrl / Cmd + Shift + Z)" disabled={!canRedo}
+              onClick={() => moveHistory('redo')}><Redo2 /></Button>
+            <Button size="icon-sm" variant="ghost" aria-label="Delete Selection" title="Delete selection" disabled={!canDelete}
+              onClick={deleteSelection}><Trash2 /></Button>
+            <Button size="icon-sm" variant="ghost" aria-label="Fit View" title="Fit all nodes" disabled={!page.nodes.length}
+              onClick={() => void flow?.fitView()}><Maximize /></Button>
+          </div>
+          {tool === 'connect' && <p role="status" className="text-xs text-muted-foreground">
+            {sourceNode ? `From ${nodeTitle(sourceNode.data)} · Choose a target · Esc to cancel` : 'Choose a source node, or drag from an outgoing handle.'}
+          </p>}
+        </div>
+        {error && <p role="alert" className="mt-1 text-sm text-destructive">{error}</p>}
       </div>
       <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
-        <div id="research-flow" className="relative min-h-24 min-w-0 flex-1 sm:min-h-40">
+        <div id="research-flow" className="relative min-h-24 min-w-0 flex-1 sm:min-h-40" ref={canvasElement} tabIndex={-1}>
           <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} defaultEdgeOptions={edgeDefaults}
             className="[color-scheme:light] [--xy-background-color:var(--muted)] [--xy-edge-stroke:var(--muted-foreground)] [--xy-edge-stroke-width:2] dark:[color-scheme:dark]"
             defaultMarkerColor={null}
             onInit={setFlow} onNodesChange={changeNodes} onEdgesChange={changeEdges} onConnect={connect}
+            onNodeClick={(_, node) => chooseEndpoint(node.id)}
+            onPaneClick={() => { setConnectionStart(undefined); setError(''); canvasElement.current?.focus({ preventScroll: true }) }}
             isValidConnection={connection => validResearchConnection(page, connection.source, connection.target)}
+            nodesDraggable={tool === 'select'} nodesConnectable={tool === 'connect'} connectOnClick={tool === 'connect'}
+            elementsSelectable={tool === 'select'} selectionOnDrag={tool === 'select'} deleteKeyCode={null}
+            panOnDrag={tool === 'pan' || alternatePanButtons}
             defaultViewport={page.viewport} fitView={sample}
             onMoveEnd={(_, viewport) => updatePage(current =>
               viewport.x === current.viewport.x && viewport.y === current.viewport.y && viewport.zoom === current.viewport.zoom
@@ -276,9 +448,10 @@ export function ResearchGraphEditor({ page, updatePage, sample, actions, sourceN
         {activeNode && (
           <NodeDetails key={activeNode.id} node={activeNode} page={page}
             onOpenSource={sourceNodes.has(activeNode.data) ? () => onOpenSource(activeNode.data) : undefined}
-            onEdit={data => updatePage(current => ({
+            onFinishEdit={onFinishEdit}
+            onEdit={(data, field) => editPage(current => ({
               ...current, nodes: current.nodes.map(node => node.id === activeNode.id ? { ...node, data } : node),
-            }))}
+            }), field && `${activeNode.id}:${field}`)}
             onConnect={target => connect({ source: activeNode.id, target })} />
         )}
       </div>

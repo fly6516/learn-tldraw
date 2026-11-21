@@ -1,9 +1,9 @@
 'use client'
 
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
-import { ChevronDown, FileCode2, LayoutGrid, Network } from 'lucide-react'
+import { ChevronDown, FileCode2, LayoutGrid, Network, Search } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
@@ -24,6 +24,9 @@ import { LatexImportDialog } from './LatexImportDialog'
 import { LatexPreviewPanel } from './LatexPreviewPanel'
 import { ProjectBackupDialog } from './ProjectBackupDialog'
 import { ResearchGraphEditor } from './ResearchGraphEditor'
+import { CanvasSearchDialog } from './CanvasSearchDialog'
+import type { CanvasLocation } from '@/lib/project/canvas-search'
+import { emptyCanvasHistory, recordCanvasEdit, stepCanvasHistory, type CanvasHistory, type CanvasSnapshot } from '@/lib/project/canvas-history'
 
 function Workspace({ sample }: { sample?: ResearchCanvas }) {
   const { fileSystem, initializeProject, setFileSystem } = useProjectFileSystem()
@@ -32,6 +35,9 @@ function Workspace({ sample }: { sample?: ResearchCanvas }) {
   const [backupOpen, setBackupOpen] = useState(false)
   const [showFiles, setShowFiles] = useState(false)
   const [showPreview, setShowPreview] = useState(false)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [nodeJump, setNodeJump] = useState<CanvasLocation>()
+  const [histories, setHistories] = useState<Record<string, CanvasHistory>>({})
   const [canvasVersion, setCanvasVersion] = useState(0)
   const [sourceVersion, setSourceVersion] = useState(0)
   const [canvasActions, setCanvasActions] = useState<HTMLDivElement | null>(null)
@@ -40,6 +46,10 @@ function Workspace({ sample }: { sample?: ResearchCanvas }) {
   const initialCanvas = sample ?? emptyCanvas
   const canvas = fileSystem?.canvas ?? initialCanvas
   const page = activeResearchPage(canvas)
+  const livePage = useRef(page)
+  const history = histories[page.id] ?? emptyCanvasHistory
+  useLayoutEffect(() => { livePage.current = page }, [page])
+  const clearNodeJump = useCallback(() => setNodeJump(undefined), [])
   const generateSource = useCallback((project: ProjectFileSystem, onNode?: Parameters<typeof generateProjectSource>[2]) =>
     generateProjectSource(page, project, onNode), [page])
   const generated = useMemo(() => {
@@ -95,6 +105,37 @@ function Workspace({ sample }: { sample?: ResearchCanvas }) {
     })
   }
 
+  function snapshot(current: ResearchPage): CanvasSnapshot {
+    return { nodes: current.nodes, edges: current.edges }
+  }
+
+  function applySnapshot(next: CanvasSnapshot) {
+    livePage.current = { ...livePage.current, ...next }
+    updatePage(current => ({ ...current, ...next }))
+  }
+
+  function editPage(update: (current: ResearchPage) => ResearchPage, group?: string) {
+    const previous = snapshot(livePage.current)
+    const next = snapshot(update(livePage.current))
+    if (previous.nodes === next.nodes && previous.edges === next.edges) return
+    setHistories(current => ({ ...current, [page.id]: recordCanvasEdit(current[page.id] ?? emptyCanvasHistory, previous, next, group) }))
+    applySnapshot(next)
+  }
+
+  function finishEditGroup() {
+    setHistories(current => {
+      const present = current[page.id]
+      return present?.group ? { ...current, [page.id]: { ...present, group: undefined } } : current
+    })
+  }
+
+  function stepHistory(direction: 'undo' | 'redo') {
+    const step = stepCanvasHistory(history, snapshot(livePage.current), direction)
+    if (!step) return
+    setHistories(current => ({ ...current, [page.id]: step.history }))
+    applySnapshot(step.snapshot)
+  }
+
   function addPage() {
     const id = crypto.randomUUID()
     updateCanvas(current => ({
@@ -102,8 +143,14 @@ function Workspace({ sample }: { sample?: ResearchCanvas }) {
     }))
   }
 
+  function locateNode(location: CanvasLocation) {
+    updateCanvas(current => current.activePageId === location.pageId ? current : { ...current, activePageId: location.pageId })
+    setNodeJump(location)
+    setSearchOpen(false)
+  }
+
   function importNodes(nodes: ResearchNode[]) {
-    updatePage(current => {
+    editPage(current => {
       const top = current.nodes.reduce((max, node) => Math.max(max, node.position.y + 340), 0)
       const order = current.nodes.reduce((max, node) => Math.max(max, node.data.order + 1), 0)
       return { ...current, nodes: [...current.nodes, ...nodes.map((node, index) => ({
@@ -158,6 +205,7 @@ function Workspace({ sample }: { sample?: ResearchCanvas }) {
           </select>
         </label>
         <Button variant="outline" size="sm" onClick={addPage}>Add Page</Button>
+        <Button variant="outline" size="sm" onClick={() => setSearchOpen(true)}><Search /> Search canvas</Button>
         <Input aria-label="Page name" className="w-36" key={`${canvasVersion}:${page.id}`} defaultValue={page.name}
           onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }}
           onBlur={event => {
@@ -173,6 +221,8 @@ function Workspace({ sample }: { sample?: ResearchCanvas }) {
             <ProjectPanel onOpenWriting={openWriting} />
           </div>}
           <ResearchGraphEditor key={`${canvasVersion}:${page.id}`} page={page} updatePage={updatePage} actions={canvasActions}
+            editPage={editPage} onFinishEdit={finishEditGroup} onHistory={stepHistory} canUndo={history.undo.length > 0} canRedo={history.redo.length > 0}
+            jumpTo={nodeJump?.pageId === page.id ? nodeJump.nodeId : undefined} onJumpHandled={clearNodeJump}
             sourceNodes={generated.nodes} onOpenSource={node => {
               switchView('write')
               writing.current?.openGeneratedNode(node)
@@ -187,6 +237,7 @@ function Workspace({ sample }: { sample?: ResearchCanvas }) {
           active={view === 'write'} generateSource={fileSystem.metadata.sourceMode === 'archive' ? undefined : generateSource}
           onOpenCanvas={() => switchView('canvas')} />
       </div>
+      {searchOpen && <CanvasSearchDialog pages={canvas.pages} onOpenChange={setSearchOpen} onLocate={locateNode} />}
       <LatexImportDialog open={importOpen} onOpenChange={setImportOpen} onImportNodes={importNodes}
         onProjectImport={async project => {
           if (await writing.current?.prepareReplacement() === false) return false
@@ -198,6 +249,7 @@ function Workspace({ sample }: { sample?: ResearchCanvas }) {
       {backupOpen && <ProjectBackupDialog canvas={canvas} project={fileSystem} onRestore={async project => {
         if (await writing.current?.prepareReplacement() === false) return false
         setCanvasVersion(version => version + 1)
+        setHistories({})
         setSourceVersion(version => version + 1)
         setShowFiles(false)
         setFileSystem(project)
