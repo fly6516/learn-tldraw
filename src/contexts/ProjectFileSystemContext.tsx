@@ -5,7 +5,7 @@
 
 'use client'
 
-import { createContext, useContext, useState, useCallback, useEffect, ReactNode } from 'react'
+import { createContext, useContext, useState, useCallback, useEffect, useRef, ReactNode } from 'react'
 import type {
   ProjectFileSystem,
   LatexTemplate,
@@ -34,6 +34,9 @@ interface ProjectFileSystemContextValue {
   deleteFile: (path: string) => void
   getFileContent: (path: string) => string | Blob | undefined
   setFileSystem: React.Dispatch<React.SetStateAction<ProjectFileSystem | null>>
+  storage: IDBDatabase | null
+  storageKey?: string
+  acceptStoredProject: (project: ProjectFileSystem, previous: ProjectFileSystem) => void
 }
 
 const ProjectFileSystemContext = createContext<ProjectFileSystemContextValue | null>(null)
@@ -44,6 +47,13 @@ export function ProjectFileSystemProvider({ children, storageKey }: { children: 
   const [storage, setStorage] = useState<IDBDatabase | null>(null)
   const [ready, setReady] = useState(!storageKey)
   const [storageError, setStorageError] = useState(false)
+  const lastStored = useRef<ProjectFileSystem | null>(null)
+
+  const acceptStoredProject = useCallback((project: ProjectFileSystem, previous: ProjectFileSystem) => {
+    lastStored.current = project
+    setFileSystem(current => current === previous ? project : current?.metadata.createdAt === project.metadata.createdAt
+      ? { ...project, canvas: current.canvas } : current)
+  }, [])
 
   useEffect(() => {
     if (!storageKey) return
@@ -58,6 +68,7 @@ export function ProjectFileSystemProvider({ children, storageKey }: { children: 
         }
         const saved = await readProject(database, key)
         if (!active) return
+        lastStored.current = saved ?? null
         setFileSystem(saved ?? null)
         setStorage(database)
       } catch {
@@ -74,7 +85,7 @@ export function ProjectFileSystemProvider({ children, storageKey }: { children: 
   }, [storageKey])
 
   useEffect(() => {
-    if (!storageKey || !storage || !fileSystem) return
+    if (!storageKey || !storage || !fileSystem || fileSystem === lastStored.current) return
     void writeProject(storage, storageKey, fileSystem).catch(() => setStorageError(true))
   }, [storage, storageKey, fileSystem])
 
@@ -194,6 +205,9 @@ export function ProjectFileSystemProvider({ children, storageKey }: { children: 
         deleteFile,
         getFileContent,
         setFileSystem,
+        storage,
+        storageKey,
+        acceptStoredProject,
       }}
     >
       {storageError && (

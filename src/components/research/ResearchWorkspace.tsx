@@ -120,7 +120,7 @@ function Workspace({ sample }: { sample?: ResearchCanvas }) {
       <header aria-label="Project" className="z-30 grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 border-b bg-background px-3 py-2 md:flex md:px-4">
         <div className="flex min-w-0 items-center gap-2">
           <Link href="/" aria-label="Research Canvas home" className="rounded-md bg-indigo-100 p-2 text-indigo-700 hover:bg-indigo-200"
-            onNavigate={event => { if (writing.current?.confirmDiscard() === false) event.preventDefault() }}>
+            onNavigate={event => { if (writing.current?.confirmLeave() === false) event.preventDefault() }}>
             <Network className="size-4" aria-hidden />
           </Link>
           <h1 className="min-w-0 max-w-56 truncate text-sm font-semibold md:max-w-36 xl:max-w-56" title={fileSystem.metadata.projectName}>{fileSystem.metadata.projectName}</h1>
@@ -188,15 +188,15 @@ function Workspace({ sample }: { sample?: ResearchCanvas }) {
           onOpenCanvas={() => switchView('canvas')} />
       </div>
       <LatexImportDialog open={importOpen} onOpenChange={setImportOpen} onImportNodes={importNodes}
-        onProjectImport={project => {
-          if (writing.current?.confirmDiscard() === false) return false
+        onProjectImport={async project => {
+          if (await writing.current?.prepareReplacement() === false) return false
           setSourceVersion(version => version + 1)
           setFileSystem(current => ({ ...project, canvas: current?.canvas }))
           switchView('write')
           return true
         }} />
-      {backupOpen && <ProjectBackupDialog canvas={canvas} project={fileSystem} onRestore={project => {
-        if (writing.current?.confirmDiscard() === false) return false
+      {backupOpen && <ProjectBackupDialog canvas={canvas} project={fileSystem} onRestore={async project => {
+        if (await writing.current?.prepareReplacement() === false) return false
         setCanvasVersion(version => version + 1)
         setSourceVersion(version => version + 1)
         setShowFiles(false)
@@ -209,7 +209,7 @@ function Workspace({ sample }: { sample?: ResearchCanvas }) {
 
 export function ResearchWorkspace({ sample }: { sample?: ResearchCanvas }) {
   return (
-    <ProjectFileSystemProvider storageKey={sample ? undefined : 'research-flow-v2'}>
+    <ProjectFileSystemProvider storageKey={sample ? 'research-flow-example-v1' : 'research-flow-v2'}>
       <Suspense fallback={<p role="status">Opening research project…</p>}>
         <Workspace sample={sample} />
       </Suspense>

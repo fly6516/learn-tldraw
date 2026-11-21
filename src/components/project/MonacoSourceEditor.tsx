@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import Editor, { loader } from '@monaco-editor/react'
 import * as monaco from 'monaco-editor'
 import { sourcePosition, type SourceLocation } from '@/lib/project/latex-source'
@@ -62,14 +62,38 @@ monaco.languages.setMonarchTokensProvider('research-bib', {
   },
 })
 
-export function MonacoSourceEditor({ path, value, readOnly, problems, onChange, onEditor, onSave }: {
+export function WritingDraftComparison({ path, original, modified }: { path: string; original: string; modified: string }) {
+  const container = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!container.current) return
+    const language = /\.bib$/i.test(path) ? 'research-bib' : /\.tex$/i.test(path) ? 'research-tex' : 'plaintext'
+    const before = monaco.editor.createModel(original, language)
+    const after = monaco.editor.createModel(modified, language)
+    const diff = monaco.editor.createDiffEditor(container.current, {
+      theme: 'research-paper', automaticLayout: true, readOnly: true, originalEditable: false,
+      originalAriaLabel: 'Project source', modifiedAriaLabel: 'Local draft',
+      renderSideBySide: true, minimap: { enabled: false }, wordWrap: 'on',
+    })
+    diff.setModel({ original: before, modified: after })
+    return () => {
+      diff.setModel(null)
+      diff.dispose()
+      before.dispose()
+      after.dispose()
+    }
+  }, [path, original, modified])
+  return <div ref={container} className="size-full" />
+}
+
+export function MonacoSourceEditor({ path, value, readOnly, problems, onChange, onEditor, onSave, onCursor }: {
   path: string
   value: string
   readOnly: boolean
   problems: SourceProblem[]
   onChange: (value: string) => void
   onEditor: (editor: monaco.editor.IStandaloneCodeEditor | null) => void
-  onSave: () => void
+  onSave: () => void | Promise<void>
+  onCursor: (path: string, position: { lineNumber: number; column: number }) => void
 }) {
   const namespace = useId()
   const modelPath = (path: string) => `inmemory://research/${namespace}/${path.split('/').map(encodeURIComponent).join('/')}`
@@ -89,6 +113,15 @@ export function MonacoSourceEditor({ path, value, readOnly, problems, onChange, 
     })
     return () => { listener.dispose(); save.dispose() }
   }, [editor, onEditor, onSave])
+
+  useEffect(() => {
+    if (!editor) return
+    const currentUri = monaco.Uri.parse(uri).toString()
+    const cursor = editor.onDidChangeCursorPosition(({ position }) => {
+      if (editor.getModel()?.uri.toString() === currentUri) onCursor(path, position)
+    })
+    return () => cursor.dispose()
+  }, [editor, onCursor, path, uri])
 
   useEffect(() => () => {
     for (const item of monaco.editor.getModels()) {

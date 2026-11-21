@@ -14,7 +14,7 @@ import type { ProjectFileSystem } from '@/lib/project/types'
 interface ProjectBackupDialogProps {
   canvas: ResearchCanvas
   project: ProjectFileSystem
-  onRestore: (project: ProjectFileSystem) => boolean
+  onRestore: (project: ProjectFileSystem) => Promise<boolean>
   onClose: () => void
 }
 
@@ -63,15 +63,18 @@ export function ProjectBackupDialog({ canvas, project, onRestore, onClose }: Pro
     }
   }
 
-  function restoreProject() {
+  async function restoreProject() {
     if (!pending) return
     setError('')
+    setBusy(true)
     try {
-      if (!onRestore(pending.project)) return
+      if (!await onRestore(pending.project)) return
       setPending(undefined)
       setMessage('Project restored.')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not restore the project.')
+    } finally {
+      setBusy(false)
     }
   }
 

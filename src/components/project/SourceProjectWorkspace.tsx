@@ -7,6 +7,7 @@ import type { editor, IPosition } from 'monaco-editor'
 import { BookOpen, ChevronRight, CircleAlert, Download, Ellipsis, FileCode2, FileText, Folder, LocateFixed, PanelLeft, Play, Save, Sparkles, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
 import type { ImperativePanelHandle } from 'react-resizable-panels'
 import { useProjectFileSystem } from '@/contexts/ProjectFileSystemContext'
@@ -21,6 +22,9 @@ import { sourcePosition, type SourceLocation } from '@/lib/project/latex-source'
 import type { SourceProblem } from './MonacoSourceEditor'
 import type { CompileDiagnostic } from '@/lib/project/compile-diagnostics'
 import { findPdfRegion, type SyncRegion } from '@/lib/project/source-sync'
+import { applyWritingDrafts, draftConflicts, editableSource, type WritingDrafts } from '@/lib/project/writing-drafts'
+import { clearWritingState, commitWritingDrafts } from '@/lib/project/storage'
+import { useWritingDrafts } from './useWritingDrafts'
 
 const MonacoSourceEditor = dynamic(() => import('./MonacoSourceEditor').then(module => module.MonacoSourceEditor), {
   ssr: false,
@@ -30,12 +34,13 @@ const SyncedPdfPreview = dynamic(() => import('./SyncedPdfPreview').then(module 
   ssr: false,
   loading: () => <p role="status" className="p-4 text-sm text-muted-foreground">Loading PDF preview…</p>,
 })
+const WritingDraftComparison = dynamic(() => import('./MonacoSourceEditor').then(module => module.WritingDraftComparison), { ssr: false })
 
 function Files({ nodes, selected, main, onSelect, dirty, sourcePaths, onSetMain }: {
   nodes: FileTreeNode[]
   selected: string
   main: string
-  dirty: Record<string, string>
+  dirty: WritingDrafts
   onSelect: (path: string) => void
   sourcePaths: ReadonlySet<string>
   onSetMain: (path: string) => void
@@ -87,14 +92,8 @@ type GenerateSource = (project: ProjectFileSystem, onNode?: (node: ResearchNodeD
 export interface SourceWorkspaceHandle {
   openFile: (path: string, line?: number) => void
   openGeneratedNode: (node: ResearchNodeData) => void
-  confirmDiscard: () => boolean
-}
-
-function applyDrafts(project: ProjectFileSystem, drafts: Record<string, string>) {
-  return Object.entries(drafts).reduce((current, [path, content]) => {
-    const file = current.files.get(path)
-    return file?.type === 'editable' && file.metadata?.editable ? updateFileContent(current, path, content) : current
-  }, project)
+  confirmLeave: () => boolean
+  prepareReplacement: () => Promise<boolean>
 }
 
 function sameSources(previous: ProjectFileSystem['files'], current: ProjectFileSystem['files']) {
@@ -116,7 +115,9 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   generateSource?: GenerateSource
   onOpenCanvas: () => void
 }) {
-  const { setFileSystem } = useProjectFileSystem()
+  const { setFileSystem, storage, storageKey, acceptStoredProject } = useProjectFileSystem()
+  const journal = useWritingDrafts(storage, storageKey, project.metadata.createdAt)
+  const { drafts, restoredView, recordView } = journal
   const textFiles = useMemo(() => [...project.files.values()].filter(
     (file): file is ProjectFile & { content: string } => file.type !== 'directory' && typeof file.content === 'string',
   ).sort((a, b) => a.path.localeCompare(b.path)), [project.files])
@@ -124,10 +125,13 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const texFiles = textFiles.filter(file => /\.tex$/i.test(file.path))
   const main = texFiles.find(file => file.path === project.metadata.mainFile)?.path
     ?? (generateSource && sourcePaths.has('main.tex') ? 'main.tex' : texFiles[0]?.path ?? '')
-  const [selection, setSelected] = useState(main)
-  const selected = sourcePaths.has(selection) ? selection : main
-  const [drafts, setDrafts] = useState<Record<string, string>>({})
+  const [selection, setSelected] = useState<string>()
+  const wanted = selection ?? restoredView?.path ?? main
+  const selected = sourcePaths.has(wanted) ? wanted : main
   const [busy, setBusy] = useState(false)
+  const [writing, setWriting] = useState(false)
+  const [saveError, setSaveError] = useState('')
+  const [comparison, setComparison] = useState<string>()
   const [error, setError] = useState('')
   const [log, setLog] = useState('')
   const [diagnostics, setDiagnostics] = useState<CompileDiagnostic[]>([])
@@ -149,18 +153,24 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const firstFileTab = useRef<HTMLButtonElement>(null)
   const compileRequest = useRef<AbortController | null>(null)
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
+  const restoredCursor = useRef(false)
+  const writeInProgress = useRef(false)
   const pendingJump = useRef<{ path: string; range?: { start: IPosition; end: IPosition } } | null>(null)
   const isTex = /\.tex$/i.test(selected)
-  const dirty = Object.keys(drafts).length > 0
+  const draftPaths = Object.keys(drafts)
+  const dirty = draftPaths.length > 0
+  const conflicts = useMemo(() => draftConflicts(project, drafts), [project, drafts])
+  const unprotected = journal.pending > 0 || (dirty && (journal.loadError || journal.failed.size > 0))
+  const locked = busy || writing || !journal.ready
   const currentFile = textFiles.find(file => file.path === selected)
-  const readOnly = currentFile?.type !== 'editable' || !currentFile.metadata?.editable
-  const workingProject = useMemo(() => {
-    const next = applyDrafts(project, drafts)
+  const readOnly = currentFile?.type !== 'editable' || !currentFile.metadata?.editable || conflicts.includes(selected)
+  const withGeneratedSource = useCallback((next: ProjectFileSystem) => {
     const generated = next.files.get('main.tex')
     if (!generateSource || generated?.type !== 'generated') return next
     const source = generateSource(next)
     return source === generated.content ? next : updateFileContent(next, 'main.tex', source)
-  }, [drafts, project, generateSource])
+  }, [generateSource])
+  const workingProject = useMemo(() => withGeneratedSource(applyWritingDrafts(project, drafts)), [drafts, project, withGeneratedSource])
   const source = currentFile?.content ?? ''
   const workingFile = workingProject.files.get(selected)
   const draft = workingFile && 'content' in workingFile ? workingFile.content ?? '' : ''
@@ -190,11 +200,13 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   }, [mobileFiles, active])
 
   useEffect(() => {
-    if (!dirty) return
+    if (!unprotected || !journal.ready) return
     const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = '' }
     window.addEventListener('beforeunload', warn)
     return () => window.removeEventListener('beforeunload', warn)
-  }, [dirty])
+  }, [unprotected, journal.ready])
+
+  const captureCursor = useCallback((path: string, position: IPosition) => recordView({ path, ...position }), [recordView])
 
   const applyPendingJump = useCallback((instance: editor.IStandaloneCodeEditor | null) => {
     editorRef.current = instance
@@ -202,7 +214,18 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     requestAnimationFrame(() => {
       const pending = pendingJump.current
       const model = instance.getModel()
-      if (!pending || !model?.uri.path.endsWith('/' + pending.path)) return
+      if (!model) return
+      if (!pending) {
+        if (!restoredCursor.current && restoredView && model.uri.path.endsWith('/' + restoredView.path)) {
+          restoredCursor.current = true
+          const position = model.validatePosition(restoredView)
+          instance.setPosition(position)
+          instance.revealLineInCenter(position.lineNumber)
+        }
+        return
+      }
+      if (!model.uri.path.endsWith('/' + pending.path)) return
+      restoredCursor.current = true
       pendingJump.current = null
       if (pending.range) {
         const start = model.validatePosition(pending.range.start)
@@ -213,9 +236,11 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         })
         instance.revealLineInCenter(start.lineNumber)
       }
+      const position = instance.getPosition()
+      if (position) captureCursor(pending.path, position)
       instance.focus()
     })
-  }, [])
+  }, [captureCursor, restoredView])
 
   function openFile(path: string, line?: number, location?: SourceLocation, selectLine = false) {
     if (!sourcePaths.has(path)) return
@@ -240,7 +265,18 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
 
   useImperativeHandle(ref, () => ({
     openFile,
-    confirmDiscard,
+    confirmLeave: () => !unprotected || window.confirm('Some drafts have not been saved locally. Leave this page?'),
+    async prepareReplacement() {
+      if (writeInProgress.current || !journal.ready || !confirmDiscard()) return false
+      try {
+        await journal.storedDrafts()
+        if (storage && journal.key) await clearWritingState(storage, journal.key)
+        return true
+      } catch {
+        setSaveError('Local drafts could not be cleared. The project was kept.')
+        return false
+      }
+    },
     openGeneratedNode(node) {
       let line: number | undefined
       generateSource?.(workingProject, (candidate, position) => {
@@ -254,7 +290,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     openFile(location.path, location.line, location)
   }
 
-  const canSync = !busy && !pdfStale && sourceMap.length > 0
+  const canSync = !locked && !pdfStale && sourceMap.length > 0
 
   function showInPdf() {
     const line = editorRef.current?.getPosition()?.lineNumber
@@ -287,11 +323,36 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     setSyncMessage('')
   }, [])
 
-  const save = useCallback(() => {
-    if (!dirty || busy) return
-    setFileSystem(current => current ? applyDrafts(current, drafts) : current)
-    setDrafts({})
-  }, [busy, dirty, drafts, setFileSystem])
+  async function commitDrafts(entries: WritingDrafts) {
+    if (!Object.keys(entries).length) return workingProject
+    if (writeInProgress.current || !journal.ready) return
+    writeInProgress.current = true
+    setWriting(true)
+    setSaveError('')
+    try {
+      if (!storage || !journal.key) throw new Error('Project storage is unavailable. Keep this tab open to retain your edits.')
+      const stored = await journal.storedDrafts()
+      const result = await commitWritingDrafts(storage, journal.key, project, entries, stored)
+      acceptStoredProject(result.project, project)
+      if (result.conflicts.length) {
+        setComparison(result.conflicts[0])
+        return
+      }
+      journal.forget(Object.keys(entries))
+      return result.project
+    } catch (cause) {
+      setSaveError(cause instanceof Error ? cause.message : 'Could not save the project.')
+    } finally {
+      writeInProgress.current = false
+      setWriting(false)
+    }
+  }
+
+  async function save() {
+    if (locked || !dirty) return
+    if (conflicts.length) setComparison(conflicts[0])
+    else await commitDrafts(drafts)
+  }
 
   function markSourceChanged() {
     setPdfTarget(null)
@@ -302,20 +363,16 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   }
 
   function changeDraft(value: string) {
-    if (busy || readOnly || value === draft) return
-    setDrafts(current => {
-      const next = { ...current }
-      if (value === source) delete next[selected]
-      else next[selected] = value
-      return next
-    })
+    if (locked || readOnly || value === draft) return
+    const base = Object.hasOwn(drafts, selected) ? drafts[selected].base : source
+    journal.change(selected, value === source ? undefined : { base, text: value })
     markSourceChanged()
   }
 
   function insertReference(key: string) {
     const instance = editorRef.current
     const range = instance?.getSelection()
-    if (!instance || !range || !isTex || readOnly || busy || !instance.getModel()?.uri.path.endsWith('/' + selected)) return
+    if (!instance || !range || !isTex || readOnly || locked || !instance.getModel()?.uri.path.endsWith('/' + selected)) return
     setNarrowView('source')
     instance.pushUndoStop()
     instance.executeEdits('citation', [{ range, text: `\\cite{${key}}`, forceMoveMarkers: true }])
@@ -324,22 +381,27 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   }
 
   function setMain(path: string) {
-    if (busy) return
+    if (locked) return
     setFileSystem(current => current ? { ...current, metadata: { ...current.metadata, mainFile: path } } : current)
     markSourceChanged()
   }
 
-  function discard() {
-    if (!dirty || busy || !confirmDiscard()) return
-    setDrafts({})
+  async function discard(paths: string[]) {
+    if (locked) return
+    setWriting(true)
+    await journal.discard(paths)
+    setWriting(false)
     markSourceChanged()
   }
 
   async function compile() {
-    if (!main || compileRequest.current) return
+    if (!main || locked || compileRequest.current) return
+    if (conflicts.length) {
+      setComparison(conflicts[0])
+      return
+    }
     const controller = new AbortController()
     compileRequest.current = controller
-    save()
     setBusy(true)
     setSyncMessage('')
     setError('')
@@ -347,7 +409,10 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     setDiagnostics([])
     setDiagnosticSources(undefined)
     try {
-      const archive = await exportSourceArchive(workingProject)
+      const saved = await commitDrafts(drafts)
+      if (!saved || controller.signal.aborted) return
+      const compiledProject = withGeneratedSource(saved)
+      const archive = await exportSourceArchive(compiledProject)
       const response = await fetch(`/api/latex/compile?main=${encodeURIComponent(main)}&sync=1`, {
         method: 'POST', body: archive, signal: controller.signal,
       })
@@ -356,7 +421,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         setError(failure.error)
         setLog(failure.log ?? '')
         setDiagnostics(failure.diagnostics ?? [])
-        setDiagnosticSources(workingProject.files)
+        setDiagnosticSources(compiledProject.files)
         setPanel('problems')
         return
       }
@@ -369,7 +434,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       setPdfTarget(null)
       setPdfUrl(URL.createObjectURL(pdf))
       setPdfFilename(main.split('/').at(-1)?.replace(/\.tex$/i, '.pdf') ?? 'project.pdf')
-      setLastCompile({ main, files: workingProject.files })
+      setLastCompile({ main, files: compiledProject.files })
       setNarrowView('pdf')
     } catch (cause) {
       if (controller.signal.aborted) return
@@ -386,6 +451,14 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     if (restoreFocus) fileToggle.current?.focus()
   }
 
+  const comparedDraft = comparison && Object.hasOwn(drafts, comparison) ? drafts[comparison] : undefined
+  const comparedSource = comparison ? editableSource(project, comparison) : undefined
+  const draftStatus = !journal.ready ? 'Restoring local drafts…'
+    : journal.pending ? 'Saving drafts on this device…'
+      : journal.failed.size || (dirty && journal.loadError) ? 'Some local drafts could not be saved'
+        : dirty ? `${draftPaths.length} local draft${draftPaths.length === 1 ? '' : 's'} · Not saved to project`
+          : 'All changes saved to project'
+
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#f6f8fc] text-slate-900">
       {actions && createPortal(<>
@@ -394,11 +467,20 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
           <span className="block truncate font-mono font-medium min-[385px]:hidden">{main.split('/').at(-1) || 'None'}</span>
           <span className="hidden max-w-56 truncate font-mono font-medium min-[385px]:block">{main || 'None'}</span>
         </div>
-        <Button size="sm" variant="outline" onClick={save} disabled={!dirty || busy}><Save /> Save</Button>
-        <Button size="sm" className="bg-indigo-700 text-white hover:bg-indigo-800" onClick={compile} disabled={!main || busy}>
+        <Button size="sm" variant="outline" onClick={save} disabled={!dirty || locked}><Save /> {writing ? 'Saving…' : 'Save'}</Button>
+        <Button size="sm" className="bg-indigo-700 text-white hover:bg-indigo-800" onClick={compile} disabled={!main || locked}>
           <Play /> {busy ? 'Compiling…' : 'Compile PDF'}
         </Button>
       </>, actions)}
+      {conflicts.length > 0 && <div className="max-h-24 shrink-0 overflow-auto border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-sm text-amber-950">
+        <p role="status" className="font-medium">Project source changed since these drafts were created. Compare before saving or compiling.</p>
+        <ul className="flex flex-wrap gap-x-4">
+          {conflicts.map(path => <li key={path}><button className="break-all text-left underline" onClick={() => setComparison(path)}>
+            Compare {path}
+          </button></li>)}
+        </ul>
+      </div>}
+      {saveError && <p role="alert" className="shrink-0 border-b bg-red-50 px-3 py-1.5 text-sm text-red-900">{saveError}</p>}
       <div className="flex shrink-0 items-center gap-2 border-b bg-white px-2 py-1.5 lg:hidden">
         <Button ref={fileToggle} size="sm" variant="outline" aria-expanded={mobileFiles} aria-controls="writing-files"
           onClick={() => setMobileFiles(open => !open)}><PanelLeft /> Files</Button>
@@ -454,8 +536,9 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
                 <Button variant="link" size="sm" className="h-7 px-1 text-indigo-700" onClick={onOpenCanvas}>Edit in Canvas</Button>
               </div>}
               <div className="min-h-0 flex-1">
-                {selected && <MonacoSourceEditor path={selected} value={draft} readOnly={busy || readOnly} problems={problems}
-                  onChange={changeDraft} onEditor={applyPendingJump} onSave={save} />}
+                {!journal.ready && <p role="status" className="p-3 text-sm">Restoring local drafts…</p>}
+                {selected && journal.ready && <MonacoSourceEditor path={selected} value={draft} readOnly={locked || readOnly} problems={problems}
+                  onChange={changeDraft} onEditor={applyPendingJump} onSave={save} onCursor={captureCursor} />}
               </div>
             </section>
           </ResizablePanel>
@@ -527,16 +610,13 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
             </details>}
           </div>}
           {panel === 'references' && <ReferencesPanel project={workingProject} entries={bibliography} path={selected} draft={draft}
-            canInsert={isTex && !readOnly && !busy} onInsert={insertReference} onLocate={locate} />}
+            canInsert={isTex && !readOnly && !locked} onInsert={insertReference} onLocate={locate} />}
           {panel === 'ai' && isTex && !readOnly && <ChapterAiPanel key={selected} project={workingProject} path={selected} main={main}
-            source={source} draft={draft} log={log} bibliography={bibliography} disabled={busy}
+            source={source} draft={draft} log={log} bibliography={bibliography} disabled={locked}
             onApply={text => {
-              setFileSystem(current => current ? updateFileContent(current, selected, text) : current)
-              setDrafts(current => {
-                const next = { ...current }
-                delete next[selected]
-                return next
-              })
+              const entry = { base: source, text }
+              journal.change(selected, entry)
+              void commitDrafts({ [selected]: entry })
               markSourceChanged()
             }} />}
         </div>
@@ -545,12 +625,38 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       <footer className="flex shrink-0 flex-wrap items-center justify-between gap-x-2 border-t bg-white px-3 py-1 text-xs text-slate-600">
         <div className="flex items-center gap-2">
           <span role="status" className={dirty ? 'font-medium text-amber-800' : undefined}>
-            {dirty ? Object.keys(drafts).length + ' unsaved file(s)' : 'All changes saved'}
+            {draftStatus}
           </span>
-          {dirty && <Button variant="link" size="sm" className="h-6 px-0 text-slate-600" onClick={discard} disabled={busy}>Discard edits</Button>}
+          {dirty && <Button variant="link" size="sm" className="h-6 px-0 text-slate-600" onClick={() => {
+            if (confirmDiscard()) void discard(draftPaths)
+          }} disabled={locked}>Discard drafts</Button>}
         </div>
         <span>{/\.bib$/i.test(selected) ? 'BibTeX' : isTex ? 'LaTeX' : 'Plain text'} · Ctrl / ⌘ + S to save</span>
       </footer>
+      {comparison && comparedDraft && <Dialog open onOpenChange={open => { if (!open) setComparison(undefined) }}>
+        <DialogContent className="flex h-[85dvh] min-h-0 flex-col sm:max-w-[90vw]">
+          <DialogTitle>Compare local draft</DialogTitle>
+          <DialogDescription className="break-all">{comparison}. {comparedSource === undefined
+            ? 'This file is missing or no longer editable. Copy the local text before discarding it.'
+            : 'The project file changed after this draft was created. Choosing the draft keeps it local until you save.'}</DialogDescription>
+          <div className="grid grid-cols-2 gap-2 text-sm font-medium"><span>Current project source</span><span>Local draft</span></div>
+          <div className="min-h-0 flex-1 overflow-hidden rounded border">
+            <WritingDraftComparison path={comparison} original={comparedSource ?? ''} modified={comparedDraft.text} />
+          </div>
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button variant="outline" disabled={locked} onClick={async () => {
+              await discard([comparison])
+              setComparison(undefined)
+            }}>Discard local draft</Button>
+            <Button disabled={locked || comparedSource === undefined} onClick={() => {
+              if (comparedSource === undefined) return
+              journal.change(comparison, { base: comparedSource, text: comparedDraft.text })
+              setComparison(undefined)
+              openFile(comparison)
+            }}>Keep local draft</Button>
+          </div>
+        </DialogContent>
+      </Dialog>}
     </div>
   )
 }

@@ -20,7 +20,7 @@ interface LatexImportDialogProps {
     onImportNodes: (nodes: ResearchNode[]) => void;
     open: boolean;
     onOpenChange: (open: boolean) => void;
-    onProjectImport: (project: ProjectFileSystem) => boolean;
+    onProjectImport: (project: ProjectFileSystem) => Promise<boolean>;
 }
 
 export function LatexImportDialog({
@@ -91,7 +91,7 @@ export function LatexImportDialog({
 
         try {
             const project = await importSourceArchive(file);
-            if (!onProjectImport(project)) {
+            if (!await onProjectImport(project)) {
                 setUploadedFileName(null);
                 return;
             }

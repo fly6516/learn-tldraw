@@ -31,7 +31,10 @@ Set `TECTONIC_ONLY_CACHED=1` to compile offline once the required files are cach
 2. Select a chapter or bibliography in **Files**. To change the compile entry, use **Set as
    main file** from a `.tex` file's menu. The current entry is shown next to **Compile PDF**.
    Monaco retains each file's draft, cursor and scroll position as you switch files and views.
-   Use **Save** or Ctrl/Cmd+S to save drafts to the project. Generated `main.tex` is read-only.
+   Drafts auto-save in this browser. Reopening the project restores drafts, the last file and
+   its cursor position. Use **Save** or Ctrl/Cmd+S to save drafts to the project, or **Discard
+   drafts** to remove the local edits. If the saved file changed, compare its current source
+   with the draft before proceeding. Generated `main.tex` is read-only.
 3. Choose **Compile PDF** to save your drafts and compile the whole project from the main
    file's directory. **PDF Preview** shows the latest successful build. Citation issues and
    compiler errors with a source location are underlined in the editor. Select an entry in
