@@ -12,7 +12,6 @@ export default function Home() {
           Open research canvas
         </Link>
         <Link href="/research-dev" className="underline">Sample paper</Link>
-        <Link href="/codeblock" className="underline">Code block demo</Link>
       </nav>
     </main>
   );

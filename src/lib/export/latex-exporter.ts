@@ -1,5 +1,3 @@
-import type { Editor } from 'tldraw'
-import type { ResearchNodeShape } from '@/shapes/research/ResearchNodeShape'
 import type { ResearchNodeType } from '@/app/research/research-node'
 import { RESEARCH_NODE_META } from '@/app/research/research-node'
 import {
@@ -10,7 +8,7 @@ import {
     getDefaultSectionTitle,
     type LatexTemplateOptions,
 } from './latex-template'
-import { collectArrowOrderedNodes } from './arrow-ordering'
+import { collectArrowOrderedNodes, type ResearchPage } from '@/lib/project/research-graph'
 
 /**
  * Collected research node data
@@ -29,31 +27,10 @@ interface ResearchNodeData {
 }
 
 /**
- * Collect all research nodes from the tldraw editor
+ * Collect research node data from the active page.
  */
-export function collectResearchNodes(editor: Editor, ordered = false): ResearchNodeData[] {
-    const shapes = (ordered ? collectArrowOrderedNodes(editor) : null) ?? editor.getCurrentPageShapes()
-    const researchNodes: ResearchNodeData[] = []
-
-    for (const shape of shapes) {
-        if (shape.type === 'research-node') {
-            const researchShape = shape as ResearchNodeShape
-            researchNodes.push({
-                section: researchShape.props.section,
-                content: researchShape.props.content,
-                order: researchShape.props.order,
-                level: researchShape.props.level || 1,
-                parentId: researchShape.props.parentId,
-                customLabel: researchShape.props.customLabel,
-                tags: researchShape.props.tags,
-                metadata: {
-                    sectionNumber: researchShape.props.metadata?.sectionNumber,
-                },
-            })
-        }
-    }
-
-    return researchNodes
+export function collectResearchNodes(page: ResearchPage, ordered = false): ResearchNodeData[] {
+    return (ordered ? collectArrowOrderedNodes(page) : null) ?? page.nodes.map(node => node.data)
 }
 
 /**
@@ -268,7 +245,7 @@ export function generateLatexDocument(
  * (including abstract/keywords) follow the arrow chain order.
  */
 export function generateArrowOrderedLatexDocument(
-    orderedShapes: ResearchNodeShape[],
+    orderedShapes: ResearchNodeData[],
     options: LatexTemplateOptions = {}
 ): string {
     if (orderedShapes.length === 0) {
@@ -276,9 +253,9 @@ export function generateArrowOrderedLatexDocument(
     }
 
     // Extract title for the preamble \title{} command
-    const titleShape = orderedShapes.find((s) => s.props.section === 'title')
+    const titleShape = orderedShapes.find((s) => s.section === 'title')
     if (titleShape && !options.title) {
-        options = { ...options, title: titleShape.props.content }
+        options = { ...options, title: titleShape.content }
     }
 
     const parts: string[] = []
@@ -287,14 +264,14 @@ export function generateArrowOrderedLatexDocument(
 
     // Emit every node in arrow-topology order; skip title (already in preamble)
     for (const shape of orderedShapes) {
-        if (shape.props.section === 'title') continue
+        if (shape.section === 'title') continue
 
         parts.push(formatSectionContent(
-            shape.props.section,
-            shape.props.content,
-            shape.props.customLabel,
-            shape.props.level,
-            shape.props.metadata?.sectionNumber,
+            shape.section,
+            shape.content,
+            shape.customLabel,
+            shape.level,
+            shape.metadata?.sectionNumber,
         ))
         parts.push('')
     }
@@ -309,16 +286,16 @@ export function generateArrowOrderedLatexDocument(
  * Otherwise falls back to fixed section-type order.
  */
 export function exportToLatex(
-    editor: Editor,
+    page: ResearchPage,
     options: LatexTemplateOptions = {}
 ): string {
     // Try arrow-ordered export first
-    const arrowOrdered = collectArrowOrderedNodes(editor)
+    const arrowOrdered = collectArrowOrderedNodes(page)
     if (arrowOrdered && arrowOrdered.length > 0) {
         return generateArrowOrderedLatexDocument(arrowOrdered, options)
     }
 
-    const nodes = collectResearchNodes(editor)
+    const nodes = collectResearchNodes(page)
 
     if (nodes.length === 0) {
         throw new Error('No research nodes found to export')

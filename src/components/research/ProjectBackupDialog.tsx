@@ -1,24 +1,24 @@
 "use client"
 
 import { useRef, useState } from 'react'
-import { createTLStore, loadSnapshot, type Editor } from 'tldraw'
 import { Button } from '@/components/ui/button'
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
 import {
-  captureBackupCanvas, decodeProjectBackup, encodeProjectBackup, projectBackupExtension,
+  decodeProjectBackup, encodeProjectBackup, projectBackupExtension,
 } from '@/lib/project/backup'
+import type { ResearchCanvas } from '@/lib/project/research-graph'
 import type { ProjectFileSystem } from '@/lib/project/types'
 
 interface ProjectBackupDialogProps {
-  editor: Editor
+  canvas: ResearchCanvas
   project: ProjectFileSystem
   onRestore: (project: ProjectFileSystem) => void
   onClose: () => void
 }
 
-export function ProjectBackupDialog({ editor, project, onRestore, onClose }: ProjectBackupDialogProps) {
+export function ProjectBackupDialog({ canvas, project, onRestore, onClose }: ProjectBackupDialogProps) {
   const [pending, setPending] = useState<Awaited<ReturnType<typeof decodeProjectBackup>>>()
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
@@ -32,9 +32,6 @@ export function ProjectBackupDialog({ editor, project, onRestore, onClose }: Pro
     setMessage('')
     try {
       const backup = await decodeProjectBackup(file)
-      // Validate and migrate against the active canvas schema before touching the live store.
-      const validationStore = createTLStore({ schema: editor.store.schema })
-      loadSnapshot(validationStore, backup.canvas, { forceOverwriteSessionState: true })
       setPending(backup)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not open project backup.')
@@ -48,7 +45,6 @@ export function ProjectBackupDialog({ editor, project, onRestore, onClose }: Pro
     setError('')
     setMessage('')
     try {
-      const canvas = await captureBackupCanvas(editor)
       const backup = await encodeProjectBackup(canvas, project)
       const url = URL.createObjectURL(backup)
       const link = document.createElement('a')
@@ -71,8 +67,6 @@ export function ProjectBackupDialog({ editor, project, onRestore, onClose }: Pro
     if (!pending) return
     setError('')
     try {
-      editor.loadSnapshot(pending.canvas, { forceOverwriteSessionState: true })
-      editor.clearHistory()
       onRestore(pending.project)
       setPending(undefined)
       setMessage('Project restored.')

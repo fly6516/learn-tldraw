@@ -5,12 +5,16 @@ Open http://localhost:3000 to choose a workspace.
 
 - `/research` is the research workspace. Canvas and project files are saved in the current browser.
 - `/research-dev` is a sample paper workspace.
-- `/codeblock` is a code block and demo sync workspace.
 
-In the research workspace, use **Project → Project Backup** to download a `.research-canvas`
-file. In another browser, choose the file from the same menu and confirm **Replace Project**.
-The backup includes all canvas pages, nodes, connections, canvas media, and project files.
-Restoring replaces the current workspace. External web links remain links.
+Use **Add Research Node** to create a card and select it to edit its content and section
+properties. Draw directed connections from a card's outgoing handle, or choose a target in
+the node properties. **Add Page** creates another graph in the project. Canvas exports use
+the selected page and its directed connections.
+
+Use **Project Backup** to download a `.research-canvas` file. In another browser, choose the
+file from the same dialog and confirm **Replace Project**. The backup includes all canvas
+pages, nodes, connections, viewports, and project files. This release starts with a new
+canvas storage format and supports version 2 project backups.
 
 ## Edit and compile an existing LaTeX project
 
@@ -21,13 +25,13 @@ Keep the native compiler on a local server and use it for projects you trust. Te
 packages and fonts on the first compile. Set `TECTONIC_CACHE_DIR` to override the cache directory.
 Set `TECTONIC_ONLY_CACHED=1` to compile offline once the required files are cached.
 
-1. In `/research`, choose **Import → Import LaTeX → Import Project ZIP**. A Prism or ordinary
+1. In `/research`, choose **Import LaTeX → Import Project ZIP**. A Prism or ordinary
    LaTeX ZIP keeps its directory paths, original source bytes, and attachments.
 2. In the files panel, choose **Edit and Compile LaTeX**. Select the main `.tex` file and the
    chapter to edit. The compiler runs from the main file's directory, so its relative references
    keep their original meaning.
 3. Choose **Compile PDF** to save the current edit and compile the whole project. The PDF and
-   compile errors appear next to the editor. **Export to LaTeX** downloads the edited source tree.
+   compile errors appear next to the editor. **Export → LaTeX ZIP** downloads the edited source tree.
 
 The compile endpoint accepts ZIPs up to 32 MB, including after extraction. The standard compiler
 supports XeLaTeX and BibTeX workflows. Documents that require a different engine, Biber, or

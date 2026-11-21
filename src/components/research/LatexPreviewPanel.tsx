@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import type { Editor } from "tldraw";
+import type { ResearchPage } from "@/lib/project/research-graph";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { LatexRenderedView } from "./LatexRenderedView";
 import { LatexSourceView } from "./LatexSourceView";
@@ -11,46 +11,22 @@ import { useProjectFileSystem } from "@/contexts/ProjectFileSystemContext";
 import { X } from "lucide-react";
 
 interface LatexPreviewPanelProps {
-    editor: Editor;
+    page: ResearchPage;
     onClose: () => void;
 }
 
 export function LatexPreviewPanel({
-    editor,
+    page,
     onClose,
 }: LatexPreviewPanelProps) {
     const { fileSystem } = useProjectFileSystem();
-    const [latexContent, setLatexContent] = React.useState("");
-    const [error, setError] = React.useState<string | null>(null);
-
-    // Generate LaTeX content when panel mounts or editor changes
-    React.useEffect(() => {
-        const generateLatex = () => {
-            try {
-                const content = fileSystem ? generateProjectSource(editor, fileSystem) : exportToLatex(editor);
-                setLatexContent(content);
-                setError(null);
-            } catch (err) {
-                setError(err instanceof Error ? err.message : "Failed to generate LaTeX");
-                setLatexContent("");
-            }
-        };
-
-        // Generate immediately
-        generateLatex();
-
-        // Listen for editor changes with debounce
-        let timeoutId: NodeJS.Timeout;
-        const unsubscribe = editor.store.listen(() => {
-            clearTimeout(timeoutId);
-            timeoutId = setTimeout(generateLatex, 500);
-        });
-
-        return () => {
-            unsubscribe();
-            clearTimeout(timeoutId);
-        };
-    }, [editor, fileSystem]);
+    const { latexContent, error } = React.useMemo(() => {
+        try {
+            return { latexContent: fileSystem ? generateProjectSource(page, fileSystem) : exportToLatex(page), error: null };
+        } catch (cause) {
+            return { latexContent: "", error: cause instanceof Error ? cause.message : "Failed to generate LaTeX" };
+        }
+    }, [page, fileSystem]);
 
     return (
         <div className="h-full flex flex-col bg-white">

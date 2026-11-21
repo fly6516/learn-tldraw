@@ -1,6 +1,6 @@
 import JSZip from 'jszip'
 import { z } from 'zod'
-import type { Editor, TLEditorSnapshot } from 'tldraw'
+import { researchCanvasSchema, type ResearchCanvas } from './research-graph'
 import type { ProjectDirectory, ProjectFile, ProjectFileSystem } from './types'
 
 const format = 'research-canvas'
@@ -24,14 +24,8 @@ const fileEntry = z.object({
 
 const manifestSchema = z.object({
   format: z.literal(format),
-  version: z.literal(1),
-  canvas: z.object({
-    document: z.object({ schema: z.object({}).passthrough(), store: z.record(z.string(), z.object({
-      id: z.string(),
-      typeName: z.string(),
-    }).passthrough()) }).passthrough(),
-    session: z.object({}).passthrough(),
-  }),
+  version: z.literal(2),
+  canvas: researchCanvasSchema,
   project: z.object({
     metadata: z.object({
       projectName: z.string(),
@@ -64,35 +58,7 @@ const manifestSchema = z.object({
   }),
 })
 
-export async function captureBackupCanvas(editor: Editor): Promise<TLEditorSnapshot> {
-  const snapshot = structuredClone(editor.getSnapshot())
-  const records = Object.values(snapshot.document.store)
-  await Promise.all(records.map(async record => {
-    if (record.typeName !== 'asset' || record.type === 'bookmark') return
-    const src = record.props.src
-    if (!src || src.startsWith('data:')) return
-
-    try {
-      const url = await editor.resolveAssetUrl(record.id, { shouldResolveToOriginal: true })
-      if (!url) throw new Error('Missing asset URL')
-      const response = await fetch(url)
-      if (!response.ok) throw new Error('Asset request failed')
-      const blob = await response.blob()
-      const media = new Blob([blob], { type: record.props.mimeType ?? blob.type })
-      record.props.src = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader()
-        reader.onload = () => resolve(String(reader.result))
-        reader.onerror = () => reject(reader.error)
-        reader.readAsDataURL(media)
-      })
-    } catch (cause) {
-      throw new Error(`Could not include canvas attachment: ${record.props.name}`, { cause })
-    }
-  }))
-  return snapshot
-}
-
-export async function encodeProjectBackup(canvas: TLEditorSnapshot, project: ProjectFileSystem): Promise<Blob> {
+export async function encodeProjectBackup(canvas: ResearchCanvas, project: ProjectFileSystem): Promise<Blob> {
   const archive = new JSZip()
   const files = await Promise.all([...project.files.values()].map(async (entry, index) => {
     if (entry.type === 'directory') return { type: entry.type, path: entry.path, name: entry.name }
@@ -104,9 +70,9 @@ export async function encodeProjectBackup(canvas: TLEditorSnapshot, project: Pro
   }))
   archive.file(manifestName, JSON.stringify({
     format,
-    version: 1,
+    version: 2,
     canvas,
-    project: { ...project, files },
+    project: { template: project.template, metadata: project.metadata, files },
   }))
   return archive.generateAsync({ type: 'blob', compression: 'DEFLATE' })
 }
@@ -115,8 +81,13 @@ export async function decodeProjectBackup(file: Blob) {
   const archive = await JSZip.loadAsync(await file.arrayBuffer(), { checkCRC32: true })
   const manifestFile = archive.file(manifestName)
   if (!manifestFile) throw new Error('This file is not a Research Canvas backup.')
-  const manifest = manifestSchema.safeParse(JSON.parse(await manifestFile.async('text')))
-  if (!manifest.success) throw new Error('The project backup is invalid or uses an unsupported version.')
+  const data: unknown = JSON.parse(await manifestFile.async('text'))
+  const header = z.object({ format: z.literal(format), version: z.number() }).safeParse(data)
+  if (header.success && header.data.version !== 2) {
+    throw new Error('The project backup uses an unsupported version. This workspace supports version 2.')
+  }
+  const manifest = manifestSchema.safeParse(data)
+  if (!manifest.success) throw new Error('The project backup is invalid.')
 
   const { canvas, project } = manifest.data
   const files: ProjectFileSystem['files'] = new Map()
@@ -141,7 +112,7 @@ export async function decodeProjectBackup(file: Blob) {
   }
 
   return {
-    canvas: canvas as unknown as TLEditorSnapshot,
-    project: { ...project, files } satisfies ProjectFileSystem,
+    canvas: canvas,
+    project: { ...project, files, canvas } satisfies ProjectFileSystem,
   }
 }

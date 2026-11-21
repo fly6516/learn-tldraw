@@ -1,8 +1,5 @@
-import type { Editor } from 'tldraw'
-import { createShapeId } from 'tldraw'
+import type { ResearchNode } from '@/lib/project/research-graph'
 import type { ResearchNodeType } from '@/app/research/research-node'
-import { RESEARCH_NODE_META } from '@/app/research/research-node'
-import JSZip from 'jszip'
 
 /**
  * Parsed LaTeX section data
@@ -13,7 +10,6 @@ interface ParsedSection {
     level: number
     customLabel?: string
 }
-
 /**
  * LaTeX section patterns mapping
  */
@@ -162,71 +158,29 @@ function parseSections(latex: string): ParsedSection[] {
 }
 
 /**
- * Import LaTeX content into tldraw editor
+ * Convert LaTeX sections into positioned research nodes.
  */
-export function importLatexToEditor(editor: Editor, latexContent: string): void {
+export function parseLatexNodes(latexContent: string): ResearchNode[] {
     const sections = parseSections(latexContent)
-
-    if (sections.length === 0) {
-        throw new Error('No valid sections found in LaTeX document')
-    }
-
-    // Calculate positions for nodes
-    const startX = 100
-    const startY = 100
-    const nodeWidth = 400
-    const nodeHeight = 200
-    const horizontalGap = 50
-    const verticalGap = 50
-
-    // Group sections by type to determine order
-    const sectionsByType = new Map<ResearchNodeType, ParsedSection[]>()
-    sections.forEach(section => {
-        const existing = sectionsByType.get(section.type) || []
-        existing.push(section)
-        sectionsByType.set(section.type, existing)
-    })
-
-    // Sort sections by their defined order
-    const sortedSections = sections.sort((a, b) => {
-        const orderA = RESEARCH_NODE_META[a.type].order
-        const orderB = RESEARCH_NODE_META[b.type].order
-        return orderA - orderB
-    })
-
-    // Create shapes
-    const shapes = sortedSections.map((section, index) => {
-        const row = Math.floor(index / 3)
-        const col = index % 3
-
-        const x = startX + col * (nodeWidth + horizontalGap)
-        const y = startY + row * (nodeHeight + verticalGap)
-
+    if (!sections.length) throw new Error('No valid sections found in LaTeX document')
+    const levels = new Map<number, string>()
+    return sections.map((section, order) => {
+        const id = crypto.randomUUID()
+        for (const level of levels.keys()) {
+            if (level >= section.level) levels.delete(level)
+        }
+        const parentId = [...levels.values()].at(-1)
+        levels.set(section.level, id)
         return {
-            id: createShapeId(),
-            type: 'research-node' as const,
-            x,
-            y,
-            props: {
-                section: section.type,
-                content: section.content,
-                order: index,
-                level: section.level,
-                customLabel: section.customLabel,
-                metadata: {
-                    imported: true,
-                    importSource: 'latex',
-                    createdAt: new Date().toISOString(),
-                },
+            id,
+            position: { x: 100 + (order % 3) * 410, y: 100 + Math.floor(order / 3) * 340 },
+            data: {
+                section: section.type, content: section.content, order, level: section.level,
+                parentId, customLabel: section.customLabel,
+                metadata: { imported: true, importSource: 'latex', createdAt: new Date().toISOString() },
             },
         }
     })
-
-    // Add shapes to editor
-    editor.createShapes(shapes)
-
-    // Zoom to fit all shapes
-    editor.zoomToFit({ animation: { duration: 300 } })
 }
 
 /**
@@ -243,81 +197,4 @@ export function validateLatexContent(content: string): { valid: boolean; error?:
     }
 
     return { valid: true }
-}
-
-/**
- * Extract main .tex file from zip contents
- */
-function findMainTexFile(files: { [key: string]: string }): string | null {
-    const texFiles = Object.keys(files).filter(name => name.endsWith('.tex'))
-
-    if (texFiles.length === 0) {
-        return null
-    }
-
-    // Priority order for finding main file
-    const priorities = [
-        'main.tex',
-        'paper.tex',
-        'manuscript.tex',
-        'article.tex',
-    ]
-
-    // Check priority files first
-    for (const priority of priorities) {
-        const found = texFiles.find(name => name.toLowerCase().endsWith(priority))
-        if (found) {
-            return files[found]
-        }
-    }
-
-    // Find the file with \documentclass
-    for (const filename of texFiles) {
-        const content = files[filename]
-        if (content.includes('\\documentclass')) {
-            return content
-        }
-    }
-
-    // Return the first .tex file as fallback
-    return files[texFiles[0]]
-}
-
-/**
- * Import LaTeX zip file
- */
-export async function importLatexZip(editor: Editor, zipFile: File): Promise<void> {
-    try {
-        const zip = new JSZip()
-        const zipContent = await zip.loadAsync(zipFile)
-
-        // Extract all .tex files
-        const texFiles: { [key: string]: string } = {}
-
-        for (const [filename, file] of Object.entries(zipContent.files)) {
-            if (!file.dir && filename.endsWith('.tex')) {
-                const content = await file.async('text')
-                texFiles[filename] = content
-            }
-        }
-
-        if (Object.keys(texFiles).length === 0) {
-            throw new Error('No .tex files found in the zip archive')
-        }
-
-        // Find and use the main .tex file
-        const mainContent = findMainTexFile(texFiles)
-
-        if (!mainContent) {
-            throw new Error('Could not find a valid main .tex file')
-        }
-
-        // Import the main file content
-        importLatexToEditor(editor, mainContent)
-    } catch (error) {
-        if (error instanceof Error) {
-            throw new Error(`Failed to process zip file: ${error.message}`)
-        }
-        throw new Error('Failed to process zip file')
-    }
 }

@@ -1,5 +1,4 @@
-import type { Editor } from 'tldraw'
-import { getArrowOrderedShapeIds } from './arrow-ordering'
+import { collectArrowOrderedNodes, type ResearchPage } from '@/lib/project/research-graph'
 import { exportToLatex } from './latex-exporter'
 import { exportToMarkdown } from './markdown-exporter'
 import { exportToPdf } from './pdf-exporter'
@@ -31,14 +30,14 @@ export function downloadFile(content: string, filename: string, mimeType: string
     URL.revokeObjectURL(url)
 }
 
-export function generateProjectSource(editor: Editor, fileSystem: ProjectFileSystem): string {
+export function generateProjectSource(page: ResearchPage, fileSystem: ProjectFileSystem): string {
     if (fileSystem.metadata.sourceMode === 'archive') {
         const main = fileSystem.files.get(fileSystem.metadata.mainFile ?? '')
         return main && 'content' in main ? main.content ?? '' : ''
     }
-    return exportToLatexFile(collectResearchNodes(editor, true), fileSystem, {
+    return exportToLatexFile(collectResearchNodes(page, true), fileSystem, {
         format: 'tex',
-        preserveNodeOrder: Boolean(getArrowOrderedShapeIds(editor)),
+        preserveNodeOrder: Boolean(collectArrowOrderedNodes(page)),
     })
 }
 
@@ -46,24 +45,24 @@ export function generateProjectSource(editor: Editor, fileSystem: ProjectFileSys
  * Export research nodes to LaTeX using file system and download as zip file
  */
 export async function exportResearchToLatexWithFileSystem(
-    editor: Editor,
+    page: ResearchPage,
     fileSystem: ProjectFileSystem | null
 ): Promise<void> {
     try {
         if (!fileSystem) {
             // Fallback to old method if no file system
-            return exportResearchToLatex(editor)
+            return exportResearchToLatex(page)
         }
 
         // Collect nodes from editor
-        const nodes = collectResearchNodes(editor, true)
+        const nodes = collectResearchNodes(page, true)
 
         // Export to zip using the enhanced exporter
         const zipBlob = fileSystem.metadata.sourceMode === 'archive'
             ? await exportSourceArchive(fileSystem)
             : await exportToLatexZip(nodes, fileSystem, {
             format: 'zip',
-            preserveNodeOrder: Boolean(getArrowOrderedShapeIds(editor)),
+            preserveNodeOrder: Boolean(collectArrowOrderedNodes(page)),
             includeFigures: true,
             includeReferences: true,
         })
@@ -91,10 +90,10 @@ export async function exportResearchToLatexWithFileSystem(
 /**
  * Export research nodes to LaTeX and download as zip file
  */
-export async function exportResearchToLatex(editor: Editor): Promise<void> {
+export async function exportResearchToLatex(page: ResearchPage): Promise<void> {
     try {
         // Generate LaTeX content
-        const latexContent = exportToLatex(editor)
+        const latexContent = exportToLatex(page)
 
         // Generate timestamp for filenames
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)
@@ -340,10 +339,10 @@ xelatex ${projectName}.tex
 /**
  * Export research nodes to Markdown and download the file
  */
-export function exportResearchToMarkdown(editor: Editor): void {
+export function exportResearchToMarkdown(page: ResearchPage): void {
     try {
         // Generate Markdown content
-        const markdownContent = exportToMarkdown(editor)
+        const markdownContent = exportToMarkdown(page)
 
         // Generate filename with timestamp
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)
@@ -362,12 +361,12 @@ export function exportResearchToMarkdown(editor: Editor): void {
 /**
  * Export research nodes to PDF and download the file
  */
-export async function exportResearchToPdf(editor: Editor): Promise<void> {
+export async function exportResearchToPdf(page: ResearchPage): Promise<void> {
     try {
         console.log('正在生成PDF...')
 
         // Export to PDF
-        await exportToPdf(editor)
+        await exportToPdf(page)
 
         console.log('PDF导出成功')
     } catch (error) {

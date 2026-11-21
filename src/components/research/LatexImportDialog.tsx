@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import type { Editor } from "tldraw";
+import type { ResearchNode } from "@/lib/project/research-graph";
 import {
     Dialog,
     DialogContent,
@@ -12,19 +12,19 @@ import {
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { importLatexToEditor, validateLatexContent } from "@/lib/import/latex-importer";
+import { parseLatexNodes, validateLatexContent } from "@/lib/import/latex-importer";
 import { importSourceArchive } from "@/lib/project/source-archive";
 import { useProjectFileSystem } from "@/contexts/ProjectFileSystemContext";
 
 interface LatexImportDialogProps {
-    editor: Editor;
+    onImportNodes: (nodes: ResearchNode[]) => void;
     open: boolean;
     onOpenChange: (open: boolean) => void;
     onProjectImport?: () => void;
 }
 
 export function LatexImportDialog({
-    editor,
+    onImportNodes,
     open,
     onOpenChange,
     onProjectImport,
@@ -51,7 +51,7 @@ export function LatexImportDialog({
             }
 
             // Import to editor
-            importLatexToEditor(editor, latexContent);
+            onImportNodes(parseLatexNodes(latexContent));
 
             // Success - close dialog
             setLatexContent("");
@@ -92,7 +92,7 @@ export function LatexImportDialog({
 
         try {
             const project = await importSourceArchive(file);
-            setFileSystem(project);
+            setFileSystem(current => ({ ...project, canvas: current?.canvas }));
             onProjectImport?.();
 
             // Success - close dialog

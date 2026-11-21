@@ -4,7 +4,7 @@ const storeName = 'projects'
 
 export function openProjectStorage(): Promise<IDBDatabase> {
     return new Promise((resolve, reject) => {
-        const request = indexedDB.open('learn-tldraw-projects', 1)
+        const request = indexedDB.open('research-canvas-projects', 1)
         request.onupgradeneeded = () => request.result.createObjectStore(storeName)
         request.onsuccess = () => resolve(request.result)
         request.onerror = () => reject(request.error)

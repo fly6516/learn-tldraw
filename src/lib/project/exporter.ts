@@ -351,7 +351,7 @@ function generateReadme(
 ): string {
   return `# ${fileSystem.metadata.projectName}
 
-Exported from tldraw Research Tool
+Exported from Research Canvas
 
 ## Files
 

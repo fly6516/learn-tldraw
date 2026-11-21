@@ -4,6 +4,7 @@
  */
 
 import type { ResearchNodeType } from '@/app/research/research-node'
+import type { ResearchCanvas } from './research-graph'
 
 /**
  * LaTeX template information
@@ -87,6 +88,7 @@ export interface ProjectDirectory {
  * Complete project file system
  */
 export interface ProjectFileSystem {
+  canvas?: ResearchCanvas
   // Template information
   template: LatexTemplate
 

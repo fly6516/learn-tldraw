@@ -1,63 +1,33 @@
 import { expect, test } from 'bun:test'
 import JSZip from 'jszip'
-import {
-  ArrowBindingUtil, ArrowShapeUtil, createBindingId, createShapeId, createTLStore,
-  getSnapshot, loadSnapshot, PageRecordType,
-} from 'tldraw'
-import { ResearchNodeShapeUtil } from '../../shapes/research/ResearchNodeShapeUtil'
 import { decodeProjectBackup, encodeProjectBackup } from './backup'
 import { addFigure, createProjectFileSystem, updateFileContent } from './file-system'
+import { emptyPage } from './research-graph'
 
-const template = {
-  documentClass: 'article',
-  preamble: '',
-  packages: [],
-  metadata: {},
+const template = { documentClass: 'article', preamble: '', packages: [], metadata: {} }
+const node = (id, x, data = {}) => ({
+  id, position: { x, y: 274 }, data: { section: 'custom', content: id, level: 1, order: 1, ...data },
+})
+const canvas = {
+  activePageId: 'results',
+  pages: [
+    { ...emptyPage(), nodes: [node('intro', 120)] },
+    {
+      ...emptyPage('Results', 'results'), viewport: { x: 25, y: 30, zoom: 0.7 },
+      nodes: [node('results', 620), node('detail', 100, { parentId: 'results', level: 2, tags: ['test'] })],
+      edges: [{ id: 'order', source: 'results', target: 'detail' }],
+    },
+  ],
 }
 
-test('restores custom nodes, arrow bindings, page layout, and attachments into a fresh store', async () => {
-  const original = createTLStore({ shapeUtils: [ResearchNodeShapeUtil, ArrowShapeUtil] })
-  original.ensureStoreIsUsable()
-  const page = original.allRecords().find(record => record.typeName === 'page')
-  const secondPage = PageRecordType.create({ name: 'Appendix', index: 'a2' })
-  const shape = original.schema.types.shape
-  const first = shape.create({
-    id: createShapeId(), type: 'research-node', parentId: page.id, index: 'a1', x: 120, y: 270,
-    props: { ...ResearchNodeShapeUtil.prototype.getDefaultProps(), content: 'Restored heading' },
-  })
-  const second = shape.create({ ...first, id: createShapeId(), index: 'a2', x: 620 })
-  const arrow = shape.create({
-    id: createShapeId(), type: 'arrow', parentId: page.id, index: 'a3',
-    props: ArrowShapeUtil.prototype.getDefaultProps(),
-  })
-  const start = original.schema.types.binding.create({
-    id: createBindingId(), type: 'arrow', fromId: arrow.id, toId: first.id,
-    props: { ...ArrowBindingUtil.prototype.getDefaultProps(), terminal: 'start' },
-  })
-  const end = original.schema.types.binding.create({
-    ...start, id: createBindingId(), toId: second.id, props: { ...start.props, terminal: 'end' },
-  })
+test('round-trips graph pages, node positions, directed edges, viewports, and attachments', async () => {
   const bytes = Uint8Array.of(0, 37, 128, 255)
-  const asset = original.schema.types.asset.create({
-    id: 'asset:example', type: 'image',
-    props: {
-      name: 'canvas.png', src: 'data:image/png;base64,ACWA/w==', w: 1, h: 1,
-      mimeType: 'image/png', isAnimated: false,
-    },
-  })
-  original.put([secondPage, first, second, arrow, start, end, asset])
   const project = addFigure(
     updateFileContent(createProjectFileSystem(template, 'Portable paper'), 'preamble.tex', 'custom'),
-    'figure.png',
-    new Blob([bytes], { type: 'image/png' }),
+    'figure.png', new Blob([bytes], { type: 'image/png' }),
   )
-  const snapshot = getSnapshot(original)
-  const restored = await decodeProjectBackup(await encodeProjectBackup(snapshot, project))
-
-  const destination = createTLStore({ schema: original.schema })
-  loadSnapshot(destination, restored.canvas, { forceOverwriteSessionState: true })
-  expect(destination.getStoreSnapshot()).toEqual(original.getStoreSnapshot())
-  expect(restored.canvas.session).toEqual(snapshot.session)
+  const restored = await decodeProjectBackup(await encodeProjectBackup(canvas, project))
+  expect(restored.project.canvas).toEqual(canvas)
   expect(restored.project.metadata.projectName).toBe('Portable paper')
   expect(restored.project.files.get('preamble.tex').content).toBe('custom')
   const figure = restored.project.files.get('figures/figure.png')
@@ -66,18 +36,19 @@ test('restores custom nodes, arrow bindings, page layout, and attachments into a
   expect(restored.project.files.get('figures/').files).toEqual([figure])
 })
 
-test('rejects incompatible backups and archives with missing attachments', async () => {
-  const store = createTLStore()
-  store.ensureStoreIsUsable()
+test('rejects old backups, invalid graphs and missing attachments', async () => {
   const project = addFigure(createProjectFileSystem(template), 'figure.png', new Blob(['image']))
-  const backup = await encodeProjectBackup(getSnapshot(store), project)
+  const backup = await encodeProjectBackup(canvas, project)
   const archive = await JSZip.loadAsync(await backup.arrayBuffer())
-  archive.remove('attachments')
-  await expect(decodeProjectBackup(new Blob([await archive.generateAsync({ type: 'uint8array' })])))
-    .rejects.toThrow('Missing project attachment')
-
   const manifest = JSON.parse(await archive.file('project.json').async('text'))
-  archive.file('project.json', JSON.stringify({ ...manifest, version: 2 }))
-  await expect(decodeProjectBackup(new Blob([await archive.generateAsync({ type: 'uint8array' })])))
-    .rejects.toThrow('unsupported version')
+  async function read(candidate) {
+    archive.file('project.json', JSON.stringify(candidate))
+    return decodeProjectBackup(await archive.generateAsync({ type: 'blob' }))
+  }
+  await expect(read({ ...manifest, version: 1 })).rejects.toThrow('unsupported version')
+  const corrupted = structuredClone(manifest)
+  corrupted.canvas.pages[1].edges.push({ id: 'cycle', source: 'detail', target: 'results' })
+  await expect(read(corrupted)).rejects.toThrow('invalid')
+  archive.remove('attachments')
+  await expect(read(manifest)).rejects.toThrow('Missing project attachment')
 })

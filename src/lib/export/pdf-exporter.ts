@@ -1,8 +1,7 @@
-import type { Editor } from 'tldraw'
+import type { ResearchNodeData } from '@/lib/project/types'
 import type { ResearchNodeType } from '@/app/research/research-node'
 import { collectResearchNodes, sortNodesBySection, groupNodesBySection } from './latex-exporter'
-import { collectArrowOrderedNodes } from './arrow-ordering'
-import type { ResearchNodeShape } from '@/shapes/research/ResearchNodeShape'
+import { collectArrowOrderedNodes, type ResearchPage } from '@/lib/project/research-graph'
 
 /**
  * PDF export options
@@ -71,8 +70,8 @@ function PDF_HTML_HEAD(title: string): string {
 /**
  * Render a single research node as HTML block
  */
-function renderNodeHtml(shape: ResearchNodeShape): string {
-    const { section, content, customLabel } = shape.props
+function renderNodeHtml(shape: Pick<ResearchNodeData, 'section' | 'content' | 'customLabel'>): string {
+    const { section, content, customLabel } = shape
     const parts: string[] = []
 
     if (section === 'title') return '' // handled separately in header
@@ -112,23 +111,23 @@ function renderNodeHtml(shape: ResearchNodeShape): string {
 /**
  * Generate HTML content for PDF from arrow-ordered shapes
  */
-function generatePdfHtmlFromShapes(shapes: ResearchNodeShape[], options: PdfExportOptions = {}): string {
+function generatePdfHtmlFromShapes(shapes: ResearchNodeData[], options: PdfExportOptions = {}): string {
     const parts: string[] = []
 
-    const titleShape = shapes.find(s => s.props.section === 'title')
-    const titleText = options.title || titleShape?.props.content || '研究论文'
+    const titleShape = shapes.find(s => s.section === 'title')
+    const titleText = options.title || titleShape?.content || '研究论文'
 
     parts.push(PDF_HTML_HEAD(titleText))
 
     if (titleShape) {
-        parts.push(`    <div class="title">${escapeHtml(titleShape.props.content)}</div>`)
+        parts.push(`    <div class="title">${escapeHtml(titleShape.content)}</div>`)
     }
     if (options.author) {
         parts.push(`    <div class="author">${escapeHtml(options.author)}</div>`)
     }
 
     for (const shape of shapes) {
-        if (shape.props.section === 'title') continue
+        if (shape.section === 'title') continue
         const html = renderNodeHtml(shape)
         if (html) parts.push(html)
     }
@@ -140,8 +139,8 @@ function generatePdfHtmlFromShapes(shapes: ResearchNodeShape[], options: PdfExpo
 /**
  * Generate HTML content for PDF (fallback: section-type order, grouped)
  */
-function generatePdfHtmlFallback(editor: Editor, options: PdfExportOptions = {}): string {
-    const nodes = collectResearchNodes(editor)
+function generatePdfHtmlFallback(page: ResearchPage, options: PdfExportOptions = {}): string {
+    const nodes = collectResearchNodes(page)
     if (nodes.length === 0) throw new Error('没有找到可导出的研究节点')
 
     const sortedNodes = sortNodesBySection(nodes)
@@ -170,16 +169,7 @@ function generatePdfHtmlFallback(editor: Editor, options: PdfExportOptions = {})
         const data = groupedNodes.get(sectionType)
         if (!data) continue
 
-        // Synthesise a minimal shape-like object to reuse renderNodeHtml
-        const fakeShape = {
-            props: {
-                section: sectionType,
-                content: data.content,
-                customLabel: data.customLabel,
-                level: data.level ?? 1,
-            },
-        } as ResearchNodeShape
-        const html = renderNodeHtml(fakeShape)
+        const html = renderNodeHtml({ ...data, section: sectionType })
         if (html) parts.push(html)
     }
 
@@ -190,32 +180,30 @@ function generatePdfHtmlFallback(editor: Editor, options: PdfExportOptions = {})
 /**
  * Generate HTML content for PDF
  */
-function generatePdfHtml(editor: Editor, options: PdfExportOptions = {}): string {
-    const arrowOrdered = collectArrowOrderedNodes(editor)
+export function generatePdfHtml(page: ResearchPage, options: PdfExportOptions = {}): string {
+    const arrowOrdered = collectArrowOrderedNodes(page)
     if (arrowOrdered && arrowOrdered.length > 0) {
         return generatePdfHtmlFromShapes(arrowOrdered, options)
     }
-    return generatePdfHtmlFallback(editor, options)
+    return generatePdfHtmlFallback(page, options)
 }
 
 /**
  * Escape HTML special characters
  */
 function escapeHtml(text: string): string {
-    const div = document.createElement('div')
-    div.textContent = text
-    return div.innerHTML
+    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
 /**
  * Export research nodes to PDF using browser print
  */
-export async function exportToPdf(editor: Editor, options: PdfExportOptions = {}): Promise<void> {
+export async function exportToPdf(page: ResearchPage, options: PdfExportOptions = {}): Promise<void> {
     try {
         console.log('正在生成PDF预览...')
 
         // Generate HTML content
-        const htmlContent = generatePdfHtml(editor, options)
+        const htmlContent = generatePdfHtml(page, options)
 
         // Create a new window for printing
         const printWindow = window.open('', '_blank')

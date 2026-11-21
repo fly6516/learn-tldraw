@@ -1,9 +1,8 @@
-import type { Editor } from 'tldraw'
+import type { ResearchNodeData } from '@/lib/project/types'
 import type { ResearchNodeType } from '@/app/research/research-node'
 //import { RESEARCH_NODE_META } from '@/app/research/research-node'
 import { collectResearchNodes, sortNodesBySection, groupNodesBySection } from './latex-exporter'
-import { collectArrowOrderedNodes } from './arrow-ordering'
-import type { ResearchNodeShape } from '@/shapes/research/ResearchNodeShape'
+import { collectArrowOrderedNodes, type ResearchPage } from '@/lib/project/research-graph'
 
 /**
  * Markdown export options
@@ -103,14 +102,14 @@ function formatMarkdownSection(sectionType: ResearchNodeType, content: string): 
  * Each node appears in arrow-topology order.
  */
 function generateArrowOrderedMarkdown(
-    orderedShapes: ResearchNodeShape[],
+    orderedShapes: ResearchNodeData[],
     options: MarkdownExportOptions = {}
 ): string {
     const parts: string[] = []
 
-    const titleShape = orderedShapes.find((s) => s.props.section === 'title')
+    const titleShape = orderedShapes.find((s) => s.section === 'title')
     if (titleShape) {
-        parts.push(formatMarkdownSection('title', titleShape.props.content))
+        parts.push(formatMarkdownSection('title', titleShape.content))
     }
 
     if (options.author) {
@@ -129,8 +128,8 @@ function generateArrowOrderedMarkdown(
     const emittedTitle = !!titleShape
 
     for (const shape of orderedShapes) {
-        if (shape.props.section === 'title' && emittedTitle) continue
-        parts.push(formatMarkdownSection(shape.props.section, shape.props.content))
+        if (shape.section === 'title' && emittedTitle) continue
+        parts.push(formatMarkdownSection(shape.section, shape.content))
     }
 
     return parts.join('\n')
@@ -140,17 +139,17 @@ function generateArrowOrderedMarkdown(
  * Generate complete Markdown document from research nodes
  */
 export function generateMarkdownDocument(
-    editor: Editor,
+    page: ResearchPage,
     options: MarkdownExportOptions = {}
 ): string {
     // Try arrow-ordered export first
-    const arrowOrdered = collectArrowOrderedNodes(editor)
+    const arrowOrdered = collectArrowOrderedNodes(page)
     if (arrowOrdered && arrowOrdered.length > 0) {
         return generateArrowOrderedMarkdown(arrowOrdered, options)
     }
 
     // Collect and sort nodes
-    const nodes = collectResearchNodes(editor)
+    const nodes = collectResearchNodes(page)
 
     if (nodes.length === 0) {
         throw new Error('No research nodes found to export')
@@ -214,8 +213,8 @@ export function generateMarkdownDocument(
  * Main export function - generates Markdown from editor
  */
 export function exportToMarkdown(
-    editor: Editor,
+    page: ResearchPage,
     options: MarkdownExportOptions = {}
 ): string {
-    return generateMarkdownDocument(editor, options)
+    return generateMarkdownDocument(page, options)
 }
