@@ -1,10 +1,12 @@
 import { execFile } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { promisify } from 'node:util'
+import { gunzipSync } from 'node:zlib'
 import { importSourceArchive, isProjectPath } from '@/lib/project/source-archive'
 import { parseCompileDiagnostics } from '@/lib/project/compile-diagnostics'
+import { readSyncTex } from '@/lib/project/read-synctex'
 
 export const runtime = 'nodejs'
 
@@ -21,7 +23,9 @@ export async function POST(request: Request) {
     || request.headers.get('origin') !== `http://${host}`) {
     return Response.json({ error: 'The native compiler is available from the local workbench only.' }, { status: 403 })
   }
-  const mainFile = new URL(request.url).searchParams.get('main') ?? ''
+  const params = new URL(request.url).searchParams
+  const mainFile = params.get('main') ?? ''
+  const synchronize = params.get('sync') === '1'
   if (!isProjectPath(mainFile) || !/\.tex$/i.test(mainFile)) {
     return Response.json({ error: 'Select a valid .tex main file.' }, { status: 400 })
   }
@@ -61,6 +65,7 @@ export async function POST(request: Request) {
     try {
       await exec(process.env.TECTONIC_BIN || 'tectonic', [
         '--untrusted', '--keep-logs',
+        ...(synchronize ? ['--synctex'] : []),
         ...(process.env.TECTONIC_ONLY_CACHED === '1' ? ['--only-cached'] : []),
         '--outdir', output, '--', basename(mainFile),
       ], {
@@ -80,8 +85,21 @@ export async function POST(request: Request) {
         log: (outputText + (log ? '\n\n' + log : '')).slice(-50_000),
       }, { status: 422 })
     }
-    const pdf = await readFile(join(output, basename(mainFile).replace(/\.tex$/i, '.pdf')))
-    return new Response(new Uint8Array(pdf), {
+    const job = basename(mainFile).replace(/\.tex$/i, '')
+    const pdf = new Uint8Array(await readFile(join(output, job + '.pdf')))
+    if (synchronize) {
+      const mapPath = join(output, job + '.synctex.gz')
+      const map = await stat(mapPath).then(async info => {
+        if (info.size > maxBytes) return []
+        const text = gunzipSync(await readFile(mapPath), { maxOutputLength: maxBytes }).toString()
+        return readSyncTex(text, sources, mainFile, project.files.keys())
+      }).catch(() => [])
+      const result = new FormData()
+      result.set('pdf', new Blob([pdf], { type: 'application/pdf' }), job + '.pdf')
+      result.set('sourceMap', JSON.stringify(map))
+      return new Response(result, { headers: { 'Cache-Control': 'no-store' } })
+    }
+    return new Response(pdf, {
       headers: { 'Content-Type': 'application/pdf', 'Cache-Control': 'no-store' },
     })
   } catch (cause) {

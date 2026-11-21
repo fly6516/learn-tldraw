@@ -36,6 +36,11 @@ Set `TECTONIC_ONLY_CACHED=1` to compile offline once the required files are cach
    **Problems** to jump to its file and line, or expand **Compiler log** for more detail.
    **Export → LaTeX ZIP** downloads the edited source tree.
 
+After compiling, place the cursor on a LaTeX line and choose **Show in PDF** to highlight
+its typeset location. Click typeset content in **PDF Preview** to open its source file
+and line. When a source line has no typeset output, the forward jump uses the nearest
+mapped line in the same file. Compile again after editing to refresh both directions.
+
 The compile endpoint accepts ZIPs up to 32 MB, including after extraction. The standard compiler
 supports XeLaTeX and BibTeX workflows. Documents that require a different engine, Biber, or
 shell escape may need external compilation. The canvas preview and print workflow are also

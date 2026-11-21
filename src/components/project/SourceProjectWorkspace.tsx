@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import dynamic from 'next/dynamic'
 import type { editor, IPosition } from 'monaco-editor'
-import { BookOpen, ChevronRight, CircleAlert, Download, FileCode2, FileText, Folder, Play, Save, Sparkles } from 'lucide-react'
+import { BookOpen, ChevronRight, CircleAlert, Download, FileCode2, FileText, Folder, LocateFixed, Play, Save, Sparkles } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { useProjectFileSystem } from '@/contexts/ProjectFileSystemContext'
@@ -17,10 +17,15 @@ import { checkCitations, collectBibliography } from '@/lib/project/references'
 import { sourcePosition, type SourceLocation } from '@/lib/project/latex-source'
 import type { SourceProblem } from './MonacoSourceEditor'
 import type { CompileDiagnostic } from '@/lib/project/compile-diagnostics'
+import { findPdfRegion, type SyncRegion } from '@/lib/project/source-sync'
 
 const MonacoSourceEditor = dynamic(() => import('./MonacoSourceEditor').then(module => module.MonacoSourceEditor), {
   ssr: false,
   loading: () => <p role="status" className="p-4 text-sm text-muted-foreground">Loading source editor…</p>,
+})
+const SyncedPdfPreview = dynamic(() => import('./SyncedPdfPreview').then(module => module.SyncedPdfPreview), {
+  ssr: false,
+  loading: () => <p role="status" className="p-4 text-sm text-muted-foreground">Loading PDF preview…</p>,
 })
 
 function Files({ nodes, selected, main, onSelect, dirty }: {
@@ -80,10 +85,15 @@ export function SourceProjectWorkspace({ project, initialFile, onClose }: {
   const [pdfUrl, setPdfUrl] = useState('')
   const [pdfFilename, setPdfFilename] = useState('')
   const [pdfStale, setPdfStale] = useState(false)
+  const [sourceMap, setSourceMap] = useState<SyncRegion[]>([])
+  const [pdfPage, setPdfPage] = useState(1)
+  const [pdfTarget, setPdfTarget] = useState<SyncRegion | null>(null)
+  const [syncMessage, setSyncMessage] = useState('')
   const [panel, setPanel] = useState<'pdf' | 'problems' | 'references' | 'ai'>('pdf')
   const [navigation, setNavigation] = useState<'files' | 'outline'>('files')
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
   const outputRef = useRef<HTMLElement | null>(null)
+  const pdfNavigationRef = useRef<HTMLDivElement | null>(null)
   const pendingJump = useRef<{ path: string; start: IPosition; end: IPosition } | null>(null)
   const isTex = /\.tex$/i.test(selected)
   const dirty = Object.keys(drafts).length > 0
@@ -145,6 +155,34 @@ export function SourceProjectWorkspace({ project, initialFile, onClose }: {
     jump(location.path, location.line, location)
   }
 
+  const canSync = !busy && !pdfStale && sourceMap.length > 0
+
+  function showInPdf() {
+    const line = editorRef.current?.getPosition()?.lineNumber
+    if (!line || !canSync) return
+    const target = findPdfRegion(sourceMap, selected, line)
+    if (target) {
+      setPdfPage(target.page)
+      setPdfTarget({ ...target })
+      setSyncMessage(target.line === line ? `Source line ${line} · PDF page ${target.page}`
+        : `Nearest typeset line ${target.line} · PDF page ${target.page}`)
+    } else {
+      setSyncMessage('The selected file has no mapped content in this PDF.')
+    }
+    pdfNavigationRef.current?.scrollIntoView({ block: 'nearest' })
+    setPanel('pdf')
+  }
+
+  function showInSource(location: SyncRegion | undefined) {
+    if (!location) {
+      setSyncMessage('No source location here. Click closer to the typeset content.')
+      return
+    }
+    setPdfTarget(null)
+    setSyncMessage(`${location.path}:${location.line}`)
+    jump(location.path, location.line)
+  }
+
   const save = useCallback(() => {
     if (!dirty || busy) return
     setFileSystem(workingProject)
@@ -153,6 +191,8 @@ export function SourceProjectWorkspace({ project, initialFile, onClose }: {
 
   function markSourceChanged() {
     setPdfStale(true)
+    setPdfTarget(null)
+    setSyncMessage('')
     setDiagnostics([])
     setError('')
   }
@@ -183,13 +223,14 @@ export function SourceProjectWorkspace({ project, initialFile, onClose }: {
     save()
     setBusy(true)
     setPanel('pdf')
+    setSyncMessage('')
     outputRef.current?.scrollIntoView({ block: 'nearest' })
     setError('')
     setLog('')
     setDiagnostics([])
     try {
       const archive = await exportSourceArchive(workingProject)
-      const response = await fetch(`/api/latex/compile?main=${encodeURIComponent(main)}`, {
+      const response = await fetch(`/api/latex/compile?main=${encodeURIComponent(main)}&sync=1`, {
         method: 'POST', body: archive,
       })
       if (!response.ok) {
@@ -200,7 +241,14 @@ export function SourceProjectWorkspace({ project, initialFile, onClose }: {
         setPanel('problems')
         return
       }
-      setPdfUrl(URL.createObjectURL(await response.blob()))
+      const result = await response.formData()
+      const pdf = result.get('pdf')
+      if (!(pdf instanceof Blob)) throw new Error('The compiler did not return a PDF.')
+      const map = result.get('sourceMap')
+      setSourceMap(typeof map === 'string' ? JSON.parse(map) : [])
+      setPdfPage(1)
+      setPdfTarget(null)
+      setPdfUrl(URL.createObjectURL(pdf))
       setPdfFilename(main.split('/').at(-1)?.replace(/\.tex$/i, '.pdf') ?? 'project.pdf')
       setPdfStale(false)
       setPanel('pdf')
@@ -259,7 +307,13 @@ export function SourceProjectWorkspace({ project, initialFile, onClose }: {
             <div className="flex min-w-0 items-center gap-2 border-b border-slate-200 bg-white px-4 py-3 text-xs">
               <FileCode2 className="size-4 shrink-0 text-indigo-600" />
               <span className="truncate font-medium" title={selected}>{selected || 'Select a source file'}</span>
-              {Object.hasOwn(drafts, selected) && <span className="ml-auto shrink-0 text-amber-700">Unsaved</span>}
+              <div className="ml-auto flex shrink-0 items-center gap-2">
+                {Object.hasOwn(drafts, selected) && <span className="text-amber-700">Unsaved</span>}
+                <Button size="sm" variant="outline" disabled={!isTex || !canSync} onClick={showInPdf}
+                  title={canSync ? 'Find the editor cursor in the compiled PDF' : 'Compile the project to enable source and PDF navigation'}>
+                  <LocateFixed className="size-3.5" /> Show in PDF
+                </Button>
+              </div>
             </div>
             <div className="min-h-0 flex-1">
               {selected && <MonacoSourceEditor path={selected} value={draft} readOnly={busy} problems={problems}
@@ -268,7 +322,7 @@ export function SourceProjectWorkspace({ project, initialFile, onClose }: {
           </section>
 
           <section ref={outputRef} aria-label="Output and tools" className="flex min-h-[25rem] min-w-0 flex-col bg-slate-100 lg:min-h-0">
-            <div className="flex flex-wrap items-center gap-1 border-b border-slate-200 bg-white px-2 py-1.5">
+            <div ref={pdfNavigationRef} className="flex flex-wrap items-center gap-1 border-b border-slate-200 bg-white px-2 py-1.5">
               {([
                 ['pdf', 'PDF Preview', FileText], ['problems', 'Problems', CircleAlert],
                 ['references', 'References', BookOpen], ['ai', 'Chapter AI', Sparkles],
@@ -287,7 +341,13 @@ export function SourceProjectWorkspace({ project, initialFile, onClose }: {
                       <Download className="size-3.5" /> Download PDF
                     </a></Button>
                   </div>
-                  <iframe title="Compiled PDF" src={pdfUrl} className="min-h-0 w-full flex-1" />
+                  <p role="status" className="border-b border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600">
+                    {syncMessage || (canSync ? 'Click PDF content to find its source.'
+                      : pdfStale ? 'Compile the current source to restore navigation.' : busy ? 'Updating source locations…'
+                        : 'This PDF has no source locations.')}
+                  </p>
+                  <SyncedPdfPreview key={pdfUrl} url={pdfUrl} page={pdfPage} regions={canSync ? sourceMap : []}
+                    target={pdfTarget} onLocate={showInSource} onPage={page => { setPdfPage(page); setPdfTarget(null); setSyncMessage('') }} />
                 </>}
                 {!pdfUrl && <div className="m-auto max-w-60 p-4 text-center">
                   <FileText className="mx-auto mb-3 size-8 text-indigo-400" />

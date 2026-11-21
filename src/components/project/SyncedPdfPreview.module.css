@@ -1,0 +1,36 @@
+.text {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  opacity: 1;
+  line-height: 1;
+  text-align: initial;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inverse: calc(1 / var(--min-font-size));
+}
+
+.text :is(span, br) {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  transform-origin: 0 0;
+}
+
+.text > :not(:global(.markedContent)),
+.text :global(.markedContent) span:not(:global(.markedContent)) {
+  z-index: 1;
+  font-size: calc(var(--text-scale-factor) * var(--font-height, 0));
+  transform: rotate(var(--rotate, 0deg)) scaleX(var(--scale-x, 1)) scale(var(--min-font-size-inverse));
+}
+
+.text :global(.markedContent) {
+  display: contents;
+}
+
+.text ::selection {
+  background: rgb(79 70 229 / 30%);
+}
