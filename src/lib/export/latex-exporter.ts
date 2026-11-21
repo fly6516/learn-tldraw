@@ -31,8 +31,8 @@ interface ResearchNodeData {
 /**
  * Collect all research nodes from the tldraw editor
  */
-export function collectResearchNodes(editor: Editor): ResearchNodeData[] {
-    const shapes = editor.getCurrentPageShapes()
+export function collectResearchNodes(editor: Editor, ordered = false): ResearchNodeData[] {
+    const shapes = (ordered ? collectArrowOrderedNodes(editor) : null) ?? editor.getCurrentPageShapes()
     const researchNodes: ResearchNodeData[] = []
 
     for (const shape of shapes) {

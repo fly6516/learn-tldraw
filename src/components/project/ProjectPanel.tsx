@@ -12,10 +12,12 @@ import { PreambleEditor } from './PreambleEditor'
 import { BibTeXEditor } from './BibTeXEditor'
 import { useProjectFileSystem } from '@/contexts/ProjectFileSystemContext'
 import type { FileTreeNode } from '@/lib/project/file-system'
-import type { ProjectFile } from '@/lib/project/types'
+import { Button } from '@/components/ui/button'
+import { SourceProjectWorkspace } from './SourceProjectWorkspace'
 
 export function ProjectPanel() {
-  const { fileTree, getFileContent, updateFile, addImage, addFile, deleteFile } = useProjectFileSystem()
+  const { fileSystem, fileTree, getFileContent, updateFile, addImage, addFile, deleteFile } = useProjectFileSystem()
+  const [sourceFile, setSourceFile] = useState<string | null>(null)
 
   const [previewNode, setPreviewNode] = useState<FileTreeNode | null>(null)
   const [previewContent, setPreviewContent] = useState<string>('')
@@ -39,6 +41,10 @@ export function ProjectPanel() {
   }
 
   const handleFileEdit = (node: FileTreeNode) => {
+    if (fileSystem?.metadata.sourceMode === 'archive') {
+      setSourceFile(node.path)
+      return
+    }
     const content = getFileContent(node.path)
 
     if (typeof content !== 'string') return
@@ -155,7 +161,17 @@ export function ProjectPanel() {
   }
 
   return (
-    <>
+    <div className="flex h-full flex-col">
+      {fileSystem?.metadata.sourceMode === 'archive' && (
+        <div className="border-b p-2">
+          <Button className="w-full" onClick={() => setSourceFile('')}>Edit and Compile LaTeX</Button>
+          {sourceFile !== null && (
+            <SourceProjectWorkspace project={fileSystem} initialFile={sourceFile || undefined}
+              onClose={() => setSourceFile(null)} />
+          )}
+        </div>
+      )}
+      <div className="min-h-0 flex-1">
       <ProjectFileBrowser
         fileTree={fileTree}
         onFileClick={handleFileClick}
@@ -166,6 +182,7 @@ export function ProjectPanel() {
         onNewFile={handleNewFile}
         onNewFolder={handleNewFolder}
       />
+      </div>
 
       {previewNode && (
         <FilePreviewDialog
@@ -190,6 +207,6 @@ export function ProjectPanel() {
           onClose={() => setEditingBibTeX(false)}
         />
       )}
-    </>
+    </div>
   )
 }

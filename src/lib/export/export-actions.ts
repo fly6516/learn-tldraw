@@ -1,11 +1,13 @@
 import type { Editor } from 'tldraw'
+import { getArrowOrderedShapeIds } from './arrow-ordering'
 import { exportToLatex } from './latex-exporter'
 import { exportToMarkdown } from './markdown-exporter'
 import { exportToPdf } from './pdf-exporter'
 import JSZip from 'jszip'
-import type { ProjectFileSystem, ResearchNodeData } from '@/lib/project/types'
+import type { ProjectFileSystem } from '@/lib/project/types'
 import { collectResearchNodes } from './latex-exporter'
-import { exportToLatexZip } from '@/lib/project/exporter'
+import { exportToLatexFile, exportToLatexZip } from '@/lib/project/exporter'
+import { exportSourceArchive } from '@/lib/project/source-archive'
 
 /**
  * Download a file in the browser
@@ -29,6 +31,17 @@ export function downloadFile(content: string, filename: string, mimeType: string
     URL.revokeObjectURL(url)
 }
 
+export function generateProjectSource(editor: Editor, fileSystem: ProjectFileSystem): string {
+    if (fileSystem.metadata.sourceMode === 'archive') {
+        const main = fileSystem.files.get(fileSystem.metadata.mainFile ?? '')
+        return main && 'content' in main ? main.content ?? '' : ''
+    }
+    return exportToLatexFile(collectResearchNodes(editor, true), fileSystem, {
+        format: 'tex',
+        preserveNodeOrder: Boolean(getArrowOrderedShapeIds(editor)),
+    })
+}
+
 /**
  * Export research nodes to LaTeX using file system and download as zip file
  */
@@ -43,11 +56,14 @@ export async function exportResearchToLatexWithFileSystem(
         }
 
         // Collect nodes from editor
-        const nodes = collectResearchNodes(editor) as ResearchNodeData[]
+        const nodes = collectResearchNodes(editor, true)
 
         // Export to zip using the enhanced exporter
-        const zipBlob = await exportToLatexZip(nodes, fileSystem, {
+        const zipBlob = fileSystem.metadata.sourceMode === 'archive'
+            ? await exportSourceArchive(fileSystem)
+            : await exportToLatexZip(nodes, fileSystem, {
             format: 'zip',
+            preserveNodeOrder: Boolean(getArrowOrderedShapeIds(editor)),
             includeFigures: true,
             includeReferences: true,
         })

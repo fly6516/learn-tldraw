@@ -22,6 +22,8 @@ export interface LatexTemplate {
     options?: string[]
   }[]
 
+  bibliographyFiles?: string
+
   // Bibliography settings
   bibliography?: {
     style: string // e.g., "plain", "gbt7714-numerical"
@@ -97,6 +99,8 @@ export interface ProjectFileSystem {
     version: string
     createdAt: string
     updatedAt: string
+    sourceMode?: 'archive'
+    mainFile?: string
   }
 }
 
@@ -155,6 +159,7 @@ export interface ExportOptions {
   includePreamble?: boolean
 
   // File structure
+  preserveNodeOrder?: boolean
   splitSections?: boolean // Export sections as separate files
 
   // Metadata
@@ -187,6 +192,8 @@ export interface ResearchNodeData {
 export interface ImportResult {
   // Extracted template
   template: LatexTemplate
+
+  source: string
 
   // Parsed content
   nodes: ResearchNodeData[]

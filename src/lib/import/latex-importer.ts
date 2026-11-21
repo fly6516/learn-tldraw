@@ -49,29 +49,7 @@ const LATEX_SECTION_PATTERNS: Record<string, ResearchNodeType> = {
  * Clean LaTeX commands from text
  */
 function cleanLatexCommands(text: string): string {
-    let cleaned = text
-
-    // Remove comments
-    cleaned = cleaned.replace(/%.*/g, '')
-
-    // Remove common formatting commands but keep their content
-    cleaned = cleaned.replace(/\\textbf\{([^}]+)\}/g, '$1')
-    cleaned = cleaned.replace(/\\textit\{([^}]+)\}/g, '$1')
-    cleaned = cleaned.replace(/\\emph\{([^}]+)\}/g, '$1')
-    cleaned = cleaned.replace(/\\texttt\{([^}]+)\}/g, '$1')
-
-    // Remove citations
-    cleaned = cleaned.replace(/\\cite\{[^}]+\}/g, '')
-    cleaned = cleaned.replace(/\\citep?\{[^}]+\}/g, '')
-
-    // Remove labels and refs
-    cleaned = cleaned.replace(/\\label\{[^}]+\}/g, '')
-    cleaned = cleaned.replace(/\\ref\{[^}]+\}/g, '')
-
-    // Clean up extra whitespace
-    cleaned = cleaned.replace(/\s+/g, ' ').trim()
-
-    return cleaned
+    return text.replace(/\\bibliography(?:style)?\s*\{[^{}]*\}/g, '').trim()
 }
 
 /**
@@ -175,7 +153,7 @@ function parseSections(latex: string): ParsedSection[] {
                 type: sectionType,
                 content: cleanContent,
                 level,
-                customLabel: sectionType === 'custom' ? sectionTitle : undefined,
+                customLabel: sectionTitle,
             })
         }
     }

@@ -9,8 +9,6 @@ import { LatexTemplate } from './types'
  * Parse LaTeX preamble to extract template information
  */
 export function parseLatexTemplate(content: string): LatexTemplate {
-  const lines = content.split('\n')
-
   // Extract document class
   const docClassMatch = content.match(/\\documentclass(?:\[(.*?)\])?\{(.*?)\}/)
   const documentClass = docClassMatch?.[2] || 'article'
@@ -36,7 +34,7 @@ export function parseLatexTemplate(content: string): LatexTemplate {
 
   // Extract bibliography settings
   let bibliography: LatexTemplate['bibliography'] = undefined
-  const bibStyleMatch = preamble.match(/\\bibliographystyle\{(.*?)\}/)
+  const bibStyleMatch = content.match(/\\bibliographystyle\{(.*?)\}/)
   if (bibStyleMatch) {
     bibliography = {
       style: bibStyleMatch[1],
@@ -73,6 +71,7 @@ export function parseLatexTemplate(content: string): LatexTemplate {
     preamble,
     packages,
     bibliography,
+    bibliographyFiles: content.match(/\\bibliography\s*\{([^{}]+)\}/)?.[1],
     customCommands: customCommands.length > 0 ? customCommands : undefined,
     metadata: {
       title: titleMatch?.[1],
@@ -99,10 +98,10 @@ export function generatePreamble(template: LatexTemplate): string {
   preamble += `\\documentclass${options}{${template.documentClass}}\n\n`
 
   // Use stored preamble if available (for imported templates)
-  if (template.metadata.imported && template.preamble) {
+  if (template.preamble) {
     // Extract everything after documentclass
     const preambleContent = template.preamble
-      .replace(/\\documentclass.*?\n/, '')
+      .replace(/\\documentclass\s*(?:\[[^\]]*\])?\s*\{[^{}]*\}/, '')
       .trim()
     if (preambleContent) {
       preamble += preambleContent + '\n\n'

@@ -9,22 +9,20 @@ import type {
   ExportOptions,
   LatexTemplate,
   ResearchNodeData,
-  ProjectFile,
 } from '../project/types'
 import { generatePreamble } from '../project/template-parser'
 import { TEMPLATE_PRESETS } from '../project/templates'
-import { listAllFiles } from '../project/file-system'
 import type { ResearchNodeType } from '@/app/research/research-node'
 import { RESEARCH_NODE_META } from '@/app/research/research-node'
 
 /**
  * Export to LaTeX .tex file
  */
-export async function exportToLatexFile(
+export function exportToLatexFile(
   nodes: ResearchNodeData[],
   fileSystem: ProjectFileSystem,
   options: ExportOptions = { format: 'tex' }
-): Promise<string> {
+): string {
   const template = getExportTemplate(fileSystem, options)
   return generateLatexDocument(nodes, template, fileSystem, options)
 }
@@ -41,7 +39,7 @@ export async function exportToLatexZip(
 
   // Generate main.tex
   const template = getExportTemplate(fileSystem, options)
-  const mainContent = generateLatexDocument(nodes, template, fileSystem, options)
+  const mainContent = exportToLatexFile(nodes, fileSystem, options)
   zip.file('main.tex', mainContent)
 
   // Add preamble.tex if user has custom additions
@@ -61,33 +59,15 @@ export async function exportToLatexZip(
     }
   }
 
-  // Add figures
-  if (options.includeFigures !== false) {
-    const figuresFolder = zip.folder('figures')
-    if (figuresFolder) {
-      const allFiles = listAllFiles(fileSystem)
-      const figures = allFiles.filter(f => f.path.startsWith('figures/') && f.blob)
+  const excludedFiles = new Set(['main.tex', 'preamble.tex'])
+  for (const [path, file] of fileSystem.files) {
+    if (excludedFiles.has(path) || file.type === 'directory') continue
+    if (options.includeReferences === false && /\.bib$/i.test(path)) continue
+    if (options.includeFigures === false && path.startsWith('figures/')) continue
 
-      for (const figure of figures) {
-        if (figure.blob) {
-          figuresFolder.file(figure.name, figure.blob)
-        }
-      }
-    }
-  }
-
-  // Add all other user-created files (excluding already added files)
-  const excludedFiles = new Set(['main.tex', 'preamble.tex', 'references.bib', 'figures/'])
-  for (const [path, file] of fileSystem.files.entries()) {
-    if (excludedFiles.has(path)) continue
-    if (file.type === 'directory') continue
-    if (path.startsWith('figures/')) continue // Already handled above
-
-    const projectFile = file as ProjectFile
-    if (projectFile.content) {
-      zip.file(path, projectFile.content)
-    } else if (projectFile.blob) {
-      zip.file(path, projectFile.blob)
+    const content = file.content ?? file.blob
+    if (content !== undefined) {
+      zip.file(path, typeof content === 'string' ? content : await content.arrayBuffer())
     }
   }
 
@@ -160,17 +140,19 @@ function generateLatexDocument(
     }
   }
 
+  const title = nodes.find(node => node.section === 'title')?.content.trim()
+  const metadata = options.metadata ?? (!template.metadata.title && title ? { title } : undefined)
   // Add metadata if provided
-  if (options.metadata) {
+  if (metadata) {
     parts.push('')
-    if (options.metadata.title) {
-      parts.push(`\\title{${escapeLatex(options.metadata.title)}}`)
+    if (metadata.title) {
+      parts.push(`\\title{${escapeLatex(metadata.title)}}`)
     }
-    if (options.metadata.author) {
-      parts.push(`\\author{${escapeLatex(options.metadata.author)}}`)
+    if (metadata.author) {
+      parts.push(`\\author{${escapeLatex(metadata.author)}}`)
     }
-    if (options.metadata.date) {
-      parts.push(`\\date{${escapeLatex(options.metadata.date)}}`)
+    if (metadata.date) {
+      parts.push(`\\date{${escapeLatex(metadata.date)}}`)
     }
   }
 
@@ -180,14 +162,15 @@ function generateLatexDocument(
   parts.push('')
 
   // Add title and metadata
-  if (options.metadata?.title) {
+  if (metadata?.title || template.metadata.title) {
     parts.push('\\maketitle')
     parts.push('')
   }
 
   // Sort and group nodes
-  const sortedNodes = sortNodesBySection(nodes)
-  const groupedNodes = groupNodesBySection(sortedNodes)
+  const groupedNodes = options.preserveNodeOrder
+    ? nodes.map(node => [node.section, [node]] as const)
+    : groupNodesBySection(sortNodesBySection(nodes))
 
   // Generate content for each section
   for (const [sectionType, sectionNodes] of groupedNodes) {
@@ -204,8 +187,10 @@ function generateLatexDocument(
 
   // Add bibliography if exists
   const bibFile = fileSystem.files.get('references.bib')
-  if (bibFile && bibFile.type !== 'directory' && bibFile.content) {
-    parts.push('\\bibliography{references}')
+  const hasBibliography = template.bibliographyFiles || (bibFile && bibFile.type !== 'directory' && bibFile.content)
+  if (options.includeReferences !== false && hasBibliography) {
+    if (!/\\bibliographystyle\s*\{/.test(parts.join('\n'))) parts.push(template.bibliography?.command ?? '\\bibliographystyle{plain}')
+    parts.push(`\\bibliography{${template.bibliographyFiles ?? 'references'}}`)
     parts.push('')
   }
 
@@ -253,7 +238,7 @@ function groupNodesBySection(
  */
 function generateSectionContent(
   sectionType: ResearchNodeType,
-  nodes: ResearchNodeData[],
+  nodes: readonly ResearchNodeData[],
   template: LatexTemplate
 ): string {
   if (nodes.length === 0) return ''
@@ -268,18 +253,19 @@ function generateSectionContent(
 
     case 'abstract':
       parts.push('\\begin{abstract}')
-      parts.push(nodes.map(n => escapeLatex(n.content)).join('\n\n'))
+      parts.push(nodes.map(n => n.content).join('\n\n'))
       parts.push('\\end{abstract}')
       break
 
     case 'keywords':
-      parts.push('\\begin{keywords}')
-      parts.push(nodes.map(n => escapeLatex(n.content)).join(', '))
-      parts.push('\\end{keywords}')
+      parts.push('\\noindent\\textbf{Keywords:} ')
+      parts.push(nodes.map(n => n.content).join(', '))
       break
 
     case 'reference':
-      // References are handled separately
+      if (nodes.some(node => node.content.trim())) {
+        parts.push('\\section*{References}', ...nodes.map(node => node.content))
+      }
       break
 
     default:
@@ -293,7 +279,7 @@ function generateSectionContent(
           parts.push(`\\label{sec:${node.metadata.sectionNumber}}`)
         }
         parts.push('')
-        parts.push(escapeLatex(node.content))
+        parts.push(node.content)
       }
   }
 

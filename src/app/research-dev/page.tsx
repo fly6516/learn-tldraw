@@ -1,7 +1,10 @@
 "use client";
 
+import { generateProjectSource } from "@/lib/export/export-actions";
+import { updateFileContent } from "@/lib/project/file-system";
+
 import * as React from "react";
-import {Editor, Tldraw, createShapeId, TLShape} from "tldraw";
+import {Editor, Tldraw, createShapeId} from "tldraw";
 import "tldraw/tldraw.css";
 
 import { ResearchNodeTool } from "@/shapes/research/ResearchNodeTool";
@@ -30,11 +33,6 @@ import {
     TldrawUiMenuSubmenu,
     TldrawUiMenuActionItem,
 } from "tldraw";
-
-// Type guard for ResearchNodeShape
-function isResearchNodeShape(shape: TLShape): shape is ResearchNodeShape {
-    return shape.type === 'research-node';
-}
 
 const uiOverrides: TLUiOverrides = {
     tools(editor, tools) {
@@ -433,41 +431,19 @@ function ResearchDevCanvas() {
         }
     }, [fileSystem, initializeProject]);
 
-    // Sync editor changes to file system
     React.useEffect(() => {
-        if (!editor || !fileSystem) return;
-
-        const handleChange = () => {
-            // Collect nodes from editor
-            const shapes = editor.getCurrentPageShapes();
-            const researchNodes = shapes
-                .filter(isResearchNodeShape)
-                .map((shape) => ({
-                    section: shape.props.section,
-                    content: shape.props.content,
-                    order: shape.props.order,
-                    level: shape.props.level || 1,
-                    parentId: shape.props.parentId,
-                    customLabel: shape.props.customLabel,
-                    tags: shape.props.tags,
-                    metadata: {
-                        sectionNumber: shape.props.metadata?.sectionNumber,
-                    },
-                }));
-
-            // Update main.tex in file system
-            import('@/lib/project/file-system').then(({ updateMainTex }) => {
-                const updatedFs = updateMainTex(fileSystem, researchNodes);
-                setFileSystem(updatedFs);
+        if (!editor) return;
+        const updateDocument = () => {
+            setFileSystem(current => {
+                if (!current || current.metadata.sourceMode === 'archive') return current;
+                const source = generateProjectSource(editor, current);
+                const main = current.files.get('main.tex');
+                if (!main || main.type === 'directory' || main.content === source) return current;
+                return updateFileContent(current, 'main.tex', source);
             });
         };
-
-        // Listen to store changes
-        const unsubscribe = editor.store.listen(handleChange, { scope: 'document' });
-
-        return () => {
-            unsubscribe();
-        };
+        updateDocument();
+        return editor.store.listen(updateDocument, { scope: 'document' });
     }, [editor, fileSystem, setFileSystem]);
 
     // Create dynamic overrides that can access fileSystem

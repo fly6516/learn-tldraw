@@ -278,47 +278,47 @@ export interface FileTreeNode {
 
 export function getFileTree(fs: ProjectFileSystem): FileTreeNode[] {
   const tree: FileTreeNode[] = []
+  const directories = new Map<string, FileTreeNode[]>()
 
-  // Sort: directories first, then files
-  const sorted = Array.from(fs.files.values()).sort((a, b) => {
-    if (a.type === 'directory' && b.type !== 'directory') return -1
-    if (a.type !== 'directory' && b.type === 'directory') return 1
-    return a.name.localeCompare(b.name)
-  })
+  function directory(path: string): FileTreeNode[] {
+    if (!path) return tree
+    const existing = directories.get(path)
+    if (existing) return existing
+    const separator = path.lastIndexOf('/')
+    const children: FileTreeNode[] = []
+    directory(path.slice(0, Math.max(0, separator))).push({
+      name: path.slice(separator + 1),
+      path: `${path}/`,
+      type: 'directory',
+      editable: false,
+      children,
+    })
+    directories.set(path, children)
+    return children
+  }
 
-  sorted.forEach(item => {
+  for (const item of fs.files.values()) {
     if (item.type === 'directory') {
-      const dir = item as ProjectDirectory
-      tree.push({
-        name: dir.name,
-        path: dir.path,
-        type: 'directory',
-        editable: false,
-        children: dir.files.map(f => ({
-          name: f.name,
-          path: f.path,
-          type: f.type === 'directory' ? 'directory' : 'file',
-          editable: (f as ProjectFile).metadata?.editable || false,
-          size: (f as ProjectFile).size,
-          mimeType: (f as ProjectFile).mimeType,
-        })),
-      })
-    } else {
-      const file = item as ProjectFile
-      // Only show top-level files (not in directories)
-      if (!file.path.includes('/')) {
-        tree.push({
-          name: file.name,
-          path: file.path,
-          type: 'file',
-          editable: file.metadata?.editable || false,
-          size: file.size,
-          mimeType: file.mimeType,
-        })
-      }
+      directory(item.path.replace(/\/$/, ''))
+      continue
     }
-  })
+    const separator = item.path.lastIndexOf('/')
+    directory(item.path.slice(0, Math.max(0, separator))).push({
+      name: item.name,
+      path: item.path,
+      type: 'file',
+      editable: item.metadata?.editable ?? false,
+      size: item.size,
+      mimeType: item.mimeType,
+    })
+  }
 
+  for (const siblings of [tree, ...directories.values()]) {
+    siblings.sort((a, b) => {
+      if (a.type !== b.type) return a.type === 'directory' ? -1 : 1
+      return a.name.localeCompare(b.name)
+    })
+  }
   return tree
 }
 

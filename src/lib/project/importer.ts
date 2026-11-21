@@ -5,7 +5,7 @@
 
 import JSZip from 'jszip'
 import { parseLatexTemplate } from '../project/template-parser'
-import { createProjectFileSystem, addFigure } from '../project/file-system'
+import { createProjectFileSystem, addFile } from '../project/file-system'
 import type {
   ImportResult,
   ProjectFileSystem,
@@ -13,16 +13,6 @@ import type {
   ResearchNodeData,
 } from '../project/types'
 import type { ResearchNodeType } from '@/app/research/research-node'
-
-/**
- * Parsed LaTeX section data
- */
-interface ParsedSection {
-  type: ResearchNodeType
-  content: string
-  level: number
-  customLabel?: string
-}
 
 /**
  * Import LaTeX from .tex file
@@ -36,78 +26,69 @@ export async function importLatexFile(file: File): Promise<ImportResult> {
  * Import LaTeX from ZIP file
  */
 export async function importLatexZip(file: File): Promise<ImportResult> {
-  const zip = new JSZip()
-  const zipContent = await zip.loadAsync(file)
-
-  // Find main .tex file
-  let mainTexContent = ''
-  let mainTexName = ''
-  const texFiles: Map<string, string> = new Map()
-  const figures: Map<string, Blob> = new Map()
-  let bibliography = ''
-
-  // Extract all files
-  for (const [filename, zipFile] of Object.entries(zipContent.files)) {
-    if (zipFile.dir) continue
-
-    const name = filename.split('/').pop() || filename
-
-    // .tex files
-    if (filename.endsWith('.tex')) {
-      const content = await zipFile.async('text')
-      texFiles.set(name, content)
-
-      // Detect main file
-      if (
-        content.includes('\\begin{document}') ||
-        name.toLowerCase().includes('main') ||
-        name.toLowerCase() === 'paper.tex'
-      ) {
-        mainTexContent = content
-        mainTexName = name
+  const archive = await JSZip.loadAsync(await file.arrayBuffer())
+  const files = Object.values(archive.files).filter(entry => !entry.dir)
+  const texFiles = new Map<string, string>()
+  const assets = new Map<string, string | Blob>()
+  for (const entry of files) {
+    if (/\.tex$/i.test(entry.name)) {
+      texFiles.set(entry.name, await entry.async('text'))
+    } else if (/\.(bib|cls|sty|bst|bbl)$/i.test(entry.name)) {
+      assets.set(entry.name, await entry.async('text'))
+    } else {
+      const extension = entry.name.split('.').at(-1)?.toLowerCase()
+      const imageTypes: Record<string, string> = {
+        png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+        gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml',
       }
-    }
-
-    // .bib files
-    else if (filename.endsWith('.bib')) {
-      bibliography = await zipFile.async('text')
-    }
-
-    // Image files
-    else if (
-      filename.match(/\.(png|jpg|jpeg|pdf|eps|svg)$/i) &&
-      (filename.includes('figure') || filename.includes('image'))
-    ) {
-      const blob = await zipFile.async('blob')
-      figures.set(name, blob)
+      assets.set(entry.name, new Blob([await entry.async('arraybuffer')], {
+        type: imageTypes[extension ?? ''] ?? 'application/octet-stream',
+      }))
     }
   }
 
-  // If no main file found, use the first one
-  if (!mainTexContent && texFiles.size > 0) {
-    const first = texFiles.entries().next().value
-    if (first) {
-      mainTexContent = first[1]
-      mainTexName = first[0]
-    }
+  const candidates = [...texFiles]
+  const main = candidates.find(([path, text]) => /(^|\/)main\.tex$/i.test(path) && /\\begin\s*\{document\}/.test(text))
+    ?? candidates.find(([, text]) => /\\begin\s*\{document\}/.test(text))
+    ?? candidates[0]
+  if (!main) throw new Error('No .tex files found in ZIP')
+
+  const [mainPath] = main
+  const prefix = mainPath.slice(0, mainPath.lastIndexOf('/') + 1)
+  function expand(path: string, ancestors = new Set<string>()): string {
+    if (ancestors.has(path)) throw new Error(`Circular LaTeX include: ${path}`)
+    const text = texFiles.get(path)
+    if (text === undefined) throw new Error(`Missing LaTeX file: ${path}`)
+    const chain = new Set([...ancestors, path])
+    return text.replace(/(%[^\r\n]*|\\%)|\\(input|include)\s*\{([^{}]+)\}/g,
+      (match, comment: string | undefined, _command: string, name: string) => {
+        if (comment) return match
+        const filename = name.trim()
+        const target = /\.tex$/i.test(filename) ? filename : `${filename}.tex`
+        const relative = resolveArchivePath(path.slice(0, path.lastIndexOf('/') + 1), target)
+        const fromMain = resolveArchivePath(prefix, target)
+        return expand(texFiles.has(relative) ? relative : fromMain, chain)
+      })
   }
 
-  if (!mainTexContent) {
-    throw new Error('No .tex files found in ZIP')
-  }
-
-  const result = parseLatexContent(mainTexContent, mainTexName)
-
-  // Add extracted files
-  result.files = {
-    figures,
-    bibliography: bibliography || undefined,
-    additionalFiles: new Map(
-      Array.from(texFiles.entries()).filter(([name]) => name !== mainTexName)
-    ),
-  }
-
+  // Keep the original project assets alongside the generated document.
+  const pathInProject = (path: string) => path.startsWith(prefix) ? path.slice(prefix.length) : path
+  const result = parseLatexContent(expand(mainPath), pathInProject(mainPath))
+  result.files.additionalFiles = new Map(
+    [...texFiles, ...assets]
+      .filter(([path]) => path !== mainPath)
+      .map(([path, content]) => [pathInProject(path), content])
+  )
   return result
+}
+
+function resolveArchivePath(directory: string, target: string): string {
+  const parts: string[] = []
+  for (const part of (directory + target).split('/')) {
+    if (part === '..') parts.pop()
+    else if (part && part !== '.') parts.push(part)
+  }
+  return parts.join('/')
 }
 
 /**
@@ -121,7 +102,7 @@ function parseLatexContent(content: string, fileName: string): ImportResult {
   try {
     template = parseLatexTemplate(content)
     template.metadata.importSource = fileName
-  } catch (error) {
+  } catch {
     warnings.push('Failed to parse template, using default')
     template = createDefaultTemplate()
   }
@@ -131,6 +112,7 @@ function parseLatexContent(content: string, fileName: string): ImportResult {
 
   return {
     template,
+    source: content,
     nodes,
     files: {},
     metadata: {
@@ -312,10 +294,16 @@ export function createProjectFromImport(
     }
   }
 
-  // Add figures
-  if (result.files.figures) {
-    result.files.figures.forEach((blob, fileName) => {
-      fs = addFigure(fs, fileName, blob)
+  for (const [path, content] of result.files.additionalFiles ?? []) {
+    if (path === 'main.tex') continue
+    fs = addFile(fs, {
+      name: path.split('/').at(-1) ?? path,
+      path,
+      type: typeof content === 'string' ? 'editable' : 'asset',
+      content: typeof content === 'string' ? content : undefined,
+      blob: typeof content === 'string' ? undefined : content,
+      mimeType: typeof content === 'string' ? 'text/plain' : content.type,
+      metadata: { editable: typeof content === 'string', lastModified: new Date().toISOString() },
     })
   }
 

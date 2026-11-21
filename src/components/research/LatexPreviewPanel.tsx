@@ -6,6 +6,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { LatexRenderedView } from "./LatexRenderedView";
 import { LatexSourceView } from "./LatexSourceView";
 import { exportToLatex } from "@/lib/export/latex-exporter";
+import { generateProjectSource } from "@/lib/export/export-actions";
+import { useProjectFileSystem } from "@/contexts/ProjectFileSystemContext";
 import { X } from "lucide-react";
 
 interface LatexPreviewPanelProps {
@@ -17,6 +19,7 @@ export function LatexPreviewPanel({
     editor,
     onClose,
 }: LatexPreviewPanelProps) {
+    const { fileSystem } = useProjectFileSystem();
     const [latexContent, setLatexContent] = React.useState("");
     const [error, setError] = React.useState<string | null>(null);
 
@@ -24,7 +27,7 @@ export function LatexPreviewPanel({
     React.useEffect(() => {
         const generateLatex = () => {
             try {
-                const content = exportToLatex(editor);
+                const content = fileSystem ? generateProjectSource(editor, fileSystem) : exportToLatex(editor);
                 setLatexContent(content);
                 setError(null);
             } catch (err) {
@@ -47,7 +50,7 @@ export function LatexPreviewPanel({
             unsubscribe();
             clearTimeout(timeoutId);
         };
-    }, [editor]);
+    }, [editor, fileSystem]);
 
     return (
         <div className="h-full flex flex-col bg-white">

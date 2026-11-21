@@ -1,5 +1,8 @@
 "use client";
 
+import { generateProjectSource } from "@/lib/export/export-actions";
+import { updateFileContent } from "@/lib/project/file-system";
+
 import * as React from "react";
 import {Editor, Tldraw} from "tldraw";
 import "tldraw/tldraw.css";
@@ -9,12 +12,11 @@ import "tldraw/tldraw.css";
 import { ResearchNodeTool } from "@/shapes/research/ResearchNodeTool";
 import { ResearchNodeShapeUtil } from "@/shapes/research/ResearchNodeShapeUtil";
 import { ResearchNodeStylePanel } from "@/shapes/research/ResearchNodeStylePanel";
-import type { ResearchNodeShape } from "@/shapes/research/ResearchNodeShape";
-import type { TLShape } from "tldraw";
 import { exportResearchToLatex, exportResearchToMarkdown, exportResearchToPdf, exportResearchToLatexWithFileSystem } from "@/lib/export/export-actions";
 import { LatexPreviewPanel } from "@/components/research/LatexPreviewPanel";
 import { LatexImportDialog } from "@/components/research/LatexImportDialog";
 import { ProjectFileSystemProvider, useProjectFileSystem } from "@/contexts/ProjectFileSystemContext";
+import { ProjectBackupDialog } from "@/components/research/ProjectBackupDialog";
 import { ProjectPanel } from "@/components/project/ProjectPanel";
 
 import {
@@ -32,11 +34,6 @@ import {
     TldrawUiMenuSubmenu,
     TldrawUiMenuActionItem,
 } from "tldraw";
-
-// Type guard for ResearchNodeShape
-function isResearchNodeShape(shape: TLShape): shape is ResearchNodeShape {
-    return shape.type === 'research-node';
-}
 
 const uiOverrides: TLUiOverrides = {
     tools(editor, tools) {
@@ -204,6 +201,7 @@ const components: TLComponents = {
                 <TldrawUiMenuGroup id="project">
                     <TldrawUiMenuSubmenu id="project-submenu" label="Project">
                         <TldrawUiMenuActionItem actionId="toggle-file-panel" />
+                        <TldrawUiMenuActionItem actionId="project-backup" />
                     </TldrawUiMenuSubmenu>
                 </TldrawUiMenuGroup>
             </DefaultMainMenu>
@@ -216,7 +214,7 @@ const shapeUtils = [ResearchNodeShapeUtil];
 const tools = [ResearchNodeTool];
 
 function ResearchCanvas() {
-    const [previewOpen, setPreviewOpen] = React.useState(false);
+    const [backupOpen, setBackupOpen] = React.useState(false);
     const [importOpen, setImportOpen] = React.useState(false);
     const [editor, setEditor] = React.useState<Editor | null>(null);
     const [showFilePanel, setShowFilePanel] = React.useState(false);
@@ -230,41 +228,19 @@ function ResearchCanvas() {
         }
     }, [fileSystem, initializeProject]);
 
-    // Sync editor changes to file system
     React.useEffect(() => {
-        if (!editor || !fileSystem) return;
-
-        const handleChange = () => {
-            // Collect nodes from editor
-            const shapes = editor.getCurrentPageShapes();
-            const researchNodes = shapes
-                .filter(isResearchNodeShape)
-                .map((shape) => ({
-                    section: shape.props.section,
-                    content: shape.props.content,
-                    order: shape.props.order,
-                    level: shape.props.level || 1,
-                    parentId: shape.props.parentId,
-                    customLabel: shape.props.customLabel,
-                    tags: shape.props.tags,
-                    metadata: {
-                        sectionNumber: shape.props.metadata?.sectionNumber,
-                    },
-                }));
-
-            // Update main.tex in file system
-            import('@/lib/project/file-system').then(({ updateMainTex }) => {
-                const updatedFs = updateMainTex(fileSystem, researchNodes);
-                setFileSystem(updatedFs);
+        if (!editor) return;
+        const updateDocument = () => {
+            setFileSystem(current => {
+                if (!current || current.metadata.sourceMode === 'archive') return current;
+                const source = generateProjectSource(editor, current);
+                const main = current.files.get('main.tex');
+                if (!main || main.type === 'directory' || main.content === source) return current;
+                return updateFileContent(current, 'main.tex', source);
             });
         };
-
-        // Listen to store changes
-        const unsubscribe = editor.store.listen(handleChange, { scope: 'document' });
-
-        return () => {
-            unsubscribe();
-        };
+        updateDocument();
+        return editor.store.listen(updateDocument, { scope: 'document' });
     }, [editor, fileSystem, setFileSystem]);
 
     // Create dynamic overrides that can access fileSystem
@@ -282,6 +258,14 @@ function ResearchCanvas() {
                     await exportResearchToLatexWithFileSystem(editor, fileSystem);
                 },
             };
+
+            if (fileSystem) {
+                baseActions["project-backup"] = {
+                    id: "project-backup",
+                    label: "Project Backup",
+                    onSelect: () => setBackupOpen(true),
+                };
+            }
 
             return baseActions;
         },
@@ -331,6 +315,7 @@ function ResearchCanvas() {
                 )}
                 <div style={{ flex: 1, position: 'relative' }}>
                     <Tldraw
+                        persistenceKey="research-canvas"
                         onMount={(editor) => {
                             setEditor(editor);
                         }}
@@ -351,11 +336,23 @@ function ResearchCanvas() {
                     </div>
                 )}
             </div>
+            {backupOpen && editor && fileSystem && (
+                <ProjectBackupDialog
+                    editor={editor}
+                    project={fileSystem}
+                    onRestore={project => {
+                        setShowFilePanel(false);
+                        setFileSystem(project);
+                    }}
+                    onClose={() => setBackupOpen(false)}
+                />
+            )}
             {editor && (
                 <LatexImportDialog
                     editor={editor}
                     open={importOpen}
                     onOpenChange={setImportOpen}
+                    onProjectImport={() => setShowFilePanel(true)}
                 />
             )}
         </>
@@ -368,7 +365,7 @@ export default function ResearchPage() {
     // });
 
     return (
-        <ProjectFileSystemProvider>
+        <ProjectFileSystemProvider storageKey="research">
             <div className="fixed inset-0" style={{background: "#f9f9f9"}}>
                 <ResearchCanvas />
             </div>

@@ -12,20 +12,22 @@ import {
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { importLatexToEditor, importLatexZip, validateLatexContent } from "@/lib/import/latex-importer";
-import { importLatexZip as importLatexZipToFileSystem } from "@/lib/project/importer";
+import { importLatexToEditor, validateLatexContent } from "@/lib/import/latex-importer";
+import { importSourceArchive } from "@/lib/project/source-archive";
 import { useProjectFileSystem } from "@/contexts/ProjectFileSystemContext";
 
 interface LatexImportDialogProps {
     editor: Editor;
     open: boolean;
     onOpenChange: (open: boolean) => void;
+    onProjectImport?: () => void;
 }
 
 export function LatexImportDialog({
     editor,
     open,
     onOpenChange,
+    onProjectImport,
 }: LatexImportDialogProps) {
     const [latexContent, setLatexContent] = React.useState("");
     const [error, setError] = React.useState<string | null>(null);
@@ -89,27 +91,9 @@ export function LatexImportDialog({
         setUploadedFileName(file.name);
 
         try {
-            // Import to file system
-            const result = await importLatexZipToFileSystem(file);
-
-            // Create file system from import result
-            const { createProjectFileSystem } = await import('@/lib/project/file-system');
-            const fs = createProjectFileSystem(result.template, file.name.replace('.zip', ''));
-
-            // Add figures if any
-            if (result.files.figures) {
-                const { addFigure } = await import('@/lib/project/file-system');
-                let updatedFs = fs;
-                for (const [name, blob] of result.files.figures.entries()) {
-                    updatedFs = addFigure(updatedFs, name, blob);
-                }
-                setFileSystem(updatedFs);
-            } else {
-                setFileSystem(fs);
-            }
-
-            // Import nodes to editor
-            await importLatexZip(editor, file);
+            const project = await importSourceArchive(file);
+            setFileSystem(project);
+            onProjectImport?.();
 
             // Success - close dialog
             setLatexContent("");
@@ -179,7 +163,7 @@ export function LatexImportDialog({
                             onClick={() => zipFileInputRef.current?.click()}
                             disabled={isImporting}
                         >
-                            Upload .zip Archive
+                            Import Project ZIP
                         </Button>
                         {(latexContent || uploadedFileName) && (
                             <Button variant="outline" onClick={handleClear} disabled={isImporting}>

@@ -1,8 +1,13 @@
 "use client";
 
 import * as React from "react";
-import { InlineMath, BlockMath } from "react-katex";
+import katex from "katex";
 import "katex/dist/katex.min.css";
+
+function MathPreview({ math, displayMode = false }: { math: string; displayMode?: boolean }) {
+    const html = katex.renderToString(math, { displayMode, throwOnError: false, trust: false });
+    return <span dangerouslySetInnerHTML={{ __html: html }} />;
+}
 import { ScrollArea } from "@/components/ui/scroll-area";
 
 interface LatexRenderedViewProps {
@@ -210,7 +215,7 @@ function renderTextWithMath(text: string) {
                 parts.push(currentText);
                 currentText = "";
                 try {
-                    parts.push(<InlineMath key={i} math={mathContent} />);
+                    parts.push(<MathPreview key={i} math={mathContent} />);
                 } catch {
                     parts.push(`$${mathContent}$`);
                 }
@@ -301,7 +306,7 @@ export function LatexRenderedView({ latexContent }: LatexRenderedViewProps) {
                         case "math":
                             return (
                                 <div key={index} className="my-4 overflow-x-auto text-center">
-                                    <BlockMath math={section.content} />
+                                    <MathPreview displayMode math={section.content} />
                                 </div>
                             );
                         case "bibliography":

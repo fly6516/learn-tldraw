@@ -5,7 +5,7 @@
 
 'use client'
 
-import { createContext, useContext, useState, useCallback, ReactNode } from 'react'
+import { createContext, useContext, useState, useCallback, useEffect, ReactNode } from 'react'
 import type {
   ProjectFileSystem,
   LatexTemplate,
@@ -21,6 +21,7 @@ import {
   deleteFile as deleteFileFromFs,
   type FileTreeNode,
 } from '@/lib/project/file-system'
+import { openProjectStorage, readProject, writeProject } from '@/lib/project/storage'
 import { TEMPLATE_PRESETS } from '@/lib/project/templates'
 
 interface ProjectFileSystemContextValue {
@@ -32,13 +33,50 @@ interface ProjectFileSystemContextValue {
   addFile: (file: ProjectFile) => void
   deleteFile: (path: string) => void
   getFileContent: (path: string) => string | Blob | undefined
-  setFileSystem: (fs: ProjectFileSystem) => void
+  setFileSystem: React.Dispatch<React.SetStateAction<ProjectFileSystem | null>>
 }
 
 const ProjectFileSystemContext = createContext<ProjectFileSystemContextValue | null>(null)
 
-export function ProjectFileSystemProvider({ children }: { children: ReactNode }) {
+export function ProjectFileSystemProvider({ children, storageKey }: { children: ReactNode; storageKey?: string }) {
   const [fileSystem, setFileSystem] = useState<ProjectFileSystem | null>(null)
+
+  const [storage, setStorage] = useState<IDBDatabase | null>(null)
+  const [ready, setReady] = useState(!storageKey)
+  const [storageError, setStorageError] = useState(false)
+
+  useEffect(() => {
+    if (!storageKey) return
+    let active = true
+    let database: IDBDatabase | undefined
+    async function restore(key: string) {
+      try {
+        database = await openProjectStorage()
+        if (!active) {
+          database.close()
+          return
+        }
+        const saved = await readProject(database, key)
+        if (!active) return
+        setFileSystem(saved ?? null)
+        setStorage(database)
+      } catch {
+        if (active) setStorageError(true)
+      } finally {
+        if (active) setReady(true)
+      }
+    }
+    void restore(storageKey)
+    return () => {
+      active = false
+      database?.close()
+    }
+  }, [storageKey])
+
+  useEffect(() => {
+    if (!storageKey || !storage || !fileSystem) return
+    void writeProject(storage, storageKey, fileSystem).catch(() => setStorageError(true))
+  }, [storage, storageKey, fileSystem])
 
   const fileTree = fileSystem ? getFileTree(fileSystem) : []
 
@@ -137,10 +175,12 @@ export function ProjectFileSystemProvider({ children }: { children: ReactNode })
       if (!file || file.type === 'directory') return undefined
 
       const projectFile = file as ProjectFile
-      return projectFile.content || projectFile.blob
+      return projectFile.content ?? projectFile.blob
     },
     [fileSystem]
   )
+
+  if (!ready) return <p role="status">Restoring project…</p>
 
   return (
     <ProjectFileSystemContext.Provider
@@ -156,6 +196,11 @@ export function ProjectFileSystemProvider({ children }: { children: ReactNode })
         setFileSystem,
       }}
     >
+      {storageError && (
+        <p role="alert" className="fixed bottom-4 right-4 z-[1000] rounded bg-red-900 p-3 text-white">
+          Project files could not be saved or restored in this browser. Export a LaTeX ZIP to keep a copy.
+        </p>
+      )}
       {children}
     </ProjectFileSystemContext.Provider>
   )
