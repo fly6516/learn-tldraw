@@ -119,7 +119,7 @@ export function MonacoSourceEditor({ path, value, readOnly, problems, onChange, 
     : /\.(tex|sty|cls|ltx|bst|def)$/i.test(path) ? 'research-tex' : 'plaintext'
   const bom = value.charCodeAt(0) === 0xfeff ? '\uFEFF' : ''
   return (
-    <Editor height="100%" path={uri} language={language} value={value.slice(bom.length)} theme="research-paper" keepCurrentModel
+    <Editor height="100%" path={uri} language={language} value={value.slice(bom.length)} theme="research-paper" keepCurrentModel saveViewState
       onMount={instance => { setEditor(instance); setModel(instance.getModel()); onEditor(instance) }}
       onChange={next => { if (next !== undefined) onChange(bom + next) }}
       loading={<p role="status" className="p-4 text-sm text-muted-foreground">Loading source editor…</p>}

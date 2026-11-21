@@ -61,10 +61,15 @@ export function SyncedPdfPreview({ url, page, onPage, regions, target, onLocate 
   useEffect(() => {
     if (!pdf) return
     let active = true
-    pdf.getPage(page).then(source => { if (active) setPdfPage(source) })
+    const validPage = Math.min(page, pdf.numPages)
+    pdf.getPage(validPage).then(source => {
+      if (!active) return
+      if (validPage !== page) onPage(validPage)
+      setPdfPage(source)
+    })
       .catch(() => { if (active) setError('This PDF page could not be loaded.') })
     return () => { active = false }
-  }, [pdf, page])
+  }, [pdf, page, onPage])
 
   useEffect(() => {
     const surface = canvas.current

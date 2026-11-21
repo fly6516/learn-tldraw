@@ -8,23 +8,15 @@
 import { useState } from 'react'
 import { ProjectFileBrowser } from './ProjectFileBrowser'
 import { FilePreviewDialog } from './FilePreviewDialog'
-import { PreambleEditor } from './PreambleEditor'
-import { BibTeXEditor } from './BibTeXEditor'
 import { useProjectFileSystem } from '@/contexts/ProjectFileSystemContext'
 import type { FileTreeNode } from '@/lib/project/file-system'
 import { Button } from '@/components/ui/button'
-import { SourceProjectWorkspace } from './SourceProjectWorkspace'
 
-export function ProjectPanel() {
-  const { fileSystem, fileTree, getFileContent, updateFile, addImage, addFile, deleteFile } = useProjectFileSystem()
-  const [sourceFile, setSourceFile] = useState<string | null>(null)
+export function ProjectPanel({ onOpenWriting }: { onOpenWriting: (path?: string) => void }) {
+  const { fileTree, getFileContent, addImage, addFile, deleteFile } = useProjectFileSystem()
 
   const [previewNode, setPreviewNode] = useState<FileTreeNode | null>(null)
   const [previewContent, setPreviewContent] = useState<string>('')
-  const [editingPreamble, setEditingPreamble] = useState(false)
-  const [editingBibTeX, setEditingBibTeX] = useState(false)
-  const [preambleContent, setPreambleContent] = useState('')
-  const [bibTeXContent, setBibTeXContent] = useState('')
 
   const handleFileClick = (node: FileTreeNode) => {
     const content = getFileContent(node.path)
@@ -37,24 +29,6 @@ export function ProjectPanel() {
       const url = URL.createObjectURL(content)
       setPreviewNode({ ...node, path: url })
       setPreviewContent('')
-    }
-  }
-
-  const handleFileEdit = (node: FileTreeNode) => {
-    if (fileSystem?.metadata.sourceMode === 'archive') {
-      setSourceFile(node.path)
-      return
-    }
-    const content = getFileContent(node.path)
-
-    if (typeof content !== 'string') return
-
-    if (node.name === 'preamble.tex') {
-      setPreambleContent(content)
-      setEditingPreamble(true)
-    } else if (node.name === 'references.bib') {
-      setBibTeXContent(content)
-      setEditingBibTeX(true)
     }
   }
 
@@ -136,14 +110,6 @@ export function ProjectPanel() {
     alert('Folder creation not yet implemented')
   }
 
-  const handlePreambleSave = (content: string) => {
-    updateFile('preamble.tex', content)
-  }
-
-  const handleBibTeXSave = (content: string) => {
-    updateFile('references.bib', content)
-  }
-
   const handlePreviewClose = () => {
     setPreviewNode(null)
     setPreviewContent('')
@@ -162,20 +128,14 @@ export function ProjectPanel() {
 
   return (
     <div className="flex h-full flex-col">
-      {fileSystem?.metadata.sourceMode === 'archive' && (
-        <div className="border-b p-2">
-          <Button className="w-full" onClick={() => setSourceFile('')}>Edit and Compile LaTeX</Button>
-          {sourceFile !== null && (
-            <SourceProjectWorkspace project={fileSystem} initialFile={sourceFile || undefined}
-              onClose={() => setSourceFile(null)} />
-          )}
-        </div>
-      )}
+      <div className="border-b p-2">
+        <Button className="w-full" onClick={() => onOpenWriting()}>Edit and Compile LaTeX</Button>
+      </div>
       <div className="min-h-0 flex-1">
       <ProjectFileBrowser
         fileTree={fileTree}
         onFileClick={handleFileClick}
-        onFileEdit={handleFileEdit}
+        onFileEdit={node => onOpenWriting(node.path)}
         onFileDownload={handleFileDownload}
         onFileUpload={handleFileUpload}
         onFileDelete={handleFileDelete}
@@ -192,21 +152,6 @@ export function ProjectPanel() {
         />
       )}
 
-      {editingPreamble && (
-        <PreambleEditor
-          initialContent={preambleContent}
-          onSave={handlePreambleSave}
-          onClose={() => setEditingPreamble(false)}
-        />
-      )}
-
-      {editingBibTeX && (
-        <BibTeXEditor
-          initialContent={bibTeXContent}
-          onSave={handleBibTeXSave}
-          onClose={() => setEditingBibTeX(false)}
-        />
-      )}
     </div>
   )
 }

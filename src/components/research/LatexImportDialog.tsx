@@ -14,13 +14,13 @@ import { Textarea } from "@/components/ui/textarea";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { parseLatexNodes, validateLatexContent } from "@/lib/import/latex-importer";
 import { importSourceArchive } from "@/lib/project/source-archive";
-import { useProjectFileSystem } from "@/contexts/ProjectFileSystemContext";
+import type { ProjectFileSystem } from "@/lib/project/types";
 
 interface LatexImportDialogProps {
     onImportNodes: (nodes: ResearchNode[]) => void;
     open: boolean;
     onOpenChange: (open: boolean) => void;
-    onProjectImport?: () => void;
+    onProjectImport: (project: ProjectFileSystem) => boolean;
 }
 
 export function LatexImportDialog({
@@ -35,7 +35,6 @@ export function LatexImportDialog({
     const [uploadedFileName, setUploadedFileName] = React.useState<string | null>(null);
     const texFileInputRef = React.useRef<HTMLInputElement>(null);
     const zipFileInputRef = React.useRef<HTMLInputElement>(null);
-    const { setFileSystem } = useProjectFileSystem();
 
     const handleImport = () => {
         setError(null);
@@ -92,8 +91,10 @@ export function LatexImportDialog({
 
         try {
             const project = await importSourceArchive(file);
-            setFileSystem(current => ({ ...project, canvas: current?.canvas }));
-            onProjectImport?.();
+            if (!onProjectImport(project)) {
+                setUploadedFileName(null);
+                return;
+            }
 
             // Success - close dialog
             setLatexContent("");

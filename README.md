@@ -3,15 +3,16 @@
 Install dependencies with `bun install --frozen-lockfile` and start the app with `bun run dev`.
 Open http://localhost:3000 to choose a workspace.
 
-- `/research` is the research workspace. Canvas and project files are saved in the current browser.
-- `/research-dev` is a sample paper workspace.
+- `/research` opens the research project's **Canvas** view. Canvas and project files are saved
+  in the current browser. **Writing** uses `/research?view=write` and is part of the same project.
+- `/research-dev` uses the same views with a sample paper.
 
-Use **Add Research Node** to create a card and select it to edit its content and section
+Use **Add node** to create a card and select it to edit its content and section
 properties. Draw directed connections from a card's outgoing handle, or choose a target in
 the node properties. **Add Page** creates another graph in the project. Canvas exports use
 the selected page and its directed connections.
 
-Use **Project Backup** to download a `.research-canvas` file. In another browser, choose the
+Use **Project menu → Project Backup** to download a `.research-canvas` file. In another browser, choose the
 file from the same dialog and confirm **Replace Project**. The backup includes all canvas
 pages, nodes, connections, viewports, and project files. This release starts with a new
 canvas storage format and supports version 2 project backups.
@@ -25,16 +26,19 @@ Keep the native compiler on a local server and use it for projects you trust. Te
 packages and fonts on the first compile. Set `TECTONIC_CACHE_DIR` to override the cache directory.
 Set `TECTONIC_ONLY_CACHED=1` to compile offline once the required files are cached.
 
-1. In `/research`, choose **Import LaTeX → Import Project ZIP**. A Prism or ordinary
-   LaTeX ZIP keeps its directory paths, original source bytes, and attachments.
-2. In the files panel, choose **Edit and Compile LaTeX**. Set the **Main file** in the toolbar
-   and select a chapter or bibliography from **Files**. Monaco highlights LaTeX and BibTeX,
-   and drafts remain available when you switch files. Use **Save** or Ctrl/Cmd+S to save them.
+1. Choose **Project menu → Import LaTeX → Import Project ZIP**. A Prism or ordinary LaTeX ZIP
+   keeps its paths, original source bytes, and attachments. It opens in **Writing** at the main file.
+2. Select a chapter or bibliography in **Files**. To change the compile entry, use **Set as
+   main file** from a `.tex` file's menu. The current entry is shown next to **Compile PDF**.
+   Monaco retains each file's draft, cursor and scroll position as you switch files and views.
+   Use **Save** or Ctrl/Cmd+S to save drafts to the project. Generated `main.tex` is read-only.
 3. Choose **Compile PDF** to save your drafts and compile the whole project from the main
    file's directory. **PDF Preview** shows the latest successful build. Citation issues and
    compiler errors with a source location are underlined in the editor. Select an entry in
    **Problems** to jump to its file and line, or expand **Compiler log** for more detail.
-   **Export → LaTeX ZIP** downloads the edited source tree.
+   On desktop, **Problems**, **References**, and **Chapter AI** open below the editor and PDF.
+   On narrow screens, use **Source**, **PDF**, and the **Files** drawer. **Project menu →
+   Export LaTeX ZIP** downloads the saved source tree.
 
 After compiling, place the cursor on a LaTeX line and choose **Show in PDF** to highlight
 its typeset location. Click typeset content in **PDF Preview** to open its source file
@@ -44,7 +48,7 @@ mapped line in the same file. Compile again after editing to refresh both direct
 The compile endpoint accepts ZIPs up to 32 MB, including after extraction. The standard compiler
 supports XeLaTeX and BibTeX workflows. Documents that require a different engine, Biber, or
 shell escape may need external compilation. The canvas preview and print workflow are also
-available from the canvas menu.
+available in **Canvas** and the project menu.
 
 ## AI chapter editing
 

@@ -15,16 +15,20 @@ import { TEMPLATE_PRESETS } from '../project/templates'
 import type { ResearchNodeType } from '@/app/research/research-node'
 import { RESEARCH_NODE_META } from '@/app/research/research-node'
 
+type NodeLocation = (node: ResearchNodeData, line: number) => void
+const linesIn = (text: string) => text.split(/\r\n|\n|\r/).length
+
 /**
  * Export to LaTeX .tex file
  */
 export function exportToLatexFile(
   nodes: ResearchNodeData[],
   fileSystem: ProjectFileSystem,
-  options: ExportOptions = { format: 'tex' }
+  options: ExportOptions = { format: 'tex' },
+  onNodeLocation?: NodeLocation,
 ): string {
   const template = getExportTemplate(fileSystem, options)
-  return generateLatexDocument(nodes, template, fileSystem, options)
+  return generateLatexDocument(nodes, template, fileSystem, options, onNodeLocation)
 }
 
 /**
@@ -121,7 +125,8 @@ function generateLatexDocument(
   nodes: ResearchNodeData[],
   template: LatexTemplate,
   fileSystem: ProjectFileSystem,
-  options: ExportOptions
+  options: ExportOptions,
+  onNodeLocation?: NodeLocation,
 ): string {
   const parts: string[] = []
 
@@ -173,15 +178,18 @@ function generateLatexDocument(
     : groupNodesBySection(sortNodesBySection(nodes))
 
   // Generate content for each section
+  let sectionLine = parts.reduce((line, part) => line + linesIn(part), 1)
   for (const [sectionType, sectionNodes] of groupedNodes) {
     const sectionContent = generateSectionContent(
       sectionType,
       sectionNodes,
-      template
+      template,
+      onNodeLocation && ((node, line) => onNodeLocation(node, sectionLine + line - 1)),
     )
     if (sectionContent) {
       parts.push(sectionContent)
       parts.push('')
+      sectionLine += linesIn(sectionContent) + 1
     }
   }
 
@@ -239,7 +247,8 @@ function groupNodesBySection(
 function generateSectionContent(
   sectionType: ResearchNodeType,
   nodes: readonly ResearchNodeData[],
-  template: LatexTemplate
+  template: LatexTemplate,
+  onNodeLocation?: NodeLocation,
 ): string {
   if (nodes.length === 0) return ''
 
@@ -270,16 +279,23 @@ function generateSectionContent(
 
     default:
       // Regular sections
+      let line = 1
       for (const node of nodes) {
         const sectionCommand = getSectionCommand(node.level)
         const sectionTitle = node.customLabel || getDefaultSectionTitle(sectionType, template)
 
-        parts.push(`\\${sectionCommand}{${escapeLatex(sectionTitle)}}`)
+        onNodeLocation?.(node, line)
+        const heading = `\\${sectionCommand}{${escapeLatex(sectionTitle)}}`
+        parts.push(heading)
+        line += linesIn(heading)
         if (node.metadata?.sectionNumber) {
-          parts.push(`\\label{sec:${node.metadata.sectionNumber}}`)
+          const label = `\\label{sec:${node.metadata.sectionNumber}}`
+          parts.push(label)
+          line += linesIn(label)
         }
         parts.push('')
         parts.push(node.content)
+        line += 1 + linesIn(node.content)
       }
   }
 

@@ -30,7 +30,8 @@ export function downloadFile(content: string, filename: string, mimeType: string
     URL.revokeObjectURL(url)
 }
 
-export function generateProjectSource(page: ResearchPage, fileSystem: ProjectFileSystem): string {
+export function generateProjectSource(page: ResearchPage, fileSystem: ProjectFileSystem,
+    onNodeLocation?: Parameters<typeof exportToLatexFile>[3]): string {
     if (fileSystem.metadata.sourceMode === 'archive') {
         const main = fileSystem.files.get(fileSystem.metadata.mainFile ?? '')
         return main && 'content' in main ? main.content ?? '' : ''
@@ -38,7 +39,7 @@ export function generateProjectSource(page: ResearchPage, fileSystem: ProjectFil
     return exportToLatexFile(collectResearchNodes(page, true), fileSystem, {
         format: 'tex',
         preserveNodeOrder: Boolean(collectArrowOrderedNodes(page)),
-    })
+    }, onNodeLocation)
 }
 
 /**

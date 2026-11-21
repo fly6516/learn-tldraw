@@ -1,6 +1,8 @@
 'use client'
 
 import { useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { Plus } from 'lucide-react'
 import {
   Background, Controls, Handle, MarkerType, Position, ReactFlow,
   type Connection, type EdgeChangeset, type Node, type NodeChangeset, type NodeProps,
@@ -47,18 +49,20 @@ function canSetParent(page: ResearchPage, nodeId: string, parentId: string) {
   return true
 }
 
-function NodeDetails({ node, page, onEdit, onConnect }: {
+function NodeDetails({ node, page, onEdit, onConnect, onOpenSource }: {
   node: ResearchNode
   page: ResearchPage
   onEdit: (data: ResearchNode['data']) => void
   onConnect: (target: string) => void
+  onOpenSource?: () => void
 }) {
   const { data } = node
   const others = page.nodes.filter(other => other.id !== node.id)
   const [target, setTarget] = useState('')
   return (
-    <aside aria-label="Research node properties" className="w-full shrink-0 space-y-3 overflow-auto border-l bg-background p-3 sm:w-72">
+    <aside aria-label="Research node properties" className="min-h-0 w-full shrink-0 space-y-3 overflow-auto border-t bg-background p-3 max-sm:max-h-[45%] max-sm:shrink sm:w-72 sm:border-t-0 sm:border-l">
       <h2 className="font-semibold">Research Node</h2>
+      {onOpenSource && <Button size="sm" variant="outline" onClick={onOpenSource}>Open source</Button>}
       <label className="grid gap-1 text-sm">Section type
         <select className="rounded border bg-background p-2" value={data.section}
           onChange={event => onEdit({ ...data, section: event.target.value as ResearchNodeType })}>
@@ -130,10 +134,13 @@ function NodeDetails({ node, page, onEdit, onConnect }: {
   )
 }
 
-export function ResearchGraphEditor({ page, updatePage, sample }: {
+export function ResearchGraphEditor({ page, updatePage, sample, actions, sourceNodes, onOpenSource }: {
   page: ResearchPage
   updatePage: (update: (current: ResearchPage) => ResearchPage) => void
   sample: boolean
+  actions: HTMLElement | null
+  sourceNodes: ReadonlySet<ResearchNode['data']>
+  onOpenSource: (node: ResearchNode['data']) => void
 }) {
   const [selectedNodes, setSelectedNodes] = useState<string[]>([])
   const [selectedEdges, setSelectedEdges] = useState<string[]>([])
@@ -236,8 +243,10 @@ export function ResearchGraphEditor({ page, updatePage, sample }: {
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {actions && createPortal(
+        <Button size="sm" onClick={addNode}><Plus /> Add node</Button>, actions,
+      )}
       <div className="flex flex-wrap items-center gap-2 border-b p-2">
-        <Button size="sm" onClick={addNode}>Add Research Node</Button>
         <Button size="sm" variant="outline" onClick={() => void flow?.fitView()} disabled={!page.nodes.length}>Fit View</Button>
         <Button size="sm" variant="outline" onClick={deleteSelection}
           disabled={!page.nodes.some(node => selectedNodes.includes(node.id)) && !page.edges.some(edge => selectedEdges.includes(edge.id))}>
@@ -246,7 +255,7 @@ export function ResearchGraphEditor({ page, updatePage, sample }: {
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
       </div>
       <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
-        <div id="research-flow" className="relative min-h-40 min-w-0 flex-1">
+        <div id="research-flow" className="relative min-h-24 min-w-0 flex-1 sm:min-h-40">
           <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} defaultEdgeOptions={edgeDefaults}
             className="[color-scheme:light] [--xy-background-color:var(--muted)] [--xy-edge-stroke:var(--muted-foreground)] [--xy-edge-stroke-width:2] dark:[color-scheme:dark]"
             defaultMarkerColor={null}
@@ -266,6 +275,7 @@ export function ResearchGraphEditor({ page, updatePage, sample }: {
         </div>
         {activeNode && (
           <NodeDetails key={activeNode.id} node={activeNode} page={page}
+            onOpenSource={sourceNodes.has(activeNode.data) ? () => onOpenSource(activeNode.data) : undefined}
             onEdit={data => updatePage(current => ({
               ...current, nodes: current.nodes.map(node => node.id === activeNode.id ? { ...node, data } : node),
             }))}

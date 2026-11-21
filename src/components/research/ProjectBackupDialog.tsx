@@ -14,7 +14,7 @@ import type { ProjectFileSystem } from '@/lib/project/types'
 interface ProjectBackupDialogProps {
   canvas: ResearchCanvas
   project: ProjectFileSystem
-  onRestore: (project: ProjectFileSystem) => void
+  onRestore: (project: ProjectFileSystem) => boolean
   onClose: () => void
 }
 
@@ -67,7 +67,7 @@ export function ProjectBackupDialog({ canvas, project, onRestore, onClose }: Pro
     if (!pending) return
     setError('')
     try {
-      onRestore(pending.project)
+      if (!onRestore(pending.project)) return
       setPending(undefined)
       setMessage('Project restored.')
     } catch (cause) {

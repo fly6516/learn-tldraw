@@ -1,15 +1,18 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type Ref } from 'react'
+import { createPortal } from 'react-dom'
 import dynamic from 'next/dynamic'
 import type { editor, IPosition } from 'monaco-editor'
-import { BookOpen, ChevronRight, CircleAlert, Download, FileCode2, FileText, Folder, LocateFixed, Play, Save, Sparkles } from 'lucide-react'
+import { BookOpen, ChevronRight, CircleAlert, Download, Ellipsis, FileCode2, FileText, Folder, LocateFixed, PanelLeft, Play, Save, Sparkles, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
+import type { ImperativePanelHandle } from 'react-resizable-panels'
 import { useProjectFileSystem } from '@/contexts/ProjectFileSystemContext'
 import { getFileTree, updateFileContent, type FileTreeNode } from '@/lib/project/file-system'
 import { exportSourceArchive } from '@/lib/project/source-archive'
-import type { ProjectFile, ProjectFileSystem } from '@/lib/project/types'
+import type { ProjectFile, ProjectFileSystem, ResearchNodeData } from '@/lib/project/types'
 import { ChapterAiPanel } from './ChapterAiPanel'
 import { ReferencesPanel } from './ReferencesPanel'
 import { OutlinePanel } from './OutlinePanel'
@@ -28,12 +31,14 @@ const SyncedPdfPreview = dynamic(() => import('./SyncedPdfPreview').then(module 
   loading: () => <p role="status" className="p-4 text-sm text-muted-foreground">Loading PDF preview…</p>,
 })
 
-function Files({ nodes, selected, main, onSelect, dirty }: {
+function Files({ nodes, selected, main, onSelect, dirty, sourcePaths, onSetMain }: {
   nodes: FileTreeNode[]
   selected: string
   main: string
   dirty: Record<string, string>
   onSelect: (path: string) => void
+  sourcePaths: ReadonlySet<string>
+  onSetMain: (path: string) => void
 }) {
   return (
     <ul className="space-y-0.5">
@@ -46,18 +51,30 @@ function Files({ nodes, selected, main, onSelect, dirty }: {
                 <span className="truncate">{node.name}</span>
               </summary>
               <div className="ml-3 border-l border-slate-200 pl-2">
-                <Files nodes={node.children ?? []} selected={selected} main={main} dirty={dirty} onSelect={onSelect} />
+                <Files nodes={node.children ?? []} selected={selected} main={main} dirty={dirty} onSelect={onSelect}
+                  sourcePaths={sourcePaths} onSetMain={onSetMain} />
               </div>
             </details>
           ) : (
-            <button type="button" title={node.path} disabled={!node.editable} aria-current={selected === node.path ? 'page' : undefined}
-              onClick={() => onSelect(node.path)} className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left disabled:opacity-45 ${
+            <div className="flex min-w-0 items-center gap-0.5">
+            <button type="button" title={node.path} disabled={!sourcePaths.has(node.path)} aria-current={selected === node.path ? 'true' : undefined}
+              onClick={() => onSelect(node.path)} className={`flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-left disabled:opacity-45 ${
                 selected === node.path ? 'bg-indigo-100 font-semibold text-indigo-950' : 'text-slate-700 hover:bg-white'
               }`}>
               <FileText className="size-3.5 shrink-0" /><span className="truncate">{node.name}</span>
               {node.path === main && <span className="ml-auto rounded border border-indigo-200 bg-white px-1 text-[10px] text-indigo-700">Main</span>}
               {Object.hasOwn(dirty, node.path) && <span aria-label="Unsaved" className="size-1.5 shrink-0 rounded-full bg-amber-500" />}
             </button>
+            {/\.tex$/i.test(node.path) && sourcePaths.has(node.path) && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" className="size-7 shrink-0"
+                  aria-label={`Actions for ${node.name}`}><Ellipsis /></Button></DropdownMenuTrigger>
+                <DropdownMenuContent align="start">
+                  <DropdownMenuItem disabled={node.path === main} onSelect={() => onSetMain(node.path)}>Set as main file</DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
+            </div>
           )}
         </li>
       ))}
@@ -65,54 +82,119 @@ function Files({ nodes, selected, main, onSelect, dirty }: {
   )
 }
 
-export function SourceProjectWorkspace({ project, initialFile, onClose }: {
+type GenerateSource = (project: ProjectFileSystem, onNode?: (node: ResearchNodeData, line: number) => void) => string
+
+export interface SourceWorkspaceHandle {
+  openFile: (path: string, line?: number) => void
+  openGeneratedNode: (node: ResearchNodeData) => void
+  confirmDiscard: () => boolean
+}
+
+function applyDrafts(project: ProjectFileSystem, drafts: Record<string, string>) {
+  return Object.entries(drafts).reduce((current, [path, content]) => {
+    const file = current.files.get(path)
+    return file?.type === 'editable' && file.metadata?.editable ? updateFileContent(current, path, content) : current
+  }, project)
+}
+
+function sameSources(previous: ProjectFileSystem['files'], current: ProjectFileSystem['files']) {
+  if (previous === current) return true
+  return previous.size === current.size && [...previous].every(([path, before]) => {
+    const after = current.get(path)
+    if (before === after) return true
+    if (!after || before.type !== after.type) return false
+    if (before.type === 'directory' || after.type === 'directory') return true
+    return before.content !== undefined ? before.content === after.content : before.blob === after.blob && after.content === undefined
+  })
+}
+
+export function SourceProjectWorkspace({ project, ref, active, actions, generateSource, onOpenCanvas }: {
   project: ProjectFileSystem
-  initialFile?: string
-  onClose: () => void
+  ref: Ref<SourceWorkspaceHandle>
+  active: boolean
+  actions: HTMLElement | null
+  generateSource?: GenerateSource
+  onOpenCanvas: () => void
 }) {
   const { setFileSystem } = useProjectFileSystem()
-  const editable = useMemo(() => [...project.files.values()].filter(
-    (file): file is ProjectFile => file.type === 'editable' && 'content' in file,
+  const textFiles = useMemo(() => [...project.files.values()].filter(
+    (file): file is ProjectFile & { content: string } => file.type !== 'directory' && typeof file.content === 'string',
   ).sort((a, b) => a.path.localeCompare(b.path)), [project.files])
-  const texFiles = editable.filter(file => /\.tex$/i.test(file.path))
-  const main = texFiles.find(file => file.path === project.metadata.mainFile)?.path ?? texFiles[0]?.path ?? ''
-  const [selected, setSelected] = useState(initialFile ?? main)
+  const sourcePaths = useMemo(() => new Set(textFiles.map(file => file.path)), [textFiles])
+  const texFiles = textFiles.filter(file => /\.tex$/i.test(file.path))
+  const main = texFiles.find(file => file.path === project.metadata.mainFile)?.path
+    ?? (generateSource && sourcePaths.has('main.tex') ? 'main.tex' : texFiles[0]?.path ?? '')
+  const [selection, setSelected] = useState(main)
+  const selected = sourcePaths.has(selection) ? selection : main
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [log, setLog] = useState('')
   const [diagnostics, setDiagnostics] = useState<CompileDiagnostic[]>([])
+  const [diagnosticSources, setDiagnosticSources] = useState<ProjectFileSystem['files']>()
   const [pdfUrl, setPdfUrl] = useState('')
   const [pdfFilename, setPdfFilename] = useState('')
-  const [pdfStale, setPdfStale] = useState(false)
+  const [lastCompile, setLastCompile] = useState<{ main: string; files: ProjectFileSystem['files'] }>()
   const [sourceMap, setSourceMap] = useState<SyncRegion[]>([])
   const [pdfPage, setPdfPage] = useState(1)
   const [pdfTarget, setPdfTarget] = useState<SyncRegion | null>(null)
   const [syncMessage, setSyncMessage] = useState('')
-  const [panel, setPanel] = useState<'pdf' | 'problems' | 'references' | 'ai'>('pdf')
+  const [panel, setPanel] = useState<'problems' | 'references' | 'ai' | null>(null)
   const [navigation, setNavigation] = useState<'files' | 'outline'>('files')
+  const [narrowView, setNarrowView] = useState<'source' | 'pdf'>('source')
+  const [mobileFiles, setMobileFiles] = useState(false)
+  const [desktopFiles, setDesktopFiles] = useState(true)
+  const navPanel = useRef<ImperativePanelHandle>(null)
+  const fileToggle = useRef<HTMLButtonElement>(null)
+  const firstFileTab = useRef<HTMLButtonElement>(null)
+  const compileRequest = useRef<AbortController | null>(null)
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
-  const outputRef = useRef<HTMLElement | null>(null)
-  const pdfNavigationRef = useRef<HTMLDivElement | null>(null)
-  const pendingJump = useRef<{ path: string; start: IPosition; end: IPosition } | null>(null)
+  const pendingJump = useRef<{ path: string; range?: { start: IPosition; end: IPosition } } | null>(null)
   const isTex = /\.tex$/i.test(selected)
   const dirty = Object.keys(drafts).length > 0
-  const source = editable.find(file => file.path === selected)?.content ?? ''
-  const draft = drafts[selected] ?? source
-  const workingProject = useMemo(() => Object.entries(drafts).reduce(
-    (current, [path, content]) => updateFileContent(current, path, content), project,
-  ), [drafts, project])
+  const currentFile = textFiles.find(file => file.path === selected)
+  const readOnly = currentFile?.type !== 'editable' || !currentFile.metadata?.editable
+  const workingProject = useMemo(() => {
+    const next = applyDrafts(project, drafts)
+    const generated = next.files.get('main.tex')
+    if (!generateSource || generated?.type !== 'generated') return next
+    const source = generateSource(next)
+    return source === generated.content ? next : updateFileContent(next, 'main.tex', source)
+  }, [drafts, project, generateSource])
+  const source = currentFile?.content ?? ''
+  const workingFile = workingProject.files.get(selected)
+  const draft = workingFile && 'content' in workingFile ? workingFile.content ?? '' : ''
+  const pdfStale = Boolean(lastCompile && (lastCompile.main !== main || !sameSources(lastCompile.files, workingProject.files)))
   const tree = useMemo(() => getFileTree(project), [project])
   const bibliography = useMemo(() => collectBibliography(workingProject), [workingProject])
+  const currentDiagnostics = useMemo(() => diagnostics.filter(issue => {
+    const file = workingProject.files.get(issue.path)
+    const original = diagnosticSources?.get(issue.path)
+    return file && original && 'content' in file && 'content' in original
+      && typeof file.content === 'string' && file.content === original.content
+      && issue.line <= file.content.split(/\r\n|\n|\r/).length
+  }), [diagnostics, diagnosticSources, workingProject.files])
   const problems = useMemo<SourceProblem[]>(() => [
-    ...diagnostics,
+    ...currentDiagnostics,
     ...checkCitations(workingProject, bibliography).map(issue => ({
       path: issue.path, line: issue.line, severity: 'warning' as const, location: issue,
       message: issue.kind === 'missing' ? `Unknown citation key: ${issue.key}` : `Duplicate bibliography key: ${issue.key}`,
     })),
-  ], [bibliography, diagnostics, workingProject])
+  ], [bibliography, currentDiagnostics, workingProject])
 
   useEffect(() => () => { if (pdfUrl) URL.revokeObjectURL(pdfUrl) }, [pdfUrl])
+  useEffect(() => () => compileRequest.current?.abort(), [])
+
+  useEffect(() => {
+    if (mobileFiles && active) firstFileTab.current?.focus()
+  }, [mobileFiles, active])
+
+  useEffect(() => {
+    if (!dirty) return
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = '' }
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [dirty])
 
   const applyPendingJump = useCallback((instance: editor.IStandaloneCodeEditor | null) => {
     editorRef.current = instance
@@ -122,37 +204,54 @@ export function SourceProjectWorkspace({ project, initialFile, onClose }: {
       const model = instance.getModel()
       if (!pending || !model?.uri.path.endsWith('/' + pending.path)) return
       pendingJump.current = null
-      const start = model.validatePosition(pending.start)
-      const end = model.validatePosition(pending.end)
-      instance.setSelection({
-        startLineNumber: start.lineNumber, startColumn: start.column,
-        endLineNumber: end.lineNumber, endColumn: end.column,
-      })
-      instance.revealLineInCenter(start.lineNumber)
-      instance.getDomNode()?.scrollIntoView({ block: 'nearest' })
+      if (pending.range) {
+        const start = model.validatePosition(pending.range.start)
+        const end = model.validatePosition(pending.range.end)
+        instance.setSelection({
+          startLineNumber: start.lineNumber, startColumn: start.column,
+          endLineNumber: end.lineNumber, endColumn: end.column,
+        })
+        instance.revealLineInCenter(start.lineNumber)
+      }
       instance.focus()
     })
   }, [])
 
-  function selectSource(path: string) {
-    if (busy || !editable.some(file => file.path === path)) return
-    setSelected(path)
-    if (panel === 'ai' && !/\.tex$/i.test(path)) setPanel('pdf')
-  }
-
-  function jump(path: string, line: number, location?: SourceLocation) {
-    if (busy || !editable.some(file => file.path === path)) return
+  function openFile(path: string, line?: number, location?: SourceLocation, selectLine = false) {
+    if (!sourcePaths.has(path)) return
     const file = workingProject.files.get(path)
+    setSelected(path)
+    setMobileFiles(false)
+    setNarrowView('source')
+    if (!/\.tex$/i.test(path) || file?.type !== 'editable' || !file.metadata?.editable) {
+      setPanel(current => current === 'ai' ? null : current)
+    }
     const text = file && 'content' in file ? file.content ?? '' : ''
-    const start = location ? sourcePosition(text, location.start) : { lineNumber: line, column: 1 }
-    const end = location ? sourcePosition(text, location.end) : start
-    pendingJump.current = { path, start, end }
-    selectSource(path)
+    const start = location ? sourcePosition(text, location.start) : line === undefined ? undefined : { lineNumber: line, column: 1 }
+    const end = location ? sourcePosition(text, location.end)
+      : start && (selectLine ? { ...start, column: Number.MAX_SAFE_INTEGER } : start)
+    pendingJump.current = { path, range: start && end ? { start, end } : undefined }
     applyPendingJump(editorRef.current)
   }
 
+  function confirmDiscard() {
+    return !dirty || window.confirm('Discard unsaved edits to project files?')
+  }
+
+  useImperativeHandle(ref, () => ({
+    openFile,
+    confirmDiscard,
+    openGeneratedNode(node) {
+      let line: number | undefined
+      generateSource?.(workingProject, (candidate, position) => {
+        if (candidate === node) line = position
+      })
+      if (line !== undefined) openFile('main.tex', line)
+    },
+  }))
+
   function locate(location: SourceLocation) {
-    jump(location.path, location.line, location)
+    openFile(location.path, location.line, location)
   }
 
   const canSync = !busy && !pdfStale && sourceMap.length > 0
@@ -169,8 +268,7 @@ export function SourceProjectWorkspace({ project, initialFile, onClose }: {
     } else {
       setSyncMessage('The selected file has no mapped content in this PDF.')
     }
-    pdfNavigationRef.current?.scrollIntoView({ block: 'nearest' })
-    setPanel('pdf')
+    setNarrowView('pdf')
   }
 
   function showInSource(location: SyncRegion | undefined) {
@@ -180,25 +278,31 @@ export function SourceProjectWorkspace({ project, initialFile, onClose }: {
     }
     setPdfTarget(null)
     setSyncMessage(`${location.path}:${location.line}`)
-    jump(location.path, location.line)
+    openFile(location.path, location.line)
   }
+
+  const changePdfPage = useCallback((page: number) => {
+    setPdfPage(page)
+    setPdfTarget(null)
+    setSyncMessage('')
+  }, [])
 
   const save = useCallback(() => {
     if (!dirty || busy) return
-    setFileSystem(workingProject)
+    setFileSystem(current => current ? applyDrafts(current, drafts) : current)
     setDrafts({})
-  }, [busy, dirty, setFileSystem, workingProject])
+  }, [busy, dirty, drafts, setFileSystem])
 
   function markSourceChanged() {
-    setPdfStale(true)
     setPdfTarget(null)
     setSyncMessage('')
     setDiagnostics([])
+    setDiagnosticSources(undefined)
     setError('')
   }
 
   function changeDraft(value: string) {
-    if (busy || value === draft) return
+    if (busy || readOnly || value === draft) return
     setDrafts(current => {
       const next = { ...current }
       if (value === source) delete next[selected]
@@ -211,191 +315,242 @@ export function SourceProjectWorkspace({ project, initialFile, onClose }: {
   function insertReference(key: string) {
     const instance = editorRef.current
     const range = instance?.getSelection()
-    if (!instance || !range || !isTex || busy) return
+    if (!instance || !range || !isTex || readOnly || busy || !instance.getModel()?.uri.path.endsWith('/' + selected)) return
+    setNarrowView('source')
     instance.pushUndoStop()
     instance.executeEdits('citation', [{ range, text: `\\cite{${key}}`, forceMoveMarkers: true }])
     instance.pushUndoStop()
-    instance.focus()
+    requestAnimationFrame(() => instance.focus())
+  }
+
+  function setMain(path: string) {
+    if (busy) return
+    setFileSystem(current => current ? { ...current, metadata: { ...current.metadata, mainFile: path } } : current)
+    markSourceChanged()
+  }
+
+  function discard() {
+    if (!dirty || busy || !confirmDiscard()) return
+    setDrafts({})
+    markSourceChanged()
   }
 
   async function compile() {
-    if (!main || busy) return
+    if (!main || compileRequest.current) return
+    const controller = new AbortController()
+    compileRequest.current = controller
     save()
     setBusy(true)
-    setPanel('pdf')
     setSyncMessage('')
-    outputRef.current?.scrollIntoView({ block: 'nearest' })
     setError('')
     setLog('')
     setDiagnostics([])
+    setDiagnosticSources(undefined)
     try {
       const archive = await exportSourceArchive(workingProject)
       const response = await fetch(`/api/latex/compile?main=${encodeURIComponent(main)}&sync=1`, {
-        method: 'POST', body: archive,
+        method: 'POST', body: archive, signal: controller.signal,
       })
       if (!response.ok) {
         const failure = await response.json()
         setError(failure.error)
         setLog(failure.log ?? '')
         setDiagnostics(failure.diagnostics ?? [])
+        setDiagnosticSources(workingProject.files)
         setPanel('problems')
         return
       }
       const result = await response.formData()
+      if (controller.signal.aborted) return
       const pdf = result.get('pdf')
       if (!(pdf instanceof Blob)) throw new Error('The compiler did not return a PDF.')
       const map = result.get('sourceMap')
       setSourceMap(typeof map === 'string' ? JSON.parse(map) : [])
-      setPdfPage(1)
       setPdfTarget(null)
       setPdfUrl(URL.createObjectURL(pdf))
       setPdfFilename(main.split('/').at(-1)?.replace(/\.tex$/i, '.pdf') ?? 'project.pdf')
-      setPdfStale(false)
-      setPanel('pdf')
+      setLastCompile({ main, files: workingProject.files })
+      setNarrowView('pdf')
     } catch (cause) {
+      if (controller.signal.aborted) return
       setError(cause instanceof Error ? cause.message : 'Could not compile the project.')
       setPanel('problems')
     } finally {
+      compileRequest.current = null
       setBusy(false)
     }
   }
 
+  function closeMobileFiles(restoreFocus = false) {
+    setMobileFiles(false)
+    if (restoreFocus) fileToggle.current?.focus()
+  }
+
   return (
-    <Dialog open onOpenChange={open => {
-      if (!open && !busy && (!dirty || window.confirm('Discard unsaved project edits?'))) onClose()
-    }}>
-      <DialogContent className="flex h-[95dvh] min-h-0 flex-col gap-0 overflow-hidden rounded-xl border-slate-200 bg-[#f6f8fc] p-0 text-slate-900 sm:max-w-[97vw]" showCloseButton={!busy}>
-        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-5 py-3 pr-14">
-          <div className="flex min-w-0 items-center gap-3">
-            <div className="rounded-lg bg-indigo-100 p-2 text-indigo-700"><FileCode2 className="size-5" /></div>
-            <div className="min-w-0">
-              <DialogTitle className="truncate text-base">{project.metadata.projectName}</DialogTitle>
-              <DialogDescription className="text-xs">LaTeX workspace</DialogDescription>
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <label className="flex items-center gap-2 text-xs font-medium text-slate-600">Main file
-              <select aria-label="Main file" className="max-w-48 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-slate-900" value={main} disabled={busy}
-                onChange={event => {
-                  setFileSystem({ ...project, metadata: { ...project.metadata, mainFile: event.target.value } })
-                  markSourceChanged()
-                }}>
-                {texFiles.map(file => <option key={file.path}>{file.path}</option>)}
-              </select>
-            </label>
-            <Button size="sm" variant="outline" onClick={save} disabled={!dirty || busy}><Save className="size-3.5" /> Save</Button>
-            <Button size="sm" className="bg-indigo-700 text-white hover:bg-indigo-800" onClick={compile} disabled={!main || busy}>
-              <Play className="size-3.5" /> {busy ? 'Compiling…' : 'Compile PDF'}
-            </Button>
-          </div>
-        </header>
-
-        <div className="grid min-h-0 flex-1 content-start grid-cols-1 grid-rows-[max-content_minmax(25rem,1fr)_minmax(25rem,1fr)] overflow-y-auto md:grid-cols-2 md:grid-rows-[max-content_minmax(25rem,1fr)] lg:grid-cols-[12rem_minmax(0,1.15fr)_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)] lg:overflow-hidden xl:grid-cols-[14rem_minmax(0,1.15fr)_minmax(0,1fr)]">
-          <aside aria-label="Project navigation" className="flex min-h-0 flex-col border-b border-slate-200 bg-slate-50 text-sm md:col-span-2 lg:col-span-1 lg:border-r lg:border-b-0">
-            <div className="flex gap-1 border-b border-slate-200 p-2">
-              {(['files', 'outline'] as const).map(tab => <Button key={tab} size="sm" variant={navigation === tab ? 'secondary' : 'ghost'}
-                aria-pressed={navigation === tab} onClick={() => setNavigation(tab)}>{tab === 'files' ? 'Files' : 'Outline'}</Button>)}
-            </div>
-            <div className="max-h-36 overflow-auto p-2 lg:max-h-none">
-              {navigation === 'files'
-                ? <Files nodes={tree} selected={selected} main={main} dirty={drafts} onSelect={selectSource} />
-                : <OutlinePanel project={workingProject} main={main} path={selected} draft={draft} onLocate={locate} />}
-            </div>
-          </aside>
-
-          <section aria-label="Source" className="flex min-h-[25rem] min-w-0 flex-col border-r border-slate-200 bg-[#fffefc] lg:min-h-0">
-            <div className="flex min-w-0 items-center gap-2 border-b border-slate-200 bg-white px-4 py-3 text-xs">
-              <FileCode2 className="size-4 shrink-0 text-indigo-600" />
-              <span className="truncate font-medium" title={selected}>{selected || 'Select a source file'}</span>
-              <div className="ml-auto flex shrink-0 items-center gap-2">
-                {Object.hasOwn(drafts, selected) && <span className="text-amber-700">Unsaved</span>}
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#f6f8fc] text-slate-900">
+      {actions && createPortal(<>
+        <div className="mr-auto min-w-0 text-xs md:mr-0 md:text-right" title={main}>
+          <span className="block text-slate-500">Main file</span>
+          <span className="block truncate font-mono font-medium min-[385px]:hidden">{main.split('/').at(-1) || 'None'}</span>
+          <span className="hidden max-w-56 truncate font-mono font-medium min-[385px]:block">{main || 'None'}</span>
+        </div>
+        <Button size="sm" variant="outline" onClick={save} disabled={!dirty || busy}><Save /> Save</Button>
+        <Button size="sm" className="bg-indigo-700 text-white hover:bg-indigo-800" onClick={compile} disabled={!main || busy}>
+          <Play /> {busy ? 'Compiling…' : 'Compile PDF'}
+        </Button>
+      </>, actions)}
+      <div className="flex shrink-0 items-center gap-2 border-b bg-white px-2 py-1.5 lg:hidden">
+        <Button ref={fileToggle} size="sm" variant="outline" aria-expanded={mobileFiles} aria-controls="writing-files"
+          onClick={() => setMobileFiles(open => !open)}><PanelLeft /> Files</Button>
+        <div className="ml-auto flex gap-1 rounded-lg bg-slate-100 p-0.5" aria-label="Writing pane" role="group">
+          {(['source', 'pdf'] as const).map(pane => <Button key={pane} size="sm"
+            variant={narrowView === pane ? 'outline' : 'ghost'} aria-pressed={narrowView === pane}
+            onClick={() => { setNarrowView(pane); setMobileFiles(false) }}>{pane === 'source' ? 'Source' : 'PDF'}</Button>)}
+        </div>
+      </div>
+      <div className="relative min-h-0 flex-1">
+        {mobileFiles && <div className="absolute inset-0 z-10 bg-slate-900/25 lg:hidden" onClick={() => closeMobileFiles(true)} />}
+        <ResizablePanelGroup direction="horizontal">
+          <ResizablePanel id="writing-navigation" order={1} ref={navPanel} defaultSize={19} minSize={13} maxSize={35} collapsible
+            onCollapse={() => setDesktopFiles(false)} onExpand={() => setDesktopFiles(true)}
+            className={mobileFiles
+              ? 'max-lg:absolute max-lg:inset-y-0 max-lg:left-0 max-lg:z-20 max-lg:w-64 max-lg:max-w-[85%] max-lg:!flex-none max-lg:shadow-lg'
+              : 'hidden lg:block'}>
+            <aside id="writing-files" aria-label="Project navigation"
+              className={'flex h-full min-h-0 flex-col overflow-hidden bg-slate-50 text-sm ' + (desktopFiles ? '' : 'lg:hidden')}
+              onKeyDown={event => { if (event.key === 'Escape' && mobileFiles) closeMobileFiles(true) }}>
+              <div className="flex shrink-0 items-center gap-1 border-b p-2">
+                {(['files', 'outline'] as const).map(tab => <Button key={tab} ref={tab === 'files' ? firstFileTab : undefined}
+                  size="sm" variant={navigation === tab ? 'secondary' : 'ghost'}
+                  aria-pressed={navigation === tab} onClick={() => setNavigation(tab)}>{tab === 'files' ? 'Files' : 'Outline'}</Button>)}
+                <Button size="icon-sm" variant="ghost" aria-label="Close file navigation" className="ml-auto lg:hidden"
+                  onClick={() => closeMobileFiles(true)}><X /></Button>
+              </div>
+              <div className="min-h-0 flex-1 overflow-auto p-2">
+                {navigation === 'files'
+                  ? <Files nodes={tree} selected={selected} main={main} dirty={drafts} sourcePaths={sourcePaths}
+                      onSelect={openFile} onSetMain={setMain} />
+                  : <OutlinePanel project={workingProject} main={main} path={selected} draft={draft} onLocate={locate} />}
+              </div>
+            </aside>
+          </ResizablePanel>
+          <ResizableHandle className="hidden lg:flex" />
+          <ResizablePanel id="writing-source" order={2} defaultSize={44} minSize={28}
+            className={narrowView === 'source' ? '' : 'hidden lg:block'}>
+            <section aria-label="Source editor" className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-[#fffefc]">
+              <div className="flex min-w-0 shrink-0 items-center gap-2 border-b bg-white px-2 py-1.5 text-xs sm:px-3">
+                <Button size="icon-sm" variant="ghost" aria-label={desktopFiles ? 'Collapse file navigation' : 'Expand file navigation'}
+                  aria-expanded={desktopFiles} aria-controls="writing-files" className="hidden lg:inline-flex"
+                  onClick={() => desktopFiles ? navPanel.current?.collapse() : navPanel.current?.expand()}><PanelLeft /></Button>
+                <FileCode2 className="size-4 shrink-0 text-indigo-600" />
+                <span className="min-w-0 flex-1 truncate font-medium" title={selected}>{selected || 'Select a source file'}</span>
                 <Button size="sm" variant="outline" disabled={!isTex || !canSync} onClick={showInPdf}
-                  title={canSync ? 'Find the editor cursor in the compiled PDF' : 'Compile the project to enable source and PDF navigation'}>
-                  <LocateFixed className="size-3.5" /> Show in PDF
+                  title={canSync ? 'Find the editor cursor in the compiled PDF' : 'Compile the current source to enable positioning'}>
+                  <LocateFixed /> Show in PDF
                 </Button>
               </div>
-            </div>
-            <div className="min-h-0 flex-1">
-              {selected && <MonacoSourceEditor path={selected} value={draft} readOnly={busy} problems={problems}
-                onChange={changeDraft} onEditor={applyPendingJump} onSave={save} />}
-            </div>
-          </section>
-
-          <section ref={outputRef} aria-label="Output and tools" className="flex min-h-[25rem] min-w-0 flex-col bg-slate-100 lg:min-h-0">
-            <div ref={pdfNavigationRef} className="flex flex-wrap items-center gap-1 border-b border-slate-200 bg-white px-2 py-1.5">
-              {([
-                ['pdf', 'PDF Preview', FileText], ['problems', 'Problems', CircleAlert],
-                ['references', 'References', BookOpen], ['ai', 'Chapter AI', Sparkles],
-              ] as const).map(([tab, label, Icon]) => <Button key={tab} size="sm" variant={panel === tab ? 'secondary' : 'ghost'}
-                className="gap-1.5" aria-pressed={panel === tab} disabled={tab === 'ai' && !isTex} onClick={() => setPanel(tab)}>
-                <Icon className="size-3.5" /> {label}
-                {tab === 'problems' && problems.length > 0 && <span className="rounded-full bg-amber-100 px-1.5 text-xs text-amber-900">{problems.length}</span>}
-              </Button>)}
-            </div>
-            {panel === 'pdf' ? (
-              <div className="flex min-h-0 flex-1 flex-col">
-                {pdfUrl && <>
-                  <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-3 py-2 text-xs">
-                    <span className={pdfStale || busy ? 'text-amber-800' : 'text-slate-600'}>{busy ? 'Recompiling…' : pdfStale ? 'Previous PDF · recompile to update' : 'Latest successful compile'}</span>
-                    <Button size="sm" variant="outline" asChild><a href={pdfUrl} download={pdfFilename}>
-                      <Download className="size-3.5" /> Download PDF
-                    </a></Button>
-                  </div>
-                  <p role="status" className="border-b border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600">
-                    {syncMessage || (canSync ? 'Click PDF content to find its source.'
-                      : pdfStale ? 'Compile the current source to restore navigation.' : busy ? 'Updating source locations…'
-                        : 'This PDF has no source locations.')}
-                  </p>
-                  <SyncedPdfPreview key={pdfUrl} url={pdfUrl} page={pdfPage} regions={canSync ? sourceMap : []}
-                    target={pdfTarget} onLocate={showInSource} onPage={page => { setPdfPage(page); setPdfTarget(null); setSyncMessage('') }} />
-                </>}
-                {!pdfUrl && <div className="m-auto max-w-60 p-4 text-center">
-                  <FileText className="mx-auto mb-3 size-8 text-indigo-400" />
-                  <p role="status" className="text-sm text-slate-600">{busy ? 'Running the LaTeX engine…' : 'Compile the main file to preview your PDF.'}</p>
-                </div>}
-              </div>
-            ) : <div className="min-h-0 flex-1 overflow-auto bg-white">
-              {panel === 'problems' && <div className="space-y-3 p-3">
-                {error && <p role="alert" className="rounded-md bg-red-50 p-2 text-sm text-red-800">{error}</p>}
-                {!problems.length && !error && <p className="text-sm text-slate-600">No problems detected.</p>}
-                <ul className="space-y-1">
-                  {problems.map((problem, index) => <li key={`${problem.path}:${problem.line}:${index}`}>
-                    <button type="button" onClick={() => jump(problem.path, problem.line, problem.location)}
-                      disabled={busy || !editable.some(file => file.path === problem.path)}
-                      className="flex w-full items-start gap-2 rounded-md px-2 py-2 text-left hover:bg-indigo-50 disabled:opacity-60">
-                      <CircleAlert aria-hidden className={`mt-0.5 size-4 shrink-0 ${problem.severity === 'error' ? 'text-red-600' : 'text-amber-600'}`} />
-                      <span className="sr-only">{problem.severity === 'error' ? 'Compile error' : 'Warning'}</span>
-                      <span className="min-w-0"><span className="block break-words text-sm">{problem.message}</span>
-                        <span className="block break-all font-mono text-xs text-slate-600">{problem.path}:{problem.line}</span></span>
-                    </button>
-                  </li>)}
-                </ul>
-                {log && <details className="rounded-md border border-slate-200 p-2 text-xs">
-                  <summary className="cursor-pointer font-medium">Compiler log</summary>
-                  <pre className="mt-2 whitespace-pre-wrap break-words">{log}</pre>
-                </details>}
+              {currentFile?.type === 'generated' && <div className="flex shrink-0 flex-wrap items-center gap-x-2 border-b border-indigo-100 bg-indigo-50 px-3 py-1 text-xs text-indigo-950">
+                Generated from the active canvas page · Read-only
+                <Button variant="link" size="sm" className="h-7 px-1 text-indigo-700" onClick={onOpenCanvas}>Edit in Canvas</Button>
               </div>}
-              {panel === 'references' && <ReferencesPanel project={workingProject} entries={bibliography} path={selected} draft={draft}
-                canInsert={isTex && !busy} onInsert={insertReference} onLocate={locate} />}
-              {panel === 'ai' && <ChapterAiPanel key={selected} project={workingProject} path={selected} main={main}
-                source={source} draft={draft} log={log} bibliography={bibliography} disabled={busy}
-                onApply={text => {
-                  setFileSystem(updateFileContent(project, selected, text))
-                  setDrafts(current => {
-                    const next = { ...current }
-                    delete next[selected]
-                    return next
-                  })
-                  markSourceChanged()
-                }} />}
-            </div>}
-          </section>
+              <div className="min-h-0 flex-1">
+                {selected && <MonacoSourceEditor path={selected} value={draft} readOnly={busy || readOnly} problems={problems}
+                  onChange={changeDraft} onEditor={applyPendingJump} onSave={save} />}
+              </div>
+            </section>
+          </ResizablePanel>
+          <ResizableHandle withHandle className="hidden lg:flex" />
+          <ResizablePanel id="writing-pdf" order={3} defaultSize={37} minSize={24}
+            className={narrowView === 'pdf' ? '' : 'hidden lg:block'}>
+            <section aria-label="PDF Preview" className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-slate-100">
+              <div className="flex min-w-0 shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 border-b bg-white px-3 py-1.5 text-xs">
+                <h2 className="flex items-center gap-2 font-semibold"><FileText className="size-4 text-indigo-600" /> PDF Preview</h2>
+                {pdfUrl && <Button size="sm" variant="outline" asChild><a href={pdfUrl} download={pdfFilename}><Download /> Download PDF</a></Button>}
+              </div>
+              {pdfUrl ? <>
+                <div className="shrink-0 border-b bg-white px-3 py-1.5 text-xs">
+                  <p className={pdfStale ? 'font-medium text-amber-800' : 'text-slate-600'}>
+                    Last successful compile{pdfStale ? ' · Out of date' : ' · Up to date'}{busy ? ' · Compiling…' : ''}
+                  </p>
+                  <p role="status" className="break-words text-slate-600">
+                    {busy ? 'Updating PDF…' : pdfStale ? 'Recompile to restore source and PDF navigation.'
+                      : syncMessage || (canSync ? 'Click PDF content to find its source.' : 'This PDF has no source locations.')}
+                  </p>
+                </div>
+                <SyncedPdfPreview key={pdfUrl} url={pdfUrl} page={pdfPage} regions={canSync ? sourceMap : []}
+                  target={pdfStale ? null : pdfTarget} onLocate={showInSource}
+                  onPage={changePdfPage} />
+              </> : <div className="m-auto max-w-64 p-4 text-center">
+                <FileText className="mx-auto mb-3 size-8 text-indigo-400" />
+                <p role="status" className="text-sm text-slate-600">{busy ? 'Running the LaTeX engine…' : 'Compile the main file to preview your PDF.'}</p>
+              </div>}
+            </section>
+          </ResizablePanel>
+        </ResizablePanelGroup>
+      </div>
+
+      <section aria-label="Writing tools" className="flex min-h-0 max-h-[42%] shrink-0 flex-col border-t bg-white [@media(max-height:550px)]:max-h-[32%]">
+        <div className="flex shrink-0 flex-wrap items-center gap-0.5 px-1.5 py-1 sm:gap-1 sm:px-2">
+          {([
+            ['problems', 'Problems', CircleAlert], ['references', 'References', BookOpen], ['ai', 'Chapter AI', Sparkles],
+          ] as const).map(([tab, label, Icon]) => <Button key={tab} size="sm" variant={panel === tab ? 'secondary' : 'ghost'}
+            className="gap-1 px-1.5 text-xs sm:gap-1.5 sm:px-3 sm:text-sm" aria-expanded={panel === tab} aria-controls="writing-tools-content" disabled={tab === 'ai' && (!isTex || readOnly)}
+            onClick={() => setPanel(current => current === tab ? null : tab)}>
+            <Icon className="hidden sm:block" /> {label}
+            {tab === 'problems' && (problems.length > 0 || error) && <span className={currentDiagnostics.some(problem => problem.severity === 'error') || error
+              ? 'rounded-full bg-red-100 px-1.5 text-xs text-red-900' : 'rounded-full bg-amber-100 px-1.5 text-xs text-amber-900'}>
+              {problems.length || 'Failed'}
+            </span>}
+          </Button>)}
+          {panel && <Button size="icon-sm" variant="ghost" aria-label="Collapse writing tools" className="ml-auto"
+            onClick={() => setPanel(null)}><X /></Button>}
         </div>
-        <footer className="flex flex-wrap items-center justify-between gap-1 border-t border-slate-200 bg-white px-4 py-1.5 text-xs text-slate-600">
-          <span>{dirty ? `${Object.keys(drafts).length} unsaved file(s)` : 'All changes saved'}</span>
-          <span>{/\.bib$/i.test(selected) ? 'BibTeX' : isTex ? 'LaTeX' : 'Plain text'} · Ctrl / ⌘ + S to save</span>
-        </footer>
-      </DialogContent>
-    </Dialog>
+        <div id="writing-tools-content" hidden={!panel} className={panel ? 'h-[min(34dvh,20rem)] min-h-0 overflow-auto border-t' : undefined}>
+          {panel === 'problems' && <div className="space-y-3 p-3">
+            {error && <p role="alert" className="rounded-md bg-red-50 p-2 text-sm text-red-800">{error}</p>}
+            {!problems.length && !error && <p className="text-sm text-slate-600">No problems detected.</p>}
+            <ul className="space-y-1">
+              {problems.map((problem, index) => <li key={[problem.path, problem.line, index].join(':')}>
+                <button type="button" onClick={() => openFile(problem.path, problem.line, problem.location, true)}
+                  disabled={!sourcePaths.has(problem.path)}
+                  className="flex w-full items-start gap-2 rounded-md px-2 py-2 text-left hover:bg-indigo-50 disabled:opacity-60">
+                  <CircleAlert aria-hidden className={'mt-0.5 size-4 shrink-0 ' + (problem.severity === 'error' ? 'text-red-600' : 'text-amber-600')} />
+                  <span className="sr-only">{problem.severity === 'error' ? 'Compile error' : 'Warning'}</span>
+                  <span className="min-w-0"><span className="block break-words text-sm">{problem.message}</span>
+                    <span className="block break-all font-mono text-xs text-slate-600">{problem.path}:{problem.line}</span></span>
+                </button>
+              </li>)}
+            </ul>
+            {log && <details className="rounded-md border p-2 text-xs" open={!currentDiagnostics.length && Boolean(error)}>
+              <summary className="cursor-pointer font-medium">Compiler log</summary>
+              <pre className="mt-2 whitespace-pre-wrap break-words">{log}</pre>
+            </details>}
+          </div>}
+          {panel === 'references' && <ReferencesPanel project={workingProject} entries={bibliography} path={selected} draft={draft}
+            canInsert={isTex && !readOnly && !busy} onInsert={insertReference} onLocate={locate} />}
+          {panel === 'ai' && isTex && !readOnly && <ChapterAiPanel key={selected} project={workingProject} path={selected} main={main}
+            source={source} draft={draft} log={log} bibliography={bibliography} disabled={busy}
+            onApply={text => {
+              setFileSystem(current => current ? updateFileContent(current, selected, text) : current)
+              setDrafts(current => {
+                const next = { ...current }
+                delete next[selected]
+                return next
+              })
+              markSourceChanged()
+            }} />}
+        </div>
+      </section>
+
+      <footer className="flex shrink-0 flex-wrap items-center justify-between gap-x-2 border-t bg-white px-3 py-1 text-xs text-slate-600">
+        <div className="flex items-center gap-2">
+          <span role="status" className={dirty ? 'font-medium text-amber-800' : undefined}>
+            {dirty ? Object.keys(drafts).length + ' unsaved file(s)' : 'All changes saved'}
+          </span>
+          {dirty && <Button variant="link" size="sm" className="h-6 px-0 text-slate-600" onClick={discard} disabled={busy}>Discard edits</Button>}
+        </div>
+        <span>{/\.bib$/i.test(selected) ? 'BibTeX' : isTex ? 'LaTeX' : 'Plain text'} · Ctrl / ⌘ + S to save</span>
+      </footer>
+    </div>
   )
 }
