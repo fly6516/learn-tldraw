@@ -7,6 +7,7 @@
 
 import { useState, useRef } from 'react'
 import { FileTreeNode } from '@/lib/project/file-system'
+import { materialKind } from '@/lib/project/canvas-card-kinds'
 import {
   ChevronRight,
   ChevronDown,
@@ -16,7 +17,7 @@ import {
   Eye,
   Edit,
   Download,
-  Image,
+  ImageIcon,
   Upload,
   FilePlus,
   FolderPlus,
@@ -27,6 +28,7 @@ interface ProjectFileBrowserProps {
   fileTree: FileTreeNode[]
   onFileClick?: (node: FileTreeNode) => void
   onFileEdit?: (node: FileTreeNode) => void
+  onAddMaterial?: (node: FileTreeNode) => void
   onFileDownload?: (node: FileTreeNode) => void
   onFileUpload?: (file: File) => void
   onFileDelete?: (node: FileTreeNode) => void
@@ -38,6 +40,7 @@ export function ProjectFileBrowser({
   fileTree,
   onFileClick,
   onFileEdit,
+  onAddMaterial,
   onFileDownload,
   onFileUpload,
   onFileDelete,
@@ -114,6 +117,7 @@ export function ProjectFileBrowser({
             level={0}
             onFileClick={onFileClick}
             onFileEdit={onFileEdit}
+            onAddMaterial={onAddMaterial}
             onFileDownload={onFileDownload}
             onFileDelete={onFileDelete}
           />
@@ -128,6 +132,7 @@ interface FileTreeItemProps {
   level: number
   onFileClick?: (node: FileTreeNode) => void
   onFileEdit?: (node: FileTreeNode) => void
+  onAddMaterial?: (node: FileTreeNode) => void
   onFileDownload?: (node: FileTreeNode) => void
   onFileDelete?: (node: FileTreeNode) => void
 }
@@ -137,6 +142,7 @@ function FileTreeItem({
   level,
   onFileClick,
   onFileEdit,
+  onAddMaterial,
   onFileDownload,
   onFileDelete,
 }: FileTreeItemProps) {
@@ -182,7 +188,7 @@ function FileTreeItem({
               <Folder className="w-4 h-4 text-blue-500" />
             )
           ) : isImage ? (
-            <Image className="w-4 h-4 text-green-500" />
+            <ImageIcon className="w-4 h-4 text-green-500" />
           ) : (
             <File className="w-4 h-4 text-gray-500" />
           )}
@@ -199,6 +205,9 @@ function FileTreeItem({
             {formatFileSize(node.size)}
           </span>
         )}
+        {onAddMaterial && !isDirectory && materialKind(node.path) && <button type="button"
+          className="shrink-0 rounded border px-1 text-xs hover:bg-accent" aria-label={`Add ${node.name} to Canvas`}
+          onClick={event => { event.stopPropagation(); onAddMaterial(node) }}>Add</button>}
 
         {/* Action buttons */}
         {!isDirectory && (
@@ -263,6 +272,7 @@ function FileTreeItem({
               level={level + 1}
               onFileClick={onFileClick}
               onFileEdit={onFileEdit}
+              onAddMaterial={onAddMaterial}
               onFileDownload={onFileDownload}
               onFileDelete={onFileDelete}
             />

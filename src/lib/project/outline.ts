@@ -9,19 +9,24 @@ export interface OutlineHeading extends SourceLocation {
   title: string
   titleSource: string
   label?: string
+  appendix?: true
   children: OutlineHeading[]
 }
 
-type OutlineEvent = Omit<OutlineHeading, 'children'> | { include: string }
+type OutlineEvent = Omit<OutlineHeading, 'children' | 'appendix'> | { include: string; preamble?: true } | { appendix: boolean }
 
 function analyzeSource(path: string, source: string): OutlineEvent[] {
   const text = maskLatexCode(source)
-  const commands = /\\(?:\\|(begin|end|input|include|part|chapter|section|subsection|subsubsection|paragraph|subparagraph)(?![A-Za-z@])(\s*\*)?)/g
+  const commands = /\\(?:\\|(begin|end|appendix|input|include|part|chapter|section|subsection|subsubsection|paragraph|subparagraph)(?![A-Za-z@])(\s*\*)?)/g
   const adjacentLabel = /\s*\\label\s*\{([^\s{}\\]+)\}/y
   let events: OutlineEvent[] = []
   for (let match = commands.exec(text); match; match = commands.exec(text)) {
-    const command = match[1] as Heading | 'begin' | 'end' | 'input' | 'include' | undefined
+    const command = match[1] as Heading | 'begin' | 'end' | 'appendix' | 'input' | 'include' | undefined
     if (!command) continue
+    if (command === 'appendix') {
+      events.push({ appendix: true })
+      continue
+    }
     let start = commands.lastIndex
     while (/\s/.test(text[start] ?? '')) start++
     if (text[start] === '[') {
@@ -38,9 +43,11 @@ function analyzeSource(path: string, source: string): OutlineEvent[] {
     const argument = text.slice(argumentStart, end).trim()
     commands.lastIndex = end + Number(braced)
     if (command === 'begin' || command === 'end') {
+      if (argument === 'appendices') events.push({ appendix: command === 'begin' })
       if (argument !== 'document') continue
       if (command === 'end') break
-      events = []
+      // Preamble inputs can declare environments without contributing document headings.
+      events = events.flatMap(event => 'include' in event ? [{ ...event, preamble: true as const }] : [])
     } else if (command === 'input' || command === 'include') {
       if (argument && !/[\\{}#]/.test(argument)) events.push({ include: argument })
     } else {
@@ -76,6 +83,8 @@ function resolveInclude(main: string, target: string, files: Map<string, string>
 
 export function buildProjectOutline(
   project: Pick<ProjectFileSystem, 'files'>, main: string, active?: { path: string; source: string },
+  onSource?: (path: string, source: string) => void,
+  onPreambleSource?: (path: string, source: string) => void,
 ): OutlineHeading[] {
   const files = new Map<string, string>()
   for (const file of project.files.values()) {
@@ -87,22 +96,37 @@ export function buildProjectOutline(
   const parents: OutlineHeading[] = []
   const ancestors = new Set<string>()
   const parsedFiles = new Map<string, OutlineEvent[]>()
+  const preambleFiles = new Set<string>()
+  const documentFiles = new Set<string>()
+  let appendix = false
 
-  function visit(path: string) {
+  function visit(path: string, preamble = false) {
     const source = files.get(path)
     if (source === undefined || ancestors.has(path)) return
     ancestors.add(path)
+    const visited = preamble ? preambleFiles : documentFiles
+    if (!visited.has(path)) {
+      visited.add(path)
+      if (preamble) onPreambleSource?.(path, source)
+      else onSource?.(path, source)
+    }
     const events = parsedFiles.get(path) ?? analyzeSource(path, source)
     parsedFiles.set(path, events)
     for (const event of events) {
       if ('include' in event) {
         const included = resolveInclude(main, event.include, files)
-        if (included) visit(included)
+        if (included && (!event.preamble || onPreambleSource)) visit(included, preamble || Boolean(event.preamble))
+        continue
+      }
+      if (preamble) continue
+      if ('appendix' in event) {
+        appendix = event.appendix
+        parents.length = 0
         continue
       }
       const level = headingLevels.indexOf(event.command)
       while (parents.length && headingLevels.indexOf(parents[parents.length - 1].command) >= level) parents.pop()
-      const heading = { ...event, children: [] }
+      const heading: OutlineHeading = { ...event, ...(appendix ? { appendix: true } : {}), children: [] }
       const siblings = parents.at(-1)?.children ?? headings
       siblings.push(heading)
       parents.push(heading)

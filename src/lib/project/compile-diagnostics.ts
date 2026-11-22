@@ -5,6 +5,12 @@ export interface CompileDiagnostic {
   message: string
 }
 
+export interface CompileReport {
+  diagnostics: CompileDiagnostic[]
+  hasWarnings: boolean
+  log: string
+}
+
 export function parseCompileDiagnostics(output: string, main: string, paths: Iterable<string>): CompileDiagnostic[] {
   const files = new Set(paths)
   const folder = main.slice(0, main.lastIndexOf('/') + 1)

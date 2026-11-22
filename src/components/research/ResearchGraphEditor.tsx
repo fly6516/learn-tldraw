@@ -1,10 +1,10 @@
 'use client'
 
-import { memo, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
-import { Cable, Hand, Maximize, MousePointer2, Plus, Redo2, Trash2, Undo2 } from 'lucide-react'
+import { Cable, ChevronDown, Hand, Maximize, MousePointer2, PanelRight, Plus, Redo2, Trash2, Undo2, X } from 'lucide-react'
 import {
-  Background, Controls, getViewportForBounds, Handle, MarkerType, Position, ReactFlow,
+  Background, Controls, getViewportForBounds, Handle, MarkerType, Position, ReactFlow, ViewportPortal,
   type Connection, type EdgeChangeset, type Node, type NodeChangeset, type NodeProps,
   type ReactFlowInstance,
 } from '@xyflow/react'
@@ -12,11 +12,16 @@ import '@xyflow/react/dist/style.css'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { RESEARCH_NODE_META, type ResearchNodeType } from '@/app/research/research-node'
 import {
   removeResearchNodes, validResearchConnection, type ResearchPage, type ResearchNode,
 } from '@/lib/project/research-graph'
 import { researchNodeTitle as nodeTitle } from '@/lib/project/canvas-search'
+import type { PageRegion } from '@/lib/project/canvas-overview'
+import { canvasResourceNames, researchCardKinds, researchCardNames, researchCardStatuses } from '@/lib/project/canvas-card-kinds'
+import type { ReferenceLocation } from '@/lib/project/references'
+import { CanvasResource } from './CanvasResource'
 
 type FlowNode = Node<ResearchNode['data'], 'research'>
 type CanvasTool = 'select' | 'pan' | 'connect'
@@ -30,6 +35,7 @@ const canvasTools = [
 const ResearchCard = memo(function ResearchCard({ data, selected }: NodeProps<FlowNode>) {
   const subsection = Boolean(data.parentId)
   const title = nodeTitle(data)
+  const resource = data.resource
   return (
     <article className={`w-80 rounded-lg border bg-card text-card-foreground shadow-sm ${subsection ? 'border-blue-500' : ''} ${selected ? 'ring-2 ring-primary' : ''}`}>
       <Handle type="target" position={Position.Left} aria-label="Incoming connection" />
@@ -37,24 +43,28 @@ const ResearchCard = memo(function ResearchCard({ data, selected }: NodeProps<Fl
         <div className="min-w-0 flex-1">
           <h3 className="flex flex-wrap items-baseline gap-x-1.5 text-sm font-semibold">
             {data.level > 1 && <span aria-label={`Heading level ${data.level}`} className="text-xs text-muted-foreground">{'└'.repeat(data.level - 1)}</span>}
-            <span className="[overflow-wrap:anywhere]">{title}</span>
+            <span className="line-clamp-3 [overflow-wrap:anywhere]" title={title}>{title}</span>
             {data.metadata?.sectionNumber && <span className="text-xs text-muted-foreground">({data.metadata.sectionNumber})</span>}
           </h3>
-          {data.customLabel && <p className="text-xs text-muted-foreground">{RESEARCH_NODE_META[data.section].label}</p>}
+          {(data.customLabel || resource) && <p className="text-xs text-muted-foreground">{resource?.kind === 'research'
+            ? resource.customType || researchCardNames[resource.role]
+            : resource ? canvasResourceNames[resource.kind] : RESEARCH_NODE_META[data.section].label}</p>}
         </div>
         <div className="flex shrink-0 flex-wrap gap-1">
           {data.metadata?.imported && <span title={data.metadata.importSource}
             className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] text-indigo-900">imported</span>}
           {subsection && <span aria-label="Subsection" className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] text-blue-900">sub</span>}
+          {resource?.kind === 'research' && resource.status && <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] capitalize">{resource.status}</span>}
         </div>
       </header>
-      {Boolean(data.tags?.length) && <ul aria-label="Node tags" className="flex flex-wrap gap-1 border-b px-3 py-1.5">
+      {Boolean(data.tags?.length) && <ul aria-label="Node tags" className="nowheel flex max-h-12 flex-wrap gap-1 overflow-auto border-b px-3 py-1.5">
         {data.tags?.map((tag, index) => <li key={index}
           className="max-w-full rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground [overflow-wrap:anywhere]">{tag}</li>)}
       </ul>}
-      <p className="nowheel max-h-28 overflow-auto px-3 py-2.5 text-sm whitespace-pre-wrap [overflow-wrap:anywhere]">
+      <CanvasResource data={data} title={title} />
+      {(!data.resource || data.content) && <p className="nowheel max-h-28 overflow-auto px-3 py-2.5 text-sm whitespace-pre-wrap [overflow-wrap:anywhere]">
         {data.content || 'Select this node to edit its content.'}
-      </p>
+      </p>}
       <Handle type="source" position={Position.Right} aria-label="Outgoing connection" />
     </article>
   )
@@ -86,7 +96,8 @@ function canSetParent(page: ResearchPage, nodeId: string, parentId: string) {
   return true
 }
 
-function NodeDetails({ node, page, onEdit, onFinishEdit, onConnect, onOpenSource, sourceUnavailable, onUnlinkSource }: {
+function NodeDetails({ node, page, onEdit, onFinishEdit, onConnect, onOpenSource, sourceUnavailable, onUnlinkSource, canParent,
+  remoteLinks, references, onOpenReference }: {
   node: ResearchNode
   page: ResearchPage
   onEdit: (data: ResearchNode['data'], field?: string) => void
@@ -95,33 +106,61 @@ function NodeDetails({ node, page, onEdit, onFinishEdit, onConnect, onOpenSource
   onOpenSource?: () => void
   sourceUnavailable: boolean
   onUnlinkSource?: () => void
+  canParent: (nodeId: string, parentId: string) => boolean
+  remoteLinks: { id: string; title: string; onLocate: () => void; onRemove: () => void }[]
+  references: ReferenceLocation[]
+  onOpenReference: (reference: ReferenceLocation) => void
 }) {
   const { data } = node
+  const research = data.resource?.kind === 'research' ? data.resource : undefined
   const others = page.nodes.filter(other => other.id !== node.id)
   const [target, setTarget] = useState('')
   return (
-    <aside aria-label="Research node properties" className="min-h-0 w-full shrink-0 space-y-3 overflow-auto border-t bg-background p-3 max-sm:max-h-[45%] max-sm:shrink sm:w-72 sm:border-t-0 sm:border-l">
+    <aside aria-label="Research node properties" className="space-y-3 p-3">
       <h2 className="font-semibold">Research Node</h2>
       {(onOpenSource || onUnlinkSource) && <div className="flex flex-wrap gap-2">
         {onOpenSource && <Button size="sm" variant="outline" onClick={onOpenSource}>Open source</Button>}
         {onUnlinkSource && <Button size="sm" variant="ghost" onClick={onUnlinkSource}>Remove source link</Button>}
       </div>}
-      {sourceUnavailable && <p className="text-sm text-muted-foreground">Linked section unavailable. Use the Writing outline to bind this node again.</p>}
-      <label className="grid gap-1 text-sm">Section type
+      {sourceUnavailable && <p className="text-sm text-muted-foreground">Linked source is missing or ambiguous.</p>}
+      {data.resource?.kind === 'bibliography' && !sourceUnavailable && <details className="space-y-2 border-b pb-2 text-sm">
+        <summary className="cursor-pointer font-medium">Citations in source ({references.length})</summary>
+        <ul className="max-h-40 space-y-1 overflow-auto">
+          {references.map(reference => <li key={JSON.stringify([reference.path, reference.start])}>
+            <button type="button" className="break-all text-left underline" onClick={() => onOpenReference(reference)}>
+              {reference.path}:{reference.line}
+            </button>
+          </li>)}
+        </ul>
+      </details>}
+      {research?.role === 'custom' && <label className="grid gap-1 text-sm">Custom card type
+        <Input value={research.customType ?? ''} onBlur={onFinishEdit} onChange={event => onEdit({
+          ...data, resource: { ...research, customType: event.target.value.trimStart() || undefined },
+        }, 'custom-type')} />
+      </label>}
+      {research && (research.role === 'task' || research.role === 'review') && <label className="grid gap-1 text-sm">Status
+        <select className="rounded border bg-background p-2 capitalize" value={research.status ?? 'open'} onChange={event => {
+          const status = researchCardStatuses.find(item => item === event.target.value)
+          if (status) onEdit({ ...data, resource: { ...research, status } })
+        }}>
+          {researchCardStatuses.map(status => <option key={status} value={status}>{status}</option>)}
+        </select>
+      </label>}
+      {!data.resource && <label className="grid gap-1 text-sm">Section type
         <select className="rounded border bg-background p-2" value={data.section}
           onChange={event => onEdit({ ...data, section: event.target.value as ResearchNodeType })}>
           {Object.entries(RESEARCH_NODE_META).map(([key, meta]) => <option key={key} value={key}>{meta.label}</option>)}
         </select>
-      </label>
-      <label className="grid gap-1 text-sm">Section title
+      </label>}
+      <label className="grid gap-1 text-sm">{data.resource ? 'Card title' : 'Section title'}
         <Input value={data.customLabel ?? ''} onBlur={onFinishEdit}
           onChange={event => onEdit({ ...data, customLabel: event.target.value }, 'title')} />
       </label>
-      <label className="grid gap-1 text-sm">Node content
+      <label className="grid gap-1 text-sm">{data.resource ? 'Description' : 'Node content'}
         <Textarea rows={7} value={data.content} onBlur={onFinishEdit}
           onChange={event => onEdit({ ...data, content: event.target.value }, 'content')} />
       </label>
-      <div className="grid grid-cols-2 gap-2">
+      {!data.resource && <div className="grid grid-cols-2 gap-2">
         <label className="grid gap-1 text-sm">Level
           <select className="rounded border bg-background p-2" value={data.level}
             onChange={event => onEdit({ ...data, level: Number(event.target.value) })}>
@@ -133,20 +172,20 @@ function NodeDetails({ node, page, onEdit, onFinishEdit, onConnect, onOpenSource
             if (Number.isFinite(event.target.valueAsNumber)) onEdit({ ...data, order: event.target.valueAsNumber }, 'order')
           }} />
         </label>
-      </div>
+      </div>}
       <label className="grid gap-1 text-sm">Parent section
         <select className="min-w-0 rounded border bg-background p-2" value={data.parentId ?? ''}
           onChange={event => onEdit({ ...data, parentId: event.target.value || undefined })}>
           <option value="">None (top-level)</option>
-          {others.filter(other => canSetParent(page, node.id, other.id)).map(other =>
+          {others.filter(other => !other.data.resource && canParent(node.id, other.id) && canSetParent(page, node.id, other.id)).map(other =>
             <option key={other.id} value={other.id}>{nodeTitle(other.data)}</option>)}
         </select>
       </label>
-      <label className="grid gap-1 text-sm">Section number
+      {!data.resource && <label className="grid gap-1 text-sm">Section number
         <Input value={data.metadata?.sectionNumber ?? ''} onBlur={onFinishEdit} onChange={event => onEdit({
           ...data, metadata: { ...data.metadata, sectionNumber: event.target.value || undefined },
         }, 'number')} />
-      </label>
+      </label>}
       <div className="space-y-1 text-sm">
         <label className="grid gap-1">Add tag
           <Input placeholder="Press Enter to add" onKeyDown={event => {
@@ -165,6 +204,13 @@ function NodeDetails({ node, page, onEdit, onFinishEdit, onConnect, onOpenSource
           </Button>
         ))}
       </div>
+      {!!remoteLinks.length && <section className="space-y-1 border-t pt-2" aria-label="Cross-page connections">
+        <h3 className="text-sm font-medium">Cross-page connections</h3>
+        {remoteLinks.map(link => <div key={link.id} className="flex items-center gap-1">
+          <button className="min-w-0 flex-1 break-words text-left text-sm underline" onClick={link.onLocate}>{link.title}</button>
+          <Button aria-label={`Remove ${link.title}`} size="icon-sm" variant="ghost" onClick={link.onRemove}><Trash2 /></Button>
+        </div>)}
+      </section>}
       <div className="space-y-2 border-t pt-2">
         <label className="grid gap-1 text-sm">Connect to
           <select className="min-w-0 rounded border bg-background p-2" value={target}
@@ -181,7 +227,8 @@ function NodeDetails({ node, page, onEdit, onFinishEdit, onConnect, onOpenSource
 }
 
 export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, onHistory, canUndo, canRedo,
-  sample, actions, sourceStatus, onOpenSource, onUnlinkSource, jumpTo, onJumpHandled }: {
+  sample, actions, sourceStatus, onOpenSource, onUnlinkSource, jumpTo, onJumpHandled, overview, validateConnection,
+  canParent, remoteLinks, referenceLocations, onOpenReference }: {
   page: ResearchPage
   updatePage: (update: (current: ResearchPage) => ResearchPage) => void
   editPage: (update: (current: ResearchPage) => ResearchPage, group?: string) => void
@@ -196,6 +243,18 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
   onUnlinkSource: (nodeId: string) => void
   jumpTo?: string
   onJumpHandled: () => void
+  overview?: {
+    regions: PageRegion[]
+    fitOnOpen: boolean
+    enterPage: (pageId: string) => void
+    addNode: (data: ResearchNode['data']) => void
+    drop: (leaderId: string, positions: ReadonlyMap<string, ResearchNode['position']>) => void
+  }
+  validateConnection: (source: string, target: string) => boolean
+  canParent: (nodeId: string, parentId: string) => boolean
+  remoteLinks: (nodeId: string) => Parameters<typeof NodeDetails>[0]['remoteLinks']
+  referenceLocations: (data: ResearchNode['data']) => ReferenceLocation[]
+  onOpenReference: (reference: ReferenceLocation) => void
 }) {
   const [selectedNodes, setSelectedNodes] = useState<string[]>([])
   const [selectedEdges, setSelectedEdges] = useState<string[]>([])
@@ -205,10 +264,14 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
   const [flow, setFlow] = useState<ReactFlowInstance<FlowNode>>()
   const [error, setError] = useState('')
   const [tool, setTool] = useState<CanvasTool>('select')
+  const [propertiesOpen, setPropertiesOpen] = useState(false)
+  const overviewDrag = useRef(false)
+  const fittedOnOpen = useRef(false)
   const [connectionStart, setConnectionStart] = useState<string>()
   const canvasElement = useRef<HTMLDivElement>(null)
   const canJump = jumpTo !== undefined && page.nodes.some(node => node.id === jumpTo)
   const activeNode = selectedNodes.length === 1 ? page.nodes.find(node => node.id === selectedNodes[0]) : undefined
+  const activeEdge = !selectedNodes.length && selectedEdges.length === 1 ? page.edges.find(edge => edge.id === selectedEdges[0]) : undefined
   if (nodeState.projectNodes !== page.nodes || nodeState.selection !== selectedNodes) {
     setNodeState({
       projectNodes: page.nodes, selection: selectedNodes,
@@ -222,6 +285,29 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
   const nodes = useMemo(() => tool === 'connect' && sourceNode
     ? nodeState.nodes.map(node => node.id === sourceNode.id ? { ...node, className: 'rounded-lg ring-2 ring-indigo-500' } : node)
     : nodeState.nodes, [nodeState.nodes, sourceNode, tool])
+
+  const overviewRegions = overview?.regions
+  const fitCanvas = useCallback(() => {
+    if (!flow) return
+    if (!overviewRegions) { void flow.fitView(); return }
+    const container = canvasElement.current
+    if (!container?.clientWidth || !container.clientHeight) return
+    const bounds = { x: 0, y: 0,
+      width: Math.max(...overviewRegions.map(region => region.x + region.width)),
+      height: Math.max(...overviewRegions.map(region => region.y + region.height)),
+    }
+    const viewport = getViewportForBounds(bounds, container.clientWidth, container.clientHeight, 0.15, 1, 0.12)
+    void flow.setViewport(viewport)
+  }, [flow, overviewRegions])
+
+  useEffect(() => {
+    if (!flow?.viewportInitialized || !overview?.fitOnOpen || fittedOnOpen.current) return
+    const frame = requestAnimationFrame(() => {
+      fittedOnOpen.current = true
+      fitCanvas()
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [fitCanvas, flow, overview?.fitOnOpen])
 
   useEffect(() => {
     if (!canJump || !jumpTo || activeNode?.id === jumpTo) return
@@ -261,6 +347,10 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
     const removed = new Set(changes.getByType('remove').map(change => change.id))
     const committed = new Map(changes.getByType('position').flatMap(change =>
       change.position && !change.dragging ? [[change.id, change.position] as const] : []))
+    if (overview && committed.size && !overviewDrag.current) {
+      overview.drop(committed.keys().next().value!, committed)
+      committed.clear()
+    }
     if (selected.length || removed.size) setSelectedNodes(current => {
       const next = new Set(current.filter(id => !removed.has(id)))
       for (const change of selected) {
@@ -269,7 +359,7 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
       }
       return [...next]
     })
-    if (removed.size || committed.size) editPage(current => {
+    if (removed.size || (!overview && committed.size)) editPage(current => {
       const next = removed.size ? removeResearchNodes(current, removed) : current
       let moved = false
       const nodes = next.nodes.map(node => {
@@ -300,7 +390,7 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
   }
 
   function connect({ source, target }: Pick<Connection, 'source' | 'target'>) {
-    if (!validResearchConnection(page, source, target)) {
+    if (!validateConnection(source, target)) {
       setError('Choose a different target. Connections cannot repeat, point to themselves, or create a cycle.')
       return false
     }
@@ -327,7 +417,9 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
     }
   }
 
-  function addNode() {
+  function addNode(section: ResearchNodeType, resource?: ResearchNode['data']['resource']) {
+    const data = { section, resource, content: '', level: 1, order: 0 }
+    if (overview) { overview.addNode(data); return }
     const id = crypto.randomUUID()
     const box = document.getElementById('research-flow')?.getBoundingClientRect()
     const position = box && flow ? flow.screenToFlowPosition({
@@ -338,7 +430,7 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
       while (current.nodes.some(node => Math.abs(node.position.x - position.x) < 330 && Math.abs(node.position.y - y) < 170)) y += 190
       return {
         ...current, nodes: [...current.nodes, {
-          id, position: { x: position.x, y }, data: { section: 'custom', content: '', order: current.nodes.length, level: 1 },
+          id, position: { x: position.x, y }, data: { ...data, order: current.nodes.length },
         }],
       }
     })
@@ -402,7 +494,18 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" onKeyDownCapture={handleKey}>
       {actions && createPortal(
-        <Button size="sm" onClick={addNode}><Plus /> Add node</Button>, actions,
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild><Button size="sm"><Plus /> Add node <ChevronDown /></Button></DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onSelect={() => addNode('custom')}>Section</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => addNode('method')}>Method</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => addNode('conclusion')}>Conclusion</DropdownMenuItem>
+            <DropdownMenuSeparator />
+            {researchCardKinds.map(role => <DropdownMenuItem key={role} onSelect={() => addNode('custom', {
+              kind: 'research', role, status: role === 'review' || role === 'task' ? 'open' : undefined,
+            })}>{researchCardNames[role]}</DropdownMenuItem>)}
+          </DropdownMenuContent>
+        </DropdownMenu>, actions,
       )}
       <div className="shrink-0 border-b bg-background p-2">
         <div role="group" aria-label="Canvas tools" className="flex flex-wrap items-center gap-2">
@@ -412,6 +515,8 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
                 aria-label={label} title={`${label} (${shortcut})`} onClick={() => pickTool(mode)}><Icon /><span className="hidden sm:inline">{label}</span></Button>
             ))}
           </div>
+          {(activeNode || activeEdge) && <Button size="icon-sm" variant="ghost" className="lg:hidden" aria-label="Open Canvas properties"
+            onClick={() => setPropertiesOpen(open => !open)}><PanelRight /></Button>}
           <div className="flex gap-0.5">
             <Button size="icon-sm" variant="ghost" aria-label="Undo" title="Undo (Ctrl / Cmd + Z)" disabled={!canUndo}
               onClick={() => moveHistory('undo')}><Undo2 /></Button>
@@ -419,8 +524,8 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
               onClick={() => moveHistory('redo')}><Redo2 /></Button>
             <Button size="icon-sm" variant="ghost" aria-label="Delete Selection" title="Delete selection" disabled={!canDelete}
               onClick={deleteSelection}><Trash2 /></Button>
-            <Button size="icon-sm" variant="ghost" aria-label="Fit View" title="Fit all nodes" disabled={!page.nodes.length}
-              onClick={() => void flow?.fitView()}><Maximize /></Button>
+            <Button size="icon-sm" variant="ghost" aria-label="Fit View" title={overview ? 'Fit all pages' : 'Fit all nodes'} disabled={!overview && !page.nodes.length}
+              onClick={fitCanvas}><Maximize /></Button>
           </div>
           {tool === 'connect' && <p role="status" className="text-xs text-muted-foreground">
             {sourceNode ? `From ${nodeTitle(sourceNode.data)} · Choose a target · Esc to cancel` : 'Choose a source node, or drag from an outgoing handle.'}
@@ -428,17 +533,25 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
         </div>
         {error && <p role="alert" className="mt-1 text-sm text-destructive">{error}</p>}
       </div>
-      <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
+      <div className="relative flex min-h-0 flex-1">
         <div id="research-flow" className="relative min-h-24 min-w-0 flex-1 sm:min-h-40" ref={canvasElement} tabIndex={-1}>
           <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} defaultEdgeOptions={edgeDefaults}
             className="[color-scheme:light] [--xy-background-color:var(--muted)] [--xy-edge-stroke:var(--muted-foreground)] [--xy-edge-stroke-width:2] dark:[color-scheme:dark]"
             defaultMarkerColor={null}
             onInit={setFlow} onNodesChange={changeNodes} onEdgesChange={changeEdges} onConnect={connect}
+            onNodeDragStart={overview ? () => { overviewDrag.current = true } : undefined}
+            onNodeDragStop={overview ? (_, leader, moved) => {
+              overview.drop(leader.id, new Map([...moved, leader].map(node => [node.id, node.position])))
+              setNodeState(current => ({ ...current, nodes: reconcileFlowNodes(page.nodes, selectedNodes,
+                current.nodes.map(node => ({ ...node, dragging: false }))) }))
+              requestAnimationFrame(() => { overviewDrag.current = false })
+            } : undefined}
             onNodeClick={(_, node) => chooseEndpoint(node.id)}
             onPaneClick={() => { setConnectionStart(undefined); setError(''); canvasElement.current?.focus({ preventScroll: true }) }}
-            isValidConnection={connection => validResearchConnection(page, connection.source, connection.target)}
+            isValidConnection={connection => validateConnection(connection.source, connection.target)}
             nodesDraggable={tool === 'select'} nodesConnectable={tool === 'connect'} connectOnClick={tool === 'connect'}
             elementsSelectable={tool === 'select'} selectionOnDrag={tool === 'select'} deleteKeyCode={null}
+            multiSelectionKeyCode={['Meta', 'Control', 'Shift']}
             panOnDrag={tool === 'pan' || alternatePanButtons}
             defaultViewport={page.viewport} fitView={sample}
             onMoveEnd={(_, viewport) => updatePage(current =>
@@ -446,23 +559,42 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
                 ? current : { ...current, viewport })}
             edgesReconnectable={false} minZoom={0.15} maxZoom={3}>
             <Background />
+            {overview && <ViewportPortal>
+              {overview.regions.map(region => <div key={region.pageId} className="pointer-events-none absolute rounded-2xl border-2 border-primary/25 bg-primary/5"
+                style={{ left: region.x, top: region.y, width: region.width, height: region.height }}>
+                <button type="button" className="nodrag nopan pointer-events-auto m-2 rounded-md bg-background px-3 py-1 text-lg font-medium shadow-sm hover:bg-accent"
+                  onClick={() => overview.enterPage(region.pageId)}>{region.name} <span className="text-sm text-muted-foreground">· {region.count} nodes</span></button>
+              </div>)}
+            </ViewportPortal>}
             <Controls showInteractive={false} showFitView={false} />
           </ReactFlow>
           {!page.nodes.length && <p className="pointer-events-none absolute inset-x-4 top-6 text-center text-sm text-muted-foreground">
             Add a research node to organize your paper.
           </p>}
         </div>
-        {activeNode && (
+        {(activeNode || activeEdge) && <div className={`min-h-0 w-72 max-w-[90vw] overflow-auto border-l bg-background lg:relative lg:block ${propertiesOpen
+          ? 'absolute inset-y-0 right-0 z-20 shadow-lg' : 'hidden'}`}>
+          <Button size="icon-sm" variant="ghost" className="float-right m-1 lg:hidden" aria-label="Close Canvas properties"
+            onClick={() => setPropertiesOpen(false)}><X /></Button>
+          {activeNode ? (
           <NodeDetails key={activeNode.id} node={activeNode} page={page}
             onOpenSource={sourceStatus(activeNode.data) === 'available' ? () => onOpenSource(activeNode.data) : undefined}
             sourceUnavailable={sourceStatus(activeNode.data) === 'unavailable'}
-            onUnlinkSource={activeNode.data.sourceAnchor ? () => onUnlinkSource(activeNode.id) : undefined}
+            onUnlinkSource={activeNode.data.sourceAnchor || activeNode.data.figureAnchor ? () => onUnlinkSource(activeNode.id) : undefined}
+            canParent={canParent} remoteLinks={remoteLinks(activeNode.id)}
+            references={referenceLocations(activeNode.data)} onOpenReference={onOpenReference}
             onFinishEdit={onFinishEdit}
             onEdit={(data, field) => editPage(current => ({
               ...current, nodes: current.nodes.map(node => node.id === activeNode.id ? { ...node, data } : node),
             }), field && `${activeNode.id}:${field}`)}
             onConnect={target => connect({ source: activeNode.id, target })} />
-        )}
+          ) : <aside className="space-y-2 p-3" aria-label="Connection properties">
+            <h2 className="font-semibold">Connection</h2>
+            {activeEdge && <p className="text-sm">{[activeEdge.source, activeEdge.target]
+              .map(id => page.nodes.find(node => node.id === id)).flatMap(node => node ? [nodeTitle(node.data)] : []).join(' → ')}</p>}
+            <Button size="sm" variant="outline" onClick={deleteSelection}>Remove connection</Button>
+          </aside>}
+        </div>}
       </div>
     </div>
   )

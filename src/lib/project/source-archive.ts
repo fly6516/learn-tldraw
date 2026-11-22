@@ -1,7 +1,7 @@
 import JSZip from 'jszip'
 import type { ProjectFileSystem } from './types'
 
-const sourceExtension = /\.(tex|bib|cls|sty|bst|bbl|cfg|def|ltx|tikz|txt|md|csv|json|toml)$/i
+export const projectTextExtension = /\.(tex|bib|cls|sty|bst|bbl|cfg|def|ltx|tikz|txt|md|csv|tsv|jsonl?|toml)$/i
 const imageTypes: Record<string, string> = {
   png: 'image/png', jpeg: 'image/jpeg', jpg: 'image/jpeg',
   gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', pdf: 'application/pdf',
@@ -35,7 +35,7 @@ export async function importSourceArchive(file: File, maxBytes = 128 * 1024 * 10
     const bytes = await entry.async('arraybuffer')
     size += bytes.byteLength
     if (size > maxBytes) throw new Error('Extracted project exceeds the size limit.')
-    const editable = sourceExtension.test(name)
+    const editable = projectTextExtension.test(name)
     const extension = name.split('.').at(-1)!.toLowerCase()
     const mimeType = editable ? 'text/plain' : imageTypes[extension] ?? 'application/octet-stream'
     const blob = new Blob([bytes], { type: mimeType })

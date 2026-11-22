@@ -11,8 +11,9 @@ import { FilePreviewDialog } from './FilePreviewDialog'
 import { useProjectFileSystem } from '@/contexts/ProjectFileSystemContext'
 import type { FileTreeNode } from '@/lib/project/file-system'
 import { Button } from '@/components/ui/button'
+import { projectTextExtension } from '@/lib/project/source-archive'
 
-export function ProjectPanel({ onOpenWriting }: { onOpenWriting: (path?: string) => void }) {
+export function ProjectPanel({ onOpenWriting, onAddMaterial }: { onOpenWriting: (path?: string) => void; onAddMaterial?: (path: string) => void }) {
   const { fileTree, getFileContent, addImage, addFile, deleteFile } = useProjectFileSystem()
 
   const [previewNode, setPreviewNode] = useState<FileTreeNode | null>(null)
@@ -34,7 +35,7 @@ export function ProjectPanel({ onOpenWriting }: { onOpenWriting: (path?: string)
 
   const handleFileDownload = (node: FileTreeNode) => {
     const content = getFileContent(node.path)
-    if (!content) return
+    if (content == null) return
 
     let blob: Blob
     if (typeof content === 'string') {
@@ -58,6 +59,9 @@ export function ProjectPanel({ onOpenWriting }: { onOpenWriting: (path?: string)
 
     if (file.type.startsWith('image/')) {
       addImage(file.name, file)
+    } else if (!file.type.startsWith('text/') && !projectTextExtension.test(file.name)) {
+      addFile({ name: file.name, type: 'asset', path: file.name, blob: file, size: file.size,
+        mimeType: file.type || 'application/octet-stream', metadata: { editable: false } })
     } else {
       const reader = new FileReader()
       reader.onload = (e) => {
@@ -68,6 +72,9 @@ export function ProjectPanel({ onOpenWriting }: { onOpenWriting: (path?: string)
           type: 'editable',
           path: file.name,
           content,
+          blob: file,
+          mimeType: file.type || 'text/plain',
+          size: file.size,
           metadata: {
             editable: true,
             description: 'Uploaded file',
@@ -111,6 +118,7 @@ export function ProjectPanel({ onOpenWriting }: { onOpenWriting: (path?: string)
   }
 
   const handlePreviewClose = () => {
+    if (previewNode?.path.startsWith('blob:')) URL.revokeObjectURL(previewNode.path)
     setPreviewNode(null)
     setPreviewContent('')
   }
@@ -136,6 +144,7 @@ export function ProjectPanel({ onOpenWriting }: { onOpenWriting: (path?: string)
         fileTree={fileTree}
         onFileClick={handleFileClick}
         onFileEdit={node => onOpenWriting(node.path)}
+        onAddMaterial={onAddMaterial && (node => onAddMaterial(node.path))}
         onFileDownload={handleFileDownload}
         onFileUpload={handleFileUpload}
         onFileDelete={handleFileDelete}

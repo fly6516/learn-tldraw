@@ -1,4 +1,5 @@
 import type { ProjectFileSystem } from './types'
+import type { ProjectSnapshot, ProjectSnapshotInfo } from './snapshots'
 import { applyWritingDrafts, draftConflicts, sameDraft, type WritingDraft, type WritingDrafts, type WritingKey, type WritingView } from './writing-drafts'
 
 const storeName = 'projects'
@@ -25,6 +26,74 @@ function complete(transaction: IDBTransaction) {
 function draftRange(key: WritingKey) {
     // Projects use string keys. Compound keys let drafts and project saves share a transaction.
     return IDBKeyRange.bound(['draft', ...key], ['draft', ...key, []], false, true)
+}
+
+function snapshotEntry(key: WritingKey, id: string) {
+    return ['snapshot', ...key, id]
+}
+
+function snapshotList(key: WritingKey) {
+    return ['snapshots', ...key]
+}
+
+export async function listProjectSnapshots(database: IDBDatabase, key: WritingKey) {
+    const transaction = database.transaction(storeName)
+    const request = transaction.objectStore(storeName).get(snapshotList(key))
+    await complete(transaction)
+    return (request.result ?? []) as ProjectSnapshotInfo[]
+}
+
+export async function readProjectSnapshot(database: IDBDatabase, key: WritingKey, id: string) {
+    const transaction = database.transaction(storeName)
+    const request = transaction.objectStore(storeName).get(snapshotEntry(key, id))
+    await complete(transaction)
+    return request.result as ProjectFileSystem | undefined
+}
+
+function storeSnapshot(store: IDBObjectStore, key: WritingKey, snapshots: ProjectSnapshotInfo[], snapshot: ProjectSnapshot) {
+    const { project, ...info } = snapshot
+    store.add(project, snapshotEntry(key, info.id))
+    store.put([info, ...snapshots], snapshotList(key))
+}
+
+export async function createProjectSnapshot(database: IDBDatabase, key: WritingKey, snapshot: ProjectSnapshot) {
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    const store = transaction.objectStore(storeName)
+    const list = store.get(snapshotList(key))
+    list.onsuccess = () => storeSnapshot(store, key, list.result ?? [], snapshot)
+    await complete(transaction)
+}
+
+export async function restoreProjectSnapshot(database: IDBDatabase, key: WritingKey, id: string, checkpoint: ProjectSnapshot) {
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    const store = transaction.objectStore(storeName)
+    const current = store.get(key[0])
+    const saved = store.get(snapshotEntry(key, id))
+    const list = store.get(snapshotList(key))
+    const drafts = store.count(draftRange(key))
+    let restored: ProjectFileSystem | undefined
+    let error = 'The selected snapshot is unavailable.'
+    drafts.onsuccess = () => {
+        if (drafts.result) {
+            error = 'Save or discard the local drafts in Writing before restoring a snapshot.'
+            return
+        }
+        if (current.result?.metadata.createdAt !== key[1]) {
+            error = 'This project changed in another tab. Reload it before restoring.'
+            return
+        }
+        const project = saved.result as ProjectFileSystem | undefined
+        if (!project || project.metadata.createdAt !== key[1]) return
+        const previous = current.result as ProjectFileSystem
+        storeSnapshot(store, key, list.result ?? [], {
+            ...checkpoint, project: { ...previous, canvas: previous.canvas ?? checkpoint.project.canvas },
+        })
+        restored = project
+        store.put(project, key[0])
+    }
+    await complete(transaction)
+    if (!restored) throw new Error(error)
+    return restored
 }
 
 export async function readWritingState(database: IDBDatabase, key: WritingKey) {

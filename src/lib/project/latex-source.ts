@@ -16,11 +16,18 @@ export function sourcePosition(source: string, offset: number) {
 }
 
 // Replace comments and literal code with spaces while retaining source offsets.
-export function maskLatexCode(source: string) {
+export function maskLatexCode(source: string, keepListingDelimiters = false) {
   return source.replace(
-    /\\begin\{(verbatim\*?|lstlisting|minted)\}[\s\S]*?\\end\{\1\}|\\verb\*?([^\r\n\w\s])[^\r\n]*?\2|\\[\s\S]|%[^\r\n]*/g,
-    (token, environment, delimiter) => environment || delimiter || token[0] === '%'
-      ? token.replace(/[^\r\n]/g, ' ') : token,
+    /\\begin\s*\{(verbatim\*?|lstlisting|minted)\}[\s\S]*?(?:\\end\s*\{\1\}|$)|\\verb\*?([^\r\n\w\s])[^\r\n]*?\2|\\[\s\S]|%[^\r\n]*/g,
+    (token, environment, delimiter) => {
+      if (environment && keepListingDelimiters) {
+        const opening = token.indexOf('}') + 1
+        const closing = token.search(/\\end\s*\{[^{}]+\}$/)
+        return token.slice(0, opening) + token.slice(opening, closing < 0 ? undefined : closing)
+          .replace(/[^\r\n]/g, ' ') + (closing < 0 ? '' : token.slice(closing))
+      }
+      return environment || delimiter || token[0] === '%' ? token.replace(/[^\r\n]/g, ' ') : token
+    },
   )
 }
 

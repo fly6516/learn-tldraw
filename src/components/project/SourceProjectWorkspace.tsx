@@ -19,10 +19,11 @@ import { ReferencesPanel } from './ReferencesPanel'
 import { OutlinePanel, type OutlineCanvasActions } from './OutlinePanel'
 import { buildProjectOutline } from '@/lib/project/outline'
 import { indexOutline } from '@/lib/project/section-links'
-import { checkCitations, collectBibliography } from '@/lib/project/references'
+import { readProjectLatexBlocks, type LatexBlock } from '@/lib/project/latex-blocks'
+import { checkCitations, collectBibliography, indexCanvasReferences, type BibliographyEntry } from '@/lib/project/references'
 import { sourcePosition, type SourceLocation } from '@/lib/project/latex-source'
 import type { SourceProblem } from './MonacoSourceEditor'
-import type { CompileDiagnostic } from '@/lib/project/compile-diagnostics'
+import type { CompileDiagnostic, CompileReport } from '@/lib/project/compile-diagnostics'
 import { findPdfRegion, type SyncRegion } from '@/lib/project/source-sync'
 import { applyWritingDrafts, draftConflicts, editableSource, type WritingDrafts } from '@/lib/project/writing-drafts'
 import { clearWritingState, commitWritingDrafts } from '@/lib/project/storage'
@@ -91,12 +92,14 @@ function Files({ nodes, selected, main, onSelect, dirty, sourcePaths, onSetMain 
 }
 
 type GenerateSource = (project: ProjectFileSystem, onNode?: (node: ResearchNodeData, line: number) => void) => string
+type CompileSnapshot = { main: string; files: ProjectFileSystem['files'] }
 
 export interface SourceWorkspaceHandle {
   openFile: (path: string, line?: number) => void
   locate: (location: SourceLocation) => void
   openGeneratedNode: (node: ResearchNodeData) => void
   confirmLeave: () => boolean
+  snapshotRestoreBlock: () => string | undefined
   prepareReplacement: () => Promise<boolean>
 }
 
@@ -117,7 +120,7 @@ function editorSourcePath(model: editor.ITextModel | null) {
   return path.slice(path.indexOf('/', 1) + 1)
 }
 
-export function SourceProjectWorkspace({ project, ref, active, actions, generateSource, onOpenCanvas, outlineCanvas, onArchiveOutline }: {
+export function SourceProjectWorkspace({ project, ref, active, actions, generateSource, onOpenCanvas, outlineCanvas, onArchiveOutline, referenceCanvasAction }: {
   project: ProjectFileSystem
   ref: Ref<SourceWorkspaceHandle>
   active: boolean
@@ -125,7 +128,9 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   generateSource?: GenerateSource
   onOpenCanvas: () => void
   outlineCanvas: OutlineCanvasActions
-  onArchiveOutline: (outline: { project: string; index: ReturnType<typeof indexOutline> } | undefined) => void
+  onArchiveOutline: (outline: { project: string; index: ReturnType<typeof indexOutline>; blocks: LatexBlock[];
+    references: ReturnType<typeof indexCanvasReferences> } | undefined) => void
+  referenceCanvasAction: (entry: BibliographyEntry) => { label: string; run: () => void } | undefined
 }) {
   const { setFileSystem, storage, storageKey, acceptStoredProject } = useProjectFileSystem()
   const journal = useWritingDrafts(storage, storageKey, project.metadata.createdAt)
@@ -147,10 +152,11 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const [error, setError] = useState('')
   const [log, setLog] = useState('')
   const [diagnostics, setDiagnostics] = useState<CompileDiagnostic[]>([])
-  const [diagnosticSources, setDiagnosticSources] = useState<ProjectFileSystem['files']>()
+  const [diagnosticSnapshot, setDiagnosticSnapshot] = useState<CompileSnapshot>()
+  const [hasWarnings, setHasWarnings] = useState(false)
   const [pdfUrl, setPdfUrl] = useState('')
   const [pdfFilename, setPdfFilename] = useState('')
-  const [lastCompile, setLastCompile] = useState<{ main: string; files: ProjectFileSystem['files'] }>()
+  const [lastCompile, setLastCompile] = useState<CompileSnapshot>()
   const [sourceMap, setSourceMap] = useState<SyncRegion[]>([])
   const [pdfPage, setPdfPage] = useState(1)
   const [pdfTarget, setPdfTarget] = useState<SyncRegion | null>(null)
@@ -185,25 +191,33 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   }, [generateSource])
   const workingProject = useMemo(() => withGeneratedSource(applyWritingDrafts(project, drafts)), [drafts, project, withGeneratedSource])
   const workingFiles = workingProject.files
-  const headings = useMemo(() => buildProjectOutline({ files: workingFiles }, main), [workingFiles, main])
-  const archiveIndex = useMemo(() => project.metadata.sourceMode === 'archive' && journal.ready
-    ? indexOutline(headings) : undefined, [headings, journal.ready, project.metadata.sourceMode])
-  useLayoutEffect(() => {
-    onArchiveOutline(archiveIndex ? { project: project.metadata.createdAt, index: archiveIndex } : undefined)
-  }, [archiveIndex, onArchiveOutline, project.metadata.createdAt])
+  const { headings, blocks, index } = useMemo(() => {
+    const source = { files: workingFiles }
+    const documents = new Map<string, string>()
+    const preamble = new Map<string, string>()
+    const headings = buildProjectOutline(source, main, undefined, (path, text) => documents.set(path, text),
+      (path, text) => preamble.set(path, text))
+    const blocks = readProjectLatexBlocks(source, main, documents, preamble)
+    return { headings, blocks, index: indexOutline(headings) }
+  }, [workingFiles, main])
   const source = currentFile?.content ?? ''
   const workingFile = workingProject.files.get(selected)
   const draft = workingFile && 'content' in workingFile ? workingFile.content ?? '' : ''
   const pdfStale = Boolean(lastCompile && (lastCompile.main !== main || !sameSources(lastCompile.files, workingProject.files)))
+  const diagnosticsStale = Boolean(diagnosticSnapshot && (diagnosticSnapshot.main !== main
+    || !sameSources(diagnosticSnapshot.files, workingFiles)))
+  const currentWarnings = hasWarnings && !diagnosticsStale
   const tree = useMemo(() => getFileTree(project), [project])
   const bibliography = useMemo(() => collectBibliography(workingProject), [workingProject])
-  const currentDiagnostics = useMemo(() => diagnostics.filter(issue => {
-    const file = workingProject.files.get(issue.path)
-    const original = diagnosticSources?.get(issue.path)
-    return file && original && 'content' in file && 'content' in original
-      && typeof file.content === 'string' && file.content === original.content
+  const references = useMemo(() => indexCanvasReferences(workingProject, bibliography), [workingProject, bibliography])
+  useLayoutEffect(() => {
+    onArchiveOutline(journal.ready ? { project: project.metadata.createdAt, index, blocks, references } : undefined)
+  }, [index, blocks, references, journal.ready, onArchiveOutline, project.metadata.createdAt])
+  const currentDiagnostics = useMemo(() => diagnosticsStale ? [] : diagnostics.filter(issue => {
+    const file = workingFiles.get(issue.path)
+    return file && 'content' in file && typeof file.content === 'string'
       && issue.line <= file.content.split(/\r\n|\n|\r/).length
-  }), [diagnostics, diagnosticSources, workingProject.files])
+  }), [diagnostics, diagnosticsStale, workingFiles])
   const problems = useMemo<SourceProblem[]>(() => [
     ...currentDiagnostics,
     ...checkCitations(workingProject, bibliography).map(issue => ({
@@ -294,6 +308,11 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   useImperativeHandle(ref, () => ({
     openFile,
     locate,
+    snapshotRestoreBlock: () => {
+      if (locked || journal.pending) return 'Wait for Writing to finish its current operation before restoring a snapshot.'
+      if (dirty) return 'Save or discard the local drafts in Writing before restoring a snapshot.'
+      if (journal.loadError) return 'Local drafts could not be checked. Reopen the project before restoring a snapshot.'
+    },
     confirmLeave: () => !unprotected || window.confirm('Some drafts have not been saved locally. Leave this page?'),
     async prepareReplacement() {
       if (writeInProgress.current || !journal.ready || !confirmDiscard()) return false
@@ -386,8 +405,6 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   function markSourceChanged() {
     setPdfTarget(null)
     setSyncMessage('')
-    setDiagnostics([])
-    setDiagnosticSources(undefined)
     setError('')
   }
 
@@ -436,21 +453,21 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     setError('')
     setLog('')
     setDiagnostics([])
-    setDiagnosticSources(undefined)
+    setDiagnosticSnapshot(undefined)
+    setHasWarnings(false)
     try {
-      const saved = await commitDrafts(drafts)
-      if (!saved || controller.signal.aborted) return
-      const compiledProject = withGeneratedSource(saved)
-      const archive = await exportSourceArchive(compiledProject)
+      const snapshot = { main, files: workingFiles }
+      const archive = await exportSourceArchive(workingProject)
       const response = await fetch(`/api/latex/compile?main=${encodeURIComponent(main)}&sync=1`, {
         method: 'POST', body: archive, signal: controller.signal,
       })
       if (!response.ok) {
         const failure = await response.json()
+        if (controller.signal.aborted) return
         setError(failure.error)
         setLog(failure.log ?? '')
         setDiagnostics(failure.diagnostics ?? [])
-        setDiagnosticSources(compiledProject.files)
+        setDiagnosticSnapshot(snapshot)
         setPanel('problems')
         return
       }
@@ -459,11 +476,19 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       const pdf = result.get('pdf')
       if (!(pdf instanceof Blob)) throw new Error('The compiler did not return a PDF.')
       const map = result.get('sourceMap')
+      const report = result.get('report')
+      if (typeof report === 'string') {
+        const { diagnostics, hasWarnings, log } = JSON.parse(report) as CompileReport
+        setDiagnostics(diagnostics)
+        setHasWarnings(hasWarnings)
+        setLog(log)
+        setDiagnosticSnapshot(snapshot)
+      }
       setSourceMap(typeof map === 'string' ? JSON.parse(map) : [])
       setPdfTarget(null)
       setPdfUrl(URL.createObjectURL(pdf))
       setPdfFilename(main.split('/').at(-1)?.replace(/\.tex$/i, '.pdf') ?? 'project.pdf')
-      setLastCompile({ main, files: compiledProject.files })
+      setLastCompile(snapshot)
       setNarrowView('pdf')
     } catch (cause) {
       if (controller.signal.aborted) return
@@ -546,7 +571,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
                   {navigation === 'files'
                     ? <Files nodes={tree} selected={selected} main={main} dirty={drafts} sourcePaths={sourcePaths}
                         onSelect={openFile} onSetMain={setMain} />
-                    : <OutlinePanel headings={headings} main={main} onLocate={locate} canvas={outlineCanvas} />}
+                    : <OutlinePanel headings={headings} blocks={blocks} main={main} onLocate={locate} canvas={outlineCanvas} />}
                 </div>
               )}
             </aside>
@@ -587,8 +612,9 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
               </div>
               {pdfUrl ? <>
                 <div className="shrink-0 border-b bg-white px-3 py-1.5 text-xs">
-                  <p className={pdfStale ? 'font-medium text-amber-800' : 'text-slate-600'}>
-                    Last successful compile{pdfStale ? ' · Out of date' : ' · Up to date'}{busy ? ' · Compiling…' : ''}
+              <p className={pdfStale ? 'font-medium text-amber-800' : 'text-slate-600'}>
+                Last successful compile{pdfStale ? ' · Out of date' : ' · Up to date'}
+                {!pdfStale && dirty && !conflicts.length && ' · Includes local drafts'}{busy && ' · Compiling…'}
                   </p>
                   <p role="status" className="break-words text-slate-600">
                     {busy ? 'Updating PDF…' : pdfStale ? 'Recompile to restore source and PDF navigation.'
@@ -615,9 +641,9 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
             className="gap-1 px-1.5 text-xs sm:gap-1.5 sm:px-3 sm:text-sm" aria-expanded={panel === tab} aria-controls="writing-tools-content" disabled={tab === 'ai' && (!isTex || readOnly)}
             onClick={() => setPanel(current => current === tab ? null : tab)}>
             <Icon className="hidden sm:block" /> {label}
-            {tab === 'problems' && (problems.length > 0 || error) && <span className={currentDiagnostics.some(problem => problem.severity === 'error') || error
+            {tab === 'problems' && (problems.length > 0 || error || currentWarnings) && <span className={currentDiagnostics.some(problem => problem.severity === 'error') || error
               ? 'rounded-full bg-red-100 px-1.5 text-xs text-red-900' : 'rounded-full bg-amber-100 px-1.5 text-xs text-amber-900'}>
-              {problems.length || 'Failed'}
+              {problems.length || (error ? 'Failed' : 'Warnings')}
             </span>}
           </Button>)}
           {panel && <Button size="icon-sm" variant="ghost" aria-label="Collapse writing tools" className="ml-auto"
@@ -626,7 +652,8 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         <div id="writing-tools-content" hidden={!panel} className={panel ? 'h-[min(34dvh,20rem)] min-h-0 overflow-auto border-t' : undefined}>
           {panel === 'problems' && <div className="space-y-3 p-3">
             {error && <p role="alert" className="rounded-md bg-red-50 p-2 text-sm text-red-800">{error}</p>}
-            {!problems.length && !error && <p className="text-sm text-slate-600">No problems detected.</p>}
+            {currentWarnings && !currentDiagnostics.length && <p className="text-sm text-amber-800">Compilation succeeded with warnings. See the compiler log for details.</p>}
+            {!problems.length && !error && !currentWarnings && <p className="text-sm text-slate-600">No problems detected.</p>}
             <ul className="space-y-1">
               {problems.map((problem, index) => <li key={[problem.path, problem.line, index].join(':')}>
                 <button type="button" onClick={() => openFile(problem.path, problem.line, problem.location, true)}
@@ -640,12 +667,12 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
               </li>)}
             </ul>
             {log && <details className="rounded-md border p-2 text-xs" open={!currentDiagnostics.length && Boolean(error)}>
-              <summary className="cursor-pointer font-medium">Compiler log</summary>
+              <summary className="cursor-pointer font-medium">Compiler log{diagnosticsStale && ' · Previous source snapshot'}</summary>
               <pre className="mt-2 whitespace-pre-wrap break-words">{log}</pre>
             </details>}
           </div>}
           {panel === 'references' && <ReferencesPanel project={workingProject} entries={bibliography} path={selected} draft={draft}
-            canInsert={isTex && !readOnly && !locked} onInsert={insertReference} onLocate={locate} />}
+            canInsert={isTex && !readOnly && !locked} onInsert={insertReference} onLocate={locate} canvasAction={referenceCanvasAction} />}
           {panel === 'ai' && isTex && !readOnly && <ChapterAiPanel key={selected} project={workingProject} path={selected} main={main}
             source={source} draft={draft} log={log} bibliography={bibliography} disabled={locked}
             onApply={text => {

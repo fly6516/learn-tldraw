@@ -31,14 +31,14 @@ export function downloadFile(content: string, filename: string, mimeType: string
 }
 
 export function generateProjectSource(page: ResearchPage, fileSystem: ProjectFileSystem,
-    onNodeLocation?: Parameters<typeof exportToLatexFile>[3]): string {
+    onNodeLocation?: Parameters<typeof exportToLatexFile>[3], preserveOrder = false): string {
     if (fileSystem.metadata.sourceMode === 'archive') {
         const main = fileSystem.files.get(fileSystem.metadata.mainFile ?? '')
         return main && 'content' in main ? main.content ?? '' : ''
     }
-    return exportToLatexFile(collectResearchNodes(page, true), fileSystem, {
+    return exportToLatexFile(collectResearchNodes(page, !preserveOrder), fileSystem, {
         format: 'tex',
-        preserveNodeOrder: Boolean(collectArrowOrderedNodes(page)),
+        preserveNodeOrder: preserveOrder || Boolean(collectArrowOrderedNodes(page)),
     }, onNodeLocation)
 }
 
@@ -47,7 +47,8 @@ export function generateProjectSource(page: ResearchPage, fileSystem: ProjectFil
  */
 export async function exportResearchToLatexWithFileSystem(
     page: ResearchPage,
-    fileSystem: ProjectFileSystem | null
+    fileSystem: ProjectFileSystem | null,
+    preserveOrder = false,
 ): Promise<void> {
     try {
         if (!fileSystem) {
@@ -56,14 +57,14 @@ export async function exportResearchToLatexWithFileSystem(
         }
 
         // Collect nodes from editor
-        const nodes = collectResearchNodes(page, true)
+        const nodes = collectResearchNodes(page, !preserveOrder)
 
         // Export to zip using the enhanced exporter
         const zipBlob = fileSystem.metadata.sourceMode === 'archive'
             ? await exportSourceArchive(fileSystem)
             : await exportToLatexZip(nodes, fileSystem, {
             format: 'zip',
-            preserveNodeOrder: Boolean(collectArrowOrderedNodes(page)),
+            preserveNodeOrder: preserveOrder || Boolean(collectArrowOrderedNodes(page)),
             includeFigures: true,
             includeReferences: true,
         })

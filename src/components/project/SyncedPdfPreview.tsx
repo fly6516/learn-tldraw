@@ -2,7 +2,10 @@
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { ArrowLeft, ArrowRight, Minus, Plus } from 'lucide-react'
-import { getDocument, PDFWorker, TextLayer, type PDFDocumentProxy, type PDFPageProxy, type PageViewport } from 'pdfjs-dist'
+// The minified distribution avoids a collision between Webpack's export variables
+// and the export variables embedded in the unminified PDF.js bundle.
+import { getDocument, PDFWorker, TextLayer } from 'pdfjs-dist/build/pdf.min.mjs'
+import type { PDFDocumentProxy, PDFPageProxy, PageViewport } from 'pdfjs-dist'
 import { Button } from '@/components/ui/button'
 import { findSourceRegion, type SyncRegion } from '@/lib/project/source-sync'
 import styles from './SyncedPdfPreview.module.css'

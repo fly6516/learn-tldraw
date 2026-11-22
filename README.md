@@ -40,9 +40,10 @@ Set `TECTONIC_ONLY_CACHED=1` to compile offline once the required files are cach
    its cursor position. Use **Save** or Ctrl/Cmd+S to save drafts to the project, or **Discard
    drafts** to remove the local edits. If the saved file changed, compare its current source
    with the draft before proceeding. Generated `main.tex` is read-only.
-3. Choose **Compile PDF** to save your drafts and compile the whole project from the main
-   file's directory. **PDF Preview** shows the latest successful build. Citation issues and
-   compiler errors with a source location are underlined in the editor. Select an entry in
+3. Choose **Compile PDF** to preview the project with all current drafts. Use **Save** or
+   **Ctrl/Cmd+S** to write those drafts to the project. **PDF Preview** keeps the last
+   successful build if compilation fails. Citation issues and compiler warnings or errors
+   with source locations are underlined in the editor. Select an entry in
    **Problems** to jump to its file and line, or expand **Compiler log** for more detail.
    On desktop, **Problems**, **References**, and **Chapter AI** open below the editor and PDF.
    On narrow screens, use **Source**, **PDF**, and the **Files** drawer. **Project menu →
@@ -57,6 +58,39 @@ The compile endpoint accepts ZIPs up to 32 MB, including after extraction. The s
 supports XeLaTeX and BibTeX workflows. Documents that require a different engine, Biber, or
 shell escape may need external compilation. The canvas preview and print workflow are also
 available in **Canvas** and the project menu.
+
+## Project snapshots
+
+Open **Project menu → Project Snapshots** to name a version of the saved source files,
+Canvas pages and attachments. **Review restore** shows which files, pages and project
+settings would change. Save or discard local Writing drafts before restoring. Each restore
+keeps a recovery snapshot of the project it replaces. Snapshots live in this browser and
+are scoped to the project. Use **Project Backup** to move a saved project between browsers.
+
+## Whole-paper Canvas and LaTeX blocks
+
+Open **Whole paper** to edit all Canvas pages together, or choose **Single page** to focus
+on one page. Select a page in the Explorer or in the whole-paper canvas to open it.
+In the whole-paper canvas, drag a card or selected group into another page region to move it.
+Cross-page connections remain visible there and appear as links in the single-page node inspector.
+**Auto arrange** previews alignment and continuation pages for pages above 12 cards.
+Undo reverses a move or an arrangement in one step.
+
+Use **Explorer → Project Files** to add an existing image to Canvas. In Writing, **Outline →
+LaTeX blocks** lists figures, tables, formulas and formula groups, algorithms, listings,
+theorems, proofs and environments declared in the project. Select a destination page and
+add a card, or locate an existing card. Formula cards preview supported LaTeX math.
+Use **Appendix headings only** to focus the outline on supplemental sections.
+In Writing, open **References** to add a unique bibliography entry to any Canvas page.
+The card links to the current bibliography entry, and its properties list the source citations.
+In Canvas, **Explorer → Project Files** adds datasets and attachments. Those cards link to
+the project path and can download the original file. **Add node** includes questions, hypotheses,
+evidence, notes, review comments, to-dos and custom cards. Method and Conclusion use the existing
+section types. Research cards stay on the Canvas when generating the paper's LaTeX.
+Linked graphics support literal `\includegraphics` or `\XeTeXpicfile` paths. A unique `\label`
+preserves the link when a caption changes. A table card shows the caption, label and source link.
+Generated LaTeX includes the section cards in the entire project in document order. Repositioning
+or repaging the cards preserves that order. Images and tables stay attached to the project.
 
 ## AI chapter editing
 

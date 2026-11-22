@@ -158,10 +158,8 @@ export function addFigure(
   fileName: string,
   blob: Blob
 ): ProjectFileSystem {
-  const figuresDir = fs.files.get('figures/') as ProjectDirectory
-  if (!figuresDir) {
-    throw new Error('Figures directory not found')
-  }
+  const entry = fs.files.get('figures/')
+  const figuresDir = entry && 'files' in entry ? entry : { name: 'figures', path: 'figures/', files: [] }
 
   const figure: ProjectFile = {
     name: fileName,
@@ -180,7 +178,8 @@ export function addFigure(
   // Add to figures directory
   const newFiguresDir: ProjectDirectory = {
     ...figuresDir,
-    files: [...figuresDir.files, figure],
+    type: 'directory',
+    files: [...figuresDir.files.filter(file => file.path !== figure.path), figure],
   }
 
   const newFiles = new Map(fs.files)

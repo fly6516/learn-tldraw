@@ -1,10 +1,11 @@
 'use client'
 
-import { useDeferredValue, useMemo, useState } from 'react'
+import { useContext, useDeferredValue, useMemo, useState } from 'react'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { canvasSearchLimit, searchCanvasNodes, type CanvasLocation } from '@/lib/project/canvas-search'
 import type { ResearchPage } from '@/lib/project/research-graph'
+import { CanvasBibliographyContext, CanvasBlockContext } from './CanvasResource'
 
 export function CanvasSearchDialog({ pages, onOpenChange, onLocate }: {
   pages: ResearchPage[]
@@ -13,7 +14,10 @@ export function CanvasSearchDialog({ pages, onOpenChange, onLocate }: {
 }) {
   const [query, setQuery] = useState('')
   const deferredQuery = useDeferredValue(query)
-  const { matches, limited } = useMemo(() => searchCanvasNodes(pages, deferredQuery), [pages, deferredQuery])
+  const blocks = useContext(CanvasBlockContext)
+  const bibliography = useContext(CanvasBibliographyContext)
+  const { matches, limited } = useMemo(() => searchCanvasNodes(pages, deferredQuery, blocks, bibliography),
+    [pages, deferredQuery, blocks, bibliography])
   const searching = deferredQuery !== query
   return (
     <Dialog open onOpenChange={onOpenChange}>

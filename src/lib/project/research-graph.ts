@@ -1,6 +1,8 @@
 import { z } from 'zod'
 import { RESEARCH_NODE_META, type ResearchNodeType } from '@/app/research/research-node'
 import type { ResearchNodeData } from './types'
+import { latexBlockKinds } from './latex-block-kinds'
+import { researchCardKinds, researchCardStatuses } from './canvas-card-kinds'
 
 const position = z.object({ x: z.number(), y: z.number() })
 const nodeSchema = z.object({
@@ -14,6 +16,18 @@ const nodeSchema = z.object({
     parentId: z.string().optional(),
     customLabel: z.string().optional(),
     tags: z.array(z.string()).optional(),
+    resource: z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('image'), path: z.string().min(1).optional() }),
+      z.object({ kind: z.literal('table') }),
+      z.object({ kind: z.enum(['equation', 'algorithm', 'listing', 'theorem', 'environment']), environment: z.string().min(1) }),
+      z.object({ kind: z.literal('bibliography'), key: z.string().min(1), project: z.string().min(1) }),
+      z.object({ kind: z.enum(['dataset', 'attachment']), path: z.string().min(1) }),
+      z.object({ kind: z.literal('research'), role: z.enum(researchCardKinds),
+        customType: z.string().trim().min(1).optional(), status: z.enum(researchCardStatuses).optional() }),
+    ]).optional(),
+    // Keep this key stable for existing Canvas backups.
+    figureAnchor: z.object({ project: z.string(), kind: z.enum(latexBlockKinds),
+      label: z.string().optional(), path: z.string(), caption: z.string() }).optional(),
     sourceAnchor: z.discriminatedUnion('kind', [
       z.object({ kind: z.literal('label'), project: z.string().min(1), label: z.string().min(1) }),
       z.object({ kind: z.literal('heading'), project: z.string().min(1), path: z.string().min(1),
@@ -33,7 +47,11 @@ const pageSchema = z.object({
 })
 export const researchCanvasSchema = z.object({
   activePageId: z.string(), pages: z.array(pageSchema).min(1),
-}).superRefine(({ pages, activePageId }, ctx) => {
+  crossPageEdges: z.array(edgeSchema).optional(),
+  overviewViewport: position.extend({ zoom: z.number().positive() }).optional(),
+  display: z.enum(['overview', 'page']).optional(),
+  globalOrder: z.literal(true).optional(),
+}).superRefine(({ pages, activePageId, crossPageEdges, globalOrder }, ctx) => {
   const pageIds = pages.map(page => page.id)
   if (new Set(pageIds).size !== pageIds.length || !pageIds.includes(activePageId)) {
     ctx.addIssue({ code: 'custom', message: 'Invalid canvas pages' })
@@ -56,10 +74,22 @@ export const researchCanvasSchema = z.object({
       ctx.addIssue({ code: 'custom', message: `Invalid nodes or connections on ${page.name}` })
     }
   }
+  if (globalOrder || crossPageEdges?.length) {
+    const owners = new Map(pages.flatMap(page => page.nodes.map(node => [node.id, page.id] as const)))
+    const nodes = pages.flatMap(page => page.nodes)
+    const edges = [...pages.flatMap(page => page.edges), ...crossPageEdges ?? []]
+    const pairs = new Set(edges.map(edge => JSON.stringify([edge.source, edge.target])))
+    if (owners.size !== nodes.length || pairs.size !== edges.length || new Set(edges.map(edge => edge.id)).size !== edges.length
+      || crossPageEdges?.some(edge => !owners.has(edge.source) || !owners.has(edge.target) || owners.get(edge.source) === owners.get(edge.target))
+      || topologicalNodes({ ...pages[0], nodes, edges }).length !== nodes.length) {
+      ctx.addIssue({ code: 'custom', message: 'Invalid connections between Canvas pages' })
+    }
+  }
 })
 
 export type ResearchNode = z.infer<typeof nodeSchema>
 export type SectionAnchor = NonNullable<ResearchNode['data']['sourceAnchor']>
+export type FigureAnchor = NonNullable<ResearchNode['data']['figureAnchor']>
 export type ResearchEdge = z.infer<typeof edgeSchema>
 export type ResearchPage = z.infer<typeof pageSchema>
 export type ResearchCanvas = z.infer<typeof researchCanvasSchema>

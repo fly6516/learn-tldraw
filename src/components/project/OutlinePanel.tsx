@@ -11,6 +11,8 @@ import type { OutlineHeading } from '@/lib/project/outline'
 import type { CanvasLocation } from '@/lib/project/canvas-search'
 import type { ResearchCanvas } from '@/lib/project/research-graph'
 import { headingKey } from '@/lib/project/section-links'
+import { latexBlockTitle, type LatexBlock } from '@/lib/project/latex-blocks'
+import { latexBlockNames } from '@/lib/project/latex-block-kinds'
 
 export interface OutlineCanvasActions {
   canvas: ResearchCanvas
@@ -19,6 +21,9 @@ export interface OutlineCanvasActions {
   canBindNode: (pageId: string, nodeId: string) => boolean
   onLocate: (location: CanvasLocation) => void
   onLink: (heading: OutlineHeading, pageId: string, nodeId?: string) => void
+  linkedBlock: (block: LatexBlock) => CanvasLocation | undefined
+  canLinkBlock: (block: LatexBlock) => boolean
+  onLinkBlock: (block: LatexBlock, pageId: string) => void
 }
 
 type LinkRequest = { heading: OutlineHeading; mode: 'add' | 'bind' }
@@ -88,7 +93,7 @@ function HeadingList({ headings, onLocate, canvas, onLinkRequest }: {
                 className="block min-w-0 flex-1 rounded px-2 py-1.5 text-left hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring">
                 <span className="block break-words text-sm font-medium">{heading.title}</span>
                 <span className="block break-all text-xs text-muted-foreground">
-                  {heading.command} · {heading.path}:{heading.line}
+                  {heading.appendix ? 'Appendix · ' : ''}{heading.command} · {heading.path}:{heading.line}
                 </span>
               </button>
               {linked ? <Button type="button" size="icon" variant="ghost" className="size-8 shrink-0"
@@ -117,21 +122,51 @@ function HeadingList({ headings, onLocate, canvas, onLinkRequest }: {
   )
 }
 
-export function OutlinePanel({ headings, main, onLocate, canvas }: {
+export function OutlinePanel({ headings, blocks, main, onLocate, canvas }: {
   headings: OutlineHeading[]
+  blocks: LatexBlock[]
   main: string
   onLocate: (location: SourceLocation) => void
   canvas: OutlineCanvasActions
 }) {
   const [request, setRequest] = useState<LinkRequest>()
+  const [blockPage, setBlockPage] = useState<string>()
+  const [onlyAppendix, setOnlyAppendix] = useState(false)
+  const shownHeadings = onlyAppendix ? headings.filter(heading => heading.appendix) : headings
+  const targetPage = canvas.canvas.pages.some(page => page.id === blockPage) ? blockPage! : canvas.canvas.activePageId
   return (
     <nav aria-label="Section outline" className="space-y-2 p-3">
       <h2 className="font-semibold">Section Outline</h2>
       <p className="break-all text-xs text-muted-foreground">{main}</p>
-      {headings.length
-        ? <HeadingList headings={headings} onLocate={onLocate} canvas={canvas} onLinkRequest={setRequest} />
+      {headings.some(heading => heading.appendix) && <label className="flex items-center gap-2 text-xs">
+        <input type="checkbox" checked={onlyAppendix} onChange={event => setOnlyAppendix(event.target.checked)} />
+        Appendix headings only
+      </label>}
+      {shownHeadings.length
+        ? <HeadingList headings={shownHeadings} onLocate={onLocate} canvas={canvas} onLinkRequest={setRequest} />
         : <p className="text-sm text-muted-foreground">No LaTeX headings found in the selected document.</p>}
       {request && <LinkSectionDialog request={request} actions={canvas} onClose={() => setRequest(undefined)} />}
+      {!onlyAppendix && blocks.length > 0 && <section aria-label="LaTeX blocks" className="space-y-2 border-t pt-3">
+        <h3 className="text-sm font-semibold">LaTeX blocks</h3>
+        <label className="grid gap-1 text-xs">Canvas page for new cards
+          <select className="min-w-0 rounded border bg-background p-1" value={targetPage} onChange={event => setBlockPage(event.target.value)}>
+            {canvas.canvas.pages.map(page => <option key={page.id} value={page.id}>{page.name}</option>)}
+          </select>
+        </label>
+        <ul className="space-y-2">
+          {blocks.map(block => {
+            const linked = canvas.linkedBlock(block)
+            return <li className="rounded border p-2" key={`${block.path}:${block.start}`}>
+              <button type="button" className="block w-full break-words text-left text-sm hover:underline" onClick={() => onLocate(block)}>{latexBlockTitle(block)}</button>
+              <p className="break-all text-xs text-muted-foreground">{latexBlockNames[block.kind]} · {block.path}:{block.line}</p>
+              {linked ? <Button variant="ghost" size="sm" onClick={() => canvas.onLocate(linked)}>Locate on Canvas</Button>
+                : canvas.canLinkBlock(block)
+                  ? <Button variant="ghost" size="sm" onClick={() => canvas.onLinkBlock(block, targetPage)}>Add to Canvas</Button>
+                  : <p className="text-xs text-muted-foreground">Add a unique LaTeX label to link this block.</p>}
+            </li>
+          })}
+        </ul>
+      </section>}
     </nav>
   )
 }

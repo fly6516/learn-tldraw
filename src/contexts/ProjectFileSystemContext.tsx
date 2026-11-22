@@ -36,7 +36,7 @@ interface ProjectFileSystemContextValue {
   setFileSystem: React.Dispatch<React.SetStateAction<ProjectFileSystem | null>>
   storage: IDBDatabase | null
   storageKey?: string
-  acceptStoredProject: (project: ProjectFileSystem, previous: ProjectFileSystem) => void
+  acceptStoredProject: (project: ProjectFileSystem, previous?: ProjectFileSystem) => void
 }
 
 const ProjectFileSystemContext = createContext<ProjectFileSystemContextValue | null>(null)
@@ -49,9 +49,9 @@ export function ProjectFileSystemProvider({ children, storageKey }: { children: 
   const [storageError, setStorageError] = useState(false)
   const lastStored = useRef<ProjectFileSystem | null>(null)
 
-  const acceptStoredProject = useCallback((project: ProjectFileSystem, previous: ProjectFileSystem) => {
+  const acceptStoredProject = useCallback((project: ProjectFileSystem, previous?: ProjectFileSystem) => {
     lastStored.current = project
-    setFileSystem(current => current === previous ? project : current?.metadata.createdAt === project.metadata.createdAt
+    setFileSystem(current => !previous || current === previous ? project : current?.metadata.createdAt === project.metadata.createdAt
       ? { ...project, canvas: current.canvas } : current)
   }, [])
 
@@ -127,36 +127,16 @@ export function ProjectFileSystemProvider({ children, storageKey }: { children: 
 
   const addImage = useCallback(
     (fileName: string, blob: Blob) => {
-      if (!fileSystem) return
-
-      try {
-        const updatedFs = addFigure(fileSystem, fileName, blob)
-        setFileSystem(updatedFs)
-      } catch (error) {
-        console.error('Failed to add image:', error)
-      }
+      setFileSystem(current => current ? addFigure(current, fileName, blob) : current)
     },
-    [fileSystem]
+    []
   )
 
   const addFile = useCallback(
     (file: ProjectFile) => {
-      if (!fileSystem) {
-        console.error('Cannot add file: fileSystem is null')
-        return
-      }
-
-      try {
-        console.log('Adding file to file system:', file.name, file.path)
-        const updatedFs = addFileToFs(fileSystem, file)
-        console.log('File system updated, new files count:', updatedFs.files.size)
-        setFileSystem(updatedFs)
-        console.log('State updated successfully')
-      } catch (error) {
-        console.error('Failed to add file:', error)
-      }
+      setFileSystem(current => current ? addFileToFs(current, file) : current)
     },
-    [fileSystem]
+    []
   )
 
   const deleteFile = useCallback(

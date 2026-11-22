@@ -5,7 +5,7 @@ import { basename, dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { gunzipSync } from 'node:zlib'
 import { importSourceArchive, isProjectPath } from '@/lib/project/source-archive'
-import { parseCompileDiagnostics } from '@/lib/project/compile-diagnostics'
+import { parseCompileDiagnostics, type CompileReport } from '@/lib/project/compile-diagnostics'
 import { readSyncTex } from '@/lib/project/read-synctex'
 
 export const runtime = 'nodejs'
@@ -62,8 +62,11 @@ export async function POST(request: Request) {
       }
     }
 
+    const job = basename(mainFile).replace(/\.tex$/i, '')
+    const readLog = () => readFile(join(output, job + '.log'), 'utf8').catch(() => '')
+    let outputText: string
     try {
-      await exec(process.env.TECTONIC_BIN || 'tectonic', [
+      const { stdout, stderr } = await exec(process.env.TECTONIC_BIN || 'tectonic', [
         '--untrusted', '--keep-logs',
         ...(synchronize ? ['--synctex'] : []),
         ...(process.env.TECTONIC_ONLY_CACHED === '1' ? ['--only-cached'] : []),
@@ -72,12 +75,13 @@ export async function POST(request: Request) {
         cwd: dirname(join(sources, mainFile)), windowsHide: true,
         timeout: 120_000, maxBuffer: 2 * 1024 * 1024, signal: request.signal,
       })
+      outputText = [stderr, stdout].filter(Boolean).join('\n')
     } catch (cause) {
       const failure = cause as NodeJS.ErrnoException & { killed?: boolean; stderr?: string; stdout?: string }
       const error = failure.code === 'ENOENT'
         ? 'Tectonic executable not found. Install it or set TECTONIC_BIN.'
         : failure.killed ? 'LaTeX compilation timed out.' : 'LaTeX compilation failed.'
-      const log = await readFile(join(output, basename(mainFile).replace(/\.tex$/i, '.log')), 'utf8').catch(() => '')
+      const log = await readLog()
       const outputText = [failure.stderr, failure.stdout].filter(Boolean).join('\n')
       return Response.json({
         error,
@@ -85,7 +89,6 @@ export async function POST(request: Request) {
         log: (outputText + (log ? '\n\n' + log : '')).slice(-50_000),
       }, { status: 422 })
     }
-    const job = basename(mainFile).replace(/\.tex$/i, '')
     const pdf = new Uint8Array(await readFile(join(output, job + '.pdf')))
     if (synchronize) {
       const mapPath = join(output, job + '.synctex.gz')
@@ -97,6 +100,13 @@ export async function POST(request: Request) {
       const result = new FormData()
       result.set('pdf', new Blob([pdf], { type: 'application/pdf' }), job + '.pdf')
       result.set('sourceMap', JSON.stringify(map))
+      const log = await readLog()
+      const diagnostics = parseCompileDiagnostics(outputText, mainFile, project.files.keys()).filter(issue => issue.severity === 'warning')
+      const hasWarnings = /^warning:/mi.test(outputText) || /^(?:LaTeX|Package .+|Class .+) Warning:|^(?:Over|Under)full \\[hv]box/m.test(log)
+      result.set('report', JSON.stringify({
+        diagnostics, hasWarnings,
+        log: [outputText, log].filter(Boolean).join('\n\n').slice(-50_000),
+      } satisfies CompileReport))
       return new Response(result, { headers: { 'Cache-Control': 'no-store' } })
     }
     return new Response(pdf, {

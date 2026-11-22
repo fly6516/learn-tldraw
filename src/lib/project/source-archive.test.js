@@ -5,6 +5,7 @@ import { updateFileContent } from './file-system'
 import { checkCitations, collectBibliography } from './references'
 import { POST } from '../../app/api/latex/compile/route'
 import { findPdfRegion, findSourceRegion } from './source-sync'
+import { applyWritingDrafts } from './writing-drafts'
 
 const root = 'prism-paper'
 const main = `${root}/paper.tex`
@@ -18,14 +19,16 @@ async function fixture(withSyncChapters = false) {
   zip.file(`${root}/main.tex`, String.raw`\documentclass{article}
 \begin{document}Default entry only.\end{document}`)
   zip.file(main, String.raw`\documentclass{article}
-\usepackage{graphicx}
+${withSyncChapters ? String.raw`\makeatletter
+\renewcommand\section{\@startsection{section}{1}{0pt}{1ex}{1ex}{\normalfont\normalsize}}
+\makeatother` : '\\usepackage{graphicx}'}
 \begin{document}
 ${withSyncChapters ? '\\input{chapters/introduction}\n\\newpage' : 'Selected source entry.'}
 \input{chapters/results}
-\includegraphics[width=1cm]{figures/plot.png}
+${withSyncChapters ? '' : String.raw`\includegraphics[width=1cm]{figures/plot.png}
 \cite{sample}
 \bibliographystyle{plain}
-\bibliography{refs/library}
+\bibliography{refs/library}`}
 \end{document}`)
   zip.file(chapter, '\uFEFF' + String.raw`\section{Results}` + '\r\nOriginal result.\r\n')
   if (withSyncChapters) zip.file(intro, '\\section{Introduction}\nIntroduction marker.\n')
@@ -64,22 +67,32 @@ test.skipIf(process.env.LATEX_COMPILE_ENABLED !== '1')('edits a chapter and comp
   if (process.env.LATEX_TEST_PDF) await Bun.write(process.env.LATEX_TEST_PDF, pdf)
 }, 150_000)
 
-test.skipIf(process.env.LATEX_COMPILE_ENABLED !== '1')('synchronizes locations across chapter pages and refreshes them after editing', async () => {
+test.skipIf(process.env.LATEX_COMPILE_ENABLED !== '1')('previews two chapter drafts with refreshed source locations and compiler warnings', async () => {
   const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs')
   const file = await fixture(true)
   if (process.env.LATEX_SYNC_TEST_ZIP) await Bun.write(process.env.LATEX_SYNC_TEST_ZIP, file)
   const project = await importSourceArchive(file)
 
-  async function checkLocations(current, checks) {
+  async function compilePreview(current) {
     const zip = await exportSourceArchive(current)
-    const response = await POST(new Request(`http://localhost:3000/api/latex/compile?sync=1&main=${encodeURIComponent(main)}`, {
+    return POST(new Request(`http://localhost:3000/api/latex/compile?sync=1&main=${encodeURIComponent(main)}`, {
       method: 'POST',
       headers: { host: 'localhost:3000', origin: 'http://localhost:3000', 'content-length': String(zip.size) },
       body: zip,
     }))
+  }
+
+  async function checkLocations(current, checks, withWarning = false) {
+    const response = await compilePreview(current)
     if (!response.ok) throw new Error(await response.text())
     const result = await response.formData()
     const map = JSON.parse(result.get('sourceMap'))
+    if (withWarning) {
+      const report = JSON.parse(result.get('report'))
+      expect(report.hasWarnings).toBe(true)
+      expect(report.log).toContain('Overfull')
+      expect(report.diagnostics).toContainEqual(expect.objectContaining({ path: chapter, line: 5, severity: 'warning' }))
+    }
     const task = getDocument({ data: new Uint8Array(await result.get('pdf').arrayBuffer()) })
     try {
       const document = await task.promise
@@ -101,12 +114,30 @@ test.skipIf(process.env.LATEX_COMPILE_ENABLED !== '1')('synchronizes locations a
 
   const first = { path: intro, line: 2, page: 1, marker: 'Introduction marker.' }
   await checkLocations(project, [first, { path: chapter, line: 2, page: 2, marker: 'Original result.' }])
-  const changed = updateFileContent(project, chapter, String.raw`\null\newpage
+  const originalIntro = project.files.get(intro).content
+  const originalResults = project.files.get(chapter).content
+  const changed = applyWritingDrafts(project, {
+    [intro]: { base: originalIntro, text: originalIntro.replace('Introduction marker.', 'Updated introduction.') },
+    [chapter]: { base: originalResults, text: String.raw`\null\newpage
 % Added during editing
 \section{Results}
 Updated result.
-`)
-  await checkLocations(changed, [first, { path: chapter, line: 4, page: 3, marker: 'Updated result.' }])
+\par\hbox to 1pt{Wide content for the compiler warning.}
+` },
+  })
+  const broken = updateFileContent(changed, chapter, changed.files.get(chapter).content + '\\undefinedResearchCommand\n')
+  const failure = await compilePreview(broken)
+  const failureReport = await failure.json()
+  expect(failure.status).toBe(422)
+  expect(failureReport.diagnostics, failureReport.log).toContainEqual(expect.objectContaining({
+    path: chapter, line: 6, severity: 'error',
+  }))
+  await checkLocations(changed, [
+    { ...first, marker: 'Updated introduction.' },
+    { path: chapter, line: 4, page: 3, marker: 'Updated result.' },
+  ], true)
+  expect(project.files.get(intro).content).toBe(originalIntro)
+  expect(project.files.get(chapter).content).toBe(originalResults)
 }, 150_000)
 
 test.skipIf(process.env.LATEX_COMPILE_ENABLED !== '1')('locates citation and compiler errors in a nested chapter, then recompiles the fixed project', async () => {
