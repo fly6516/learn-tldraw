@@ -5,6 +5,29 @@ export interface SourceLocation {
   end: number
 }
 
+export type SourceResolution<T extends SourceLocation> =
+  | { status: 'linked'; location: T }
+  | { status: 'missing' }
+  | { status: 'conflict'; locations: readonly SourceLocation[] }
+
+export const latexLabelPattern = /\\(?:\\|label\s*\{([^\s{}\\]+)\})/g
+
+export function indexLatexLabels(sources: Iterable<[string, string]>) {
+  const labels = new Map<string, SourceLocation[]>()
+  for (const [path, source] of sources) {
+    for (const match of maskLatexCode(source).matchAll(latexLabelPattern)) {
+      const label = match[1]
+      if (!label) continue
+      const start = match.index + match[0].indexOf('{') + 1
+      const location = { path, start, end: start + label.length, line: lineNumber(source, start) }
+      const locations = labels.get(label) ?? []
+      locations.push(location)
+      labels.set(label, locations)
+    }
+  }
+  return labels
+}
+
 export function lineNumber(source: string, offset: number) {
   return source.slice(0, offset).split(/\r\n|\n|\r/).length
 }
@@ -13,6 +36,18 @@ export function sourcePosition(source: string, offset: number) {
   const from = source.charCodeAt(0) === 0xfeff ? 1 : 0
   const lines = source.slice(from, offset).split(/\r\n|\n|\r/)
   return { lineNumber: lines.length, column: lines[lines.length - 1].length + 1 }
+}
+
+export function sourceOffsetAtPosition(source: string, position: { lineNumber: number; column: number }) {
+  let start = source.charCodeAt(0) === 0xfeff ? 1 : 0
+  if (position.lineNumber > 1) {
+    let line = 1
+    for (const newline of source.matchAll(/\r\n|\n|\r/g)) {
+      start = newline.index + newline[0].length
+      if (++line === position.lineNumber) break
+    }
+  }
+  return Math.min(source.length, start + position.column - 1)
 }
 
 // Replace comments and literal code with spaces while retaining source offsets.

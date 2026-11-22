@@ -14,13 +14,16 @@ Undo and redo apply to edits on the current canvas page, including moves, node e
 connections. Use Ctrl/Cmd+Z or Ctrl/Cmd+Shift+Z when the canvas has focus. **Add Page** creates
 another graph in the project. Canvas exports use the selected page and its directed connections.
 
-**Search canvas** finds nodes by title, content, tags, or section number across all
-canvas pages. Select a result to open its page and center the node.
+Use **Project search** from the project menu or Canvas toolbar to find cards, Writing source,
+or bibliography entries. Source results include local drafts. Linked results offer a direct
+jump to the other view when the match overlaps a linked source target.
 
 Use **Project menu → Project Backup** to download a `.research-canvas` file. In another browser, choose the
 file from the same dialog and confirm **Replace Project**. The backup includes all canvas
-pages, nodes, connections, viewports, and project files. This release starts with a new
-canvas storage format and supports version 2 project backups.
+pages, nodes, connections, viewports, and saved project files. Select **Include local drafts**
+to carry those edits and the Writing cursor separately from the saved source. A restored draft
+with a different baseline opens in the normal Writing comparison flow. Version 2 backups are
+still supported. Backups carrying drafts use version 3.
 
 ## Edit and compile an existing LaTeX project
 
@@ -129,5 +132,17 @@ page or bind an existing node. **Locate on Canvas** selects the linked node, and
 **Open source** in its properties selects the heading in Writing. A unique `\label`
 immediately after the heading keeps the link working when the title changes. For an
 unlabeled heading, changing its title or making it ambiguous requires binding it again.
+
+Use **Project menu → Source link check** to find missing or conflicting section, LaTeX block
+and bibliography links across all Canvas pages. The check uses the current Writing drafts.
+Choose **Locate card** to inspect the original node, or **Repair link** to search for and
+confirm a replacement. A repair preserves the card, its notes and its connections. Use
+**Undo repair** or the Canvas history controls to revert it.
+
+In Writing, open **Review** to link a review comment or to-do to a heading, formula, or
+text selection. Choose an existing Canvas card or create one on the destination page.
+Filter by the current section, current file, or all Canvas pages. Status changes appear in
+both views. A captured selection follows its text as it moves and becomes unavailable if the
+text can no longer be identified reliably.
 
 Run `bun run lint`, `bun run build`, and `bun test` to check the project.

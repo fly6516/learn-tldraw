@@ -107,8 +107,14 @@ export function collectBibliography(project: ProjectFileSystem, active?: { path:
 
 export function indexCanvasReferences(project: ProjectFileSystem, entries: BibliographyEntry[]) {
   const definitions = new Map<string, BibliographyEntry | undefined>()
+  const entriesByKey = new Map<string, BibliographyEntry[]>()
   const uses = new Map<string, ReferenceLocation[]>()
-  for (const entry of entries) definitions.set(entry.key, definitions.has(entry.key) ? undefined : entry)
+  for (const entry of entries) {
+    const matches = entriesByKey.get(entry.key) ?? []
+    matches.push(entry)
+    entriesByKey.set(entry.key, matches)
+    definitions.set(entry.key, matches.length === 1 ? entry : undefined)
+  }
   for (const file of project.files.values()) {
     if (!('content' in file) || !/\.tex$/i.test(file.path)) continue
     for (const citation of findCitations(file.path, file.content ?? '')) {
@@ -117,7 +123,7 @@ export function indexCanvasReferences(project: ProjectFileSystem, entries: Bibli
       uses.set(citation.key, locations)
     }
   }
-  return { definitions, uses }
+  return { definitions, entriesByKey, uses }
 }
 
 export function checkCitations(

@@ -10,20 +10,25 @@ import {
 } from '@/lib/project/backup'
 import type { ResearchCanvas } from '@/lib/project/research-graph'
 import type { ProjectFileSystem } from '@/lib/project/types'
+import type { PortableWritingState } from '@/lib/project/writing-drafts'
 
 interface ProjectBackupDialogProps {
   canvas: ResearchCanvas
   project: ProjectFileSystem
-  onRestore: (project: ProjectFileSystem) => Promise<boolean>
+  writing?: PortableWritingState
+  onRestore: (project: ProjectFileSystem, writing?: PortableWritingState) => Promise<boolean>
   onClose: () => void
 }
 
-export function ProjectBackupDialog({ canvas, project, onRestore, onClose }: ProjectBackupDialogProps) {
+export function ProjectBackupDialog({ canvas, project, writing, onRestore, onClose }: ProjectBackupDialogProps) {
   const [pending, setPending] = useState<Awaited<ReturnType<typeof decodeProjectBackup>>>()
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
+  const [includeDrafts, setIncludeDrafts] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
+  const draftCount = Object.keys(writing?.drafts ?? {}).length
+  const importDraftCount = Object.keys(pending?.writing?.drafts ?? {}).length
 
   async function prepareRestore(file: File) {
     setBusy(true)
@@ -45,7 +50,7 @@ export function ProjectBackupDialog({ canvas, project, onRestore, onClose }: Pro
     setError('')
     setMessage('')
     try {
-      const backup = await encodeProjectBackup(canvas, project)
+      const backup = await encodeProjectBackup(canvas, project, includeDrafts && draftCount ? writing : undefined)
       const url = URL.createObjectURL(backup)
       const link = document.createElement('a')
       link.href = url
@@ -68,7 +73,7 @@ export function ProjectBackupDialog({ canvas, project, onRestore, onClose }: Pro
     setError('')
     setBusy(true)
     try {
-      if (!await onRestore(pending.project)) return
+      if (!await onRestore(pending.project, pending.writing)) return
       setPending(undefined)
       setMessage('Project restored.')
     } catch (cause) {
@@ -99,12 +104,22 @@ export function ProjectBackupDialog({ canvas, project, onRestore, onClose }: Pro
             if (file) void prepareRestore(file)
           }}
         />
+        <div className="space-y-1 rounded border p-2 text-sm">
+          <p>Every backup includes saved project files and the Canvas.</p>
+          {draftCount > 0 ? <label className="flex items-center gap-2">
+            <input type="checkbox" checked={includeDrafts} disabled={busy} onChange={event => setIncludeDrafts(event.target.checked)} />
+            Include {draftCount} local {draftCount === 1 ? 'draft' : 'drafts'}
+          </label> : <p className="text-muted-foreground">{writing ? 'There are no local drafts.' : 'Local drafts are unavailable for export.'}</p>}
+          {includeDrafts && draftCount > 0 && <p className="text-xs text-muted-foreground">The backup keeps drafts separate from the saved files.</p>}
+        </div>
         {pending && (
-          <p>
-            Restore <strong>{pending.project.metadata.projectName}</strong>?
-            This replaces the current canvas and project files. You can download a backup of
-            your current project first.
-          </p>
+          <div className="space-y-1 text-sm">
+            <p>Restore <strong>{pending.project.metadata.projectName}</strong>? This replaces the current Canvas, saved files and local drafts.</p>
+            <p>{importDraftCount > 0 ? `The backup contains ${importDraftCount} local ${importDraftCount === 1 ? 'draft' : 'drafts'}.` : 'The backup contains saved files only.'}</p>
+            {pending.conflicts.length > 0 && <p className="text-amber-800">
+              {pending.conflicts.length} {pending.conflicts.length === 1 ? 'draft differs' : 'drafts differ'} from their saved baseline. Compare in Writing after restoring.
+            </p>}
+          </div>
         )}
         {busy && <p role="status">Processing project backup…</p>}
         {message && <p role="status">{message}</p>}

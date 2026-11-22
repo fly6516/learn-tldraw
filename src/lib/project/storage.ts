@@ -1,6 +1,6 @@
 import type { ProjectFileSystem } from './types'
 import type { ProjectSnapshot, ProjectSnapshotInfo } from './snapshots'
-import { applyWritingDrafts, draftConflicts, sameDraft, type WritingDraft, type WritingDrafts, type WritingKey, type WritingView } from './writing-drafts'
+import { applyWritingDrafts, draftConflicts, sameDraft, type PortableWritingState, type WritingDraft, type WritingDrafts, type WritingKey, type WritingView } from './writing-drafts'
 
 const storeName = 'projects'
 
@@ -167,6 +167,29 @@ export async function clearWritingState(database: IDBDatabase, key: WritingKey) 
     transaction.objectStore(storeName).delete(draftRange(key))
     transaction.objectStore(storeName).delete(['view', ...key])
     await complete(transaction)
+}
+
+export async function restoreProjectBackup(database: IDBDatabase, current: WritingKey, project: ProjectFileSystem, writing?: PortableWritingState) {
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    const store = transaction.objectStore(storeName)
+    const saved = store.get(current[0])
+    const destination: WritingKey = [current[0], project.metadata.createdAt]
+    let replaced = false
+    saved.onsuccess = () => {
+        if (saved.result && saved.result.metadata.createdAt !== current[1]) return
+        for (const key of current[1] === destination[1] ? [current] : [current, destination]) {
+            store.delete(draftRange(key))
+            store.delete(['view', ...key])
+        }
+        store.put(project, current[0])
+        if (writing) {
+            for (const [path, draft] of Object.entries(writing.drafts)) store.put(draft, ['draft', ...destination, path])
+            if (writing.view) store.put(writing.view, ['view', ...destination])
+        }
+        replaced = true
+    }
+    await complete(transaction)
+    if (!replaced) throw new Error('This project was replaced in another tab. Reload it before restoring a backup.')
 }
 
 export function readProject(database: IDBDatabase, key: string): Promise<ProjectFileSystem | undefined> {

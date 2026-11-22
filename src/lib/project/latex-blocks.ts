@@ -1,4 +1,4 @@
-import { groupEnd, lineNumber, maskLatexCode, type SourceLocation } from './latex-source'
+import { groupEnd, indexLatexLabels, latexLabelPattern, lineNumber, maskLatexCode, type SourceLocation, type SourceResolution } from './latex-source'
 import type { FigureAnchor } from './research-graph'
 import type { ProjectDirectory, ProjectFile, ProjectFileSystem } from './types'
 import { latexBlockNames, type LatexBlockKind } from './latex-block-kinds'
@@ -7,6 +7,7 @@ import type { LatexMathPart } from './latex-math-preview'
 export interface LatexBlock extends SourceLocation {
   kind: LatexBlockKind
   environment: string
+  extentEnd: number
   caption: string
   label?: string
   labels: string[]
@@ -27,22 +28,13 @@ const standardEnvironments = new Map<string, LatexBlockKind>([
     .map(name => [name, 'theorem'] as const),
 ])
 
-const latexLabels = /\\(?:\\|label\s*\{([^\s{}\\]+)\})/g
-
 export function readProjectLatexBlocks(project: Pick<ProjectFileSystem, 'files'>, main: string,
   documents: ReadonlyMap<string, string>, preamble: ReadonlyMap<string, string> = new Map(),
+  labels = indexLatexLabels(new Map([...preamble, ...documents])),
 ) {
   const declared = declaredLatexEnvironments([...preamble.values(), ...documents.values()])
-  const labels = new Set<string>()
-  const ambiguousLabels = new Set<string>()
-  const blocks = [...documents].flatMap(([path, text]) => {
-    for (const [, label] of maskLatexCode(text).matchAll(latexLabels)) {
-      if (!label) continue
-      if (labels.has(label)) ambiguousLabels.add(label)
-      labels.add(label)
-    }
-    return readLatexBlocks(project, main, path, text, declared)
-  })
+  const ambiguousLabels = new Set([...labels].filter(([, locations]) => locations.length > 1).map(([label]) => label))
+  const blocks = [...documents].flatMap(([path, text]) => readLatexBlocks(project, main, path, text, declared))
   return blocks.map(block => ({ ...block, ambiguousLabels }))
 }
 
@@ -124,7 +116,7 @@ export function readLatexBlocks(project: Pick<ProjectFileSystem, 'files'>, main:
     const caption = argument(body, /\\caption(?:\s*\[[^\]]*\])?\s*\{/)
       ?? (kind === 'theorem' ? /^\s*\[([^\]]+)\]/.exec(body)?.[1]?.trim() : undefined)
       ?? declaration?.title ?? ''
-    const labels = [...body.matchAll(latexLabels)].flatMap(label => label[1] ? [label[1]] : [])
+    const labels = [...body.matchAll(latexLabelPattern)].flatMap(label => label[1] ? [label[1]] : [])
     const graphic = kind === 'figure' ? argument(body, /\\includegraphics\*?(?:\s*\[[^\]]*\])?\s*\{/)
       ?? /\\XeTeXpicfile\s+(?:"([^"]+)"|([^\s{}]+))/.exec(body)?.slice(1).find(Boolean) : undefined
     const preview = kind === 'figure' || kind === 'table' ? undefined
@@ -139,7 +131,7 @@ export function readLatexBlocks(project: Pick<ProjectFileSystem, 'files'>, main:
       kind, path, environment, caption, labels, label: labels[0],
       imagePath: graphic ? resolveImage(project, main, path, graphic) : undefined, preview,
       equations: equations?.length ? equations : undefined,
-      line: lineNumber(source, opener.start), start: opener.start, end: opener.openEnd,
+      line: lineNumber(source, opener.start), start: opener.start, end: opener.openEnd, extentEnd: match.index + match[0].length,
     })
     destination.push(...opener.nested.filter(block => !(groupedMath && block.kind === 'equation')
       && !(kind === 'algorithm' && block.kind === 'algorithm')
@@ -158,11 +150,24 @@ export function blockFingerprint(block: LatexBlock) {
   return block.preview ? JSON.stringify([block.environment, block.caption, block.preview]) : ''
 }
 
-export function locateLatexBlock(blocks: LatexBlock[], project: string, anchor?: FigureAnchor) {
-  if (!anchor || anchor.project !== project) return undefined
-  const matches = blocks.filter(block => anchor.label ? block.labels.includes(anchor.label!)
+export function inspectLatexBlock(blocks: LatexBlock[], project: string, anchor?: FigureAnchor,
+  labelLocations?: ReadonlyMap<string, readonly SourceLocation[]>,
+): SourceResolution<LatexBlock> {
+  if (!anchor || anchor.project !== project) return { status: 'missing' }
+  const label = anchor.label
+  const matches = blocks.filter(block => label ? block.labels.includes(label)
     : block.kind === anchor.kind && block.path === anchor.path && blockFingerprint(block) === anchor.caption)
-  return matches.length === 1 && matches[0].kind === anchor.kind
-    && (!anchor.label || (!matches[0].ambiguousLabels?.has(anchor.label)
-      && matches[0].labels.filter(label => label === anchor.label).length === 1)) ? matches[0] : undefined
+  const locations = label ? labelLocations?.get(label) : undefined
+  if (locations && locations.length > 1) return { status: 'conflict', locations }
+  const [match] = matches
+  if (matches.length > 1 || (label && match &&
+    (match.ambiguousLabels?.has(label) || match.labels.filter(item => item === label).length > 1))) {
+    return { status: 'conflict', locations: matches }
+  }
+  return match?.kind === anchor.kind ? { status: 'linked', location: match } : { status: 'missing' }
+}
+
+export function locateLatexBlock(blocks: LatexBlock[], project: string, anchor?: FigureAnchor) {
+  const result = inspectLatexBlock(blocks, project, anchor)
+  return result.status === 'linked' ? result.location : undefined
 }

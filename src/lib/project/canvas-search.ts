@@ -4,6 +4,7 @@ import { literalSearchPattern } from './text-search'
 import { canvasResourceNames, researchCardNames } from './canvas-card-kinds'
 import type { LatexBlock } from './latex-blocks'
 import type { BibliographyEntry } from './references'
+import type { OutlineHeading } from './outline'
 
 export type CanvasLocation = { pageId: string; nodeId: string }
 
@@ -16,7 +17,7 @@ export function researchNodeTitle(data: ResearchNode['data']) {
 export const canvasSearchLimit = 100
 
 export function searchCanvasNodes(pages: ResearchPage[], query: string, blocks?: ReadonlyMap<ResearchNode['data'], LatexBlock>,
-  bibliography?: ReadonlyMap<ResearchNode['data'], BibliographyEntry>) {
+  bibliography?: ReadonlyMap<ResearchNode['data'], BibliographyEntry>, headings?: ReadonlyMap<ResearchNode['data'], OutlineHeading>) {
   const matches: (CanvasLocation & {
     pageName: string
     title: string
@@ -35,12 +36,15 @@ export function searchCanvasNodes(pages: ResearchPage[], query: string, blocks?:
       const resource = data.resource
       const block = blocks?.get(data)
       const reference = bibliography?.get(data)
+      const heading = headings?.get(data)
       const research = resource?.kind === 'research' ? resource : undefined
       const fields = [title, data.content, ...data.tags ?? [], resource ? resource.kind : RESEARCH_NODE_META[data.section].label,
         resource && canvasResourceNames[resource.kind], resource && 'path' in resource ? resource.path : undefined,
         resource?.kind === 'bibliography' ? resource.key : undefined, reference?.title, reference?.author, reference?.year, reference?.path,
         research?.customType, research && researchCardNames[research.role], research?.status,
         data.figureAnchor?.label, data.figureAnchor?.path, data.figureAnchor?.caption,
+        heading?.title, heading?.label, heading?.path,
+        data.selectionAnchor?.path, data.selectionAnchor?.quote,
         block?.environment, block?.path, block?.caption, block?.preview, ...block?.labels ?? [],
         data.metadata?.sectionNumber, data.metadata?.importSource]
       for (const field of fields) {

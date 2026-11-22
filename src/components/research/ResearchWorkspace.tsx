@@ -20,23 +20,31 @@ import {
 } from '@/lib/export/export-actions'
 import { updateFileContent } from '@/lib/project/file-system'
 import {
-  activeResearchPage, emptyCanvas, emptyPage, validResearchConnection, type FigureAnchor, type ResearchCanvas, type ResearchNode, type ResearchPage,
+  activeResearchPage, emptyCanvas, emptyPage, validResearchConnection, type ResearchCanvas, type ResearchNode, type ResearchPage,
 } from '@/lib/project/research-graph'
 import { LatexImportDialog } from './LatexImportDialog'
 import { LatexPreviewPanel } from './LatexPreviewPanel'
 import { ProjectBackupDialog } from './ProjectBackupDialog'
 import { ProjectSnapshotsDialog } from './ProjectSnapshotsDialog'
 import { ResearchGraphEditor } from './ResearchGraphEditor'
-import { CanvasSearchDialog } from './CanvasSearchDialog'
+import { ProjectSearchDialog } from './ProjectSearchDialog'
 import { researchNodeTitle, type CanvasLocation } from '@/lib/project/canvas-search'
 import { recordHistory, stepCanvasHistory, type CanvasHistory } from '@/lib/project/canvas-history'
 import type { OutlineHeading } from '@/lib/project/outline'
-import { anchorHeading, headingKey, indexOutline, resolveSectionAnchor } from '@/lib/project/section-links'
+import { anchorHeading, headingKey, resolveSectionAnchor } from '@/lib/project/section-links'
 import { arrangeCanvas, documentPage, dropOverviewNodes, normalizeCanvas, pageCapacity, projectOverview, repageCanvas } from '@/lib/project/canvas-overview'
-import { blockFingerprint, latexBlockTitle, imageAttachment, locateLatexBlock, type LatexBlock } from '@/lib/project/latex-blocks'
+import { latexBlockTitle, imageAttachment, inspectLatexBlock, type LatexBlock } from '@/lib/project/latex-blocks'
 import { CanvasBibliographyContext, CanvasBlockContext } from './CanvasResource'
 import { materialKind } from '@/lib/project/canvas-card-kinds'
-import type { BibliographyEntry, indexCanvasReferences, ReferenceLocation } from '@/lib/project/references'
+import type { BibliographyEntry, ReferenceLocation } from '@/lib/project/references'
+import { anchorLatexBlock, findSourceLinkIssues, repairSourceLink, type CanvasSourceCatalog } from '@/lib/project/canvas-source-links'
+import { SourceLinksDialog } from './SourceLinksDialog'
+import { restoreProjectBackup } from '@/lib/project/storage'
+import type { PortableWritingState } from '@/lib/project/writing-drafts'
+import type { WritingReviewActions } from '@/components/project/WritingReviewPanel'
+import { bindReviewTarget, resolveReviewTarget, reviewItems, reviewResource } from '@/lib/project/review-links'
+import { sourceOffsetAtPosition, type SourceLocation } from '@/lib/project/latex-source'
+import type { SearchSourceLink } from '@/lib/project/project-search'
 
 type WorkspaceProps = { sample?: ResearchCanvas }
 type GraphSnapshot = Pick<ResearchCanvas, 'pages' | 'crossPageEdges' | 'activePageId'>
@@ -47,13 +55,14 @@ function Workspace({ sample }: WorkspaceProps) {
   const { fileSystem, initializeProject, setFileSystem, storage, storageKey, acceptStoredProject } = useProjectFileSystem()
   const view = useSearchParams().get('view') === 'write' ? 'write' : 'canvas'
   const [importOpen, setImportOpen] = useState(false)
-  const [backupOpen, setBackupOpen] = useState(false)
+  const [backupOpen, setBackupOpen] = useState<{ writing?: PortableWritingState }>()
   const [snapshotsOpen, setSnapshotsOpen] = useState(false)
   const [showFiles, setShowFiles] = useState(true)
   const [mobileExplorer, setMobileExplorer] = useState(false)
   const [filesTab, setFilesTab] = useState(false)
   const [showPreview, setShowPreview] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
+  const [sourceLinksDialog, setSourceLinksDialog] = useState<{ nodeId?: string }>()
   const [nodeJump, setNodeJump] = useState<CanvasLocation>()
   const [history, setHistory] = useState(emptyHistory)
   const [pendingEdit, setPendingEdit] = useState<{ canvas: ResearchCanvas; detached: ResearchNode[]; arrangement?: ReturnType<typeof arrangeCanvas> }>()
@@ -63,8 +72,7 @@ function Workspace({ sample }: WorkspaceProps) {
   const [sourceVersion, setSourceVersion] = useState(0)
   const [canvasActions, setCanvasActions] = useState<HTMLDivElement | null>(null)
   const [writingActions, setWritingActions] = useState<HTMLDivElement | null>(null)
-  const [archiveOutline, setArchiveOutline] = useState<{ project: string; index: ReturnType<typeof indexOutline>; blocks: LatexBlock[];
-    references: ReturnType<typeof indexCanvasReferences> }>()
+  const [archiveOutline, setArchiveOutline] = useState<CanvasSourceCatalog>()
   const writing = useRef<SourceWorkspaceHandle>(null)
   const initialCanvas = useMemo(() => normalizeCanvas(sample ?? emptyCanvas), [sample])
   const rawCanvas = fileSystem?.canvas ?? initialCanvas
@@ -90,7 +98,16 @@ function Workspace({ sample }: WorkspaceProps) {
   const archiveProject = fileSystem?.metadata.sourceMode === 'archive' ? fileSystem.metadata.createdAt : undefined
   const archiveIndex = archiveOutline?.project === archiveProject ? archiveOutline?.index : undefined
   const projectId = fileSystem?.metadata.createdAt
-  const references = archiveOutline?.project === projectId ? archiveOutline?.references : undefined
+  const sourceCatalog = archiveOutline?.project === projectId ? archiveOutline : undefined
+  const references = sourceCatalog?.references
+  const reviews = useMemo(() => reviewItems(canvas.pages, sourceCatalog), [canvas.pages, sourceCatalog])
+  const reviewSources = useMemo(() => new Map(reviews.flatMap(item => item.source ? [[item.data, item.source] as const] : [])), [reviews])
+  const sourceIssues = useMemo(() => sourceCatalog ? findSourceLinkIssues(canvas.pages, sourceCatalog) : [], [canvas.pages, sourceCatalog])
+  const firstSourceIssue = useMemo(() => {
+    const issues = new Map<string, typeof sourceIssues[number]>()
+    for (const issue of sourceIssues) if (!issues.has(issue.nodeId)) issues.set(issue.nodeId, issue)
+    return issues
+  }, [sourceIssues])
   const bibliographyLinks = useMemo(() => {
     const byNode = new Map<ResearchNode['data'], BibliographyEntry>()
     const byKey = new Map<string, CanvasLocation>()
@@ -103,18 +120,20 @@ function Workspace({ sample }: WorkspaceProps) {
     }
     return { byNode, byKey }
   }, [canvas.pages, projectId, references])
-  const blocks = archiveOutline?.project === projectId ? archiveOutline?.blocks ?? noBlocks : noBlocks
+  const blocks = sourceCatalog?.blocks ?? noBlocks
   const blockLinks = useMemo(() => {
     const byNode = new Map<ResearchNode['data'], LatexBlock>()
     const byBlock = new Map<LatexBlock, CanvasLocation>()
     for (const page of canvas.pages) for (const node of page.nodes) {
-      const block = projectId && locateLatexBlock(blocks, projectId, node.data.figureAnchor)
-      if (!block) continue
+      if (!projectId || !node.data.figureAnchor) continue
+      const resolution = inspectLatexBlock(blocks, projectId, node.data.figureAnchor, sourceCatalog?.index.labelLocations)
+      if (resolution.status !== 'linked') continue
+      const block = resolution.location
       byNode.set(node.data, block)
-      if (!byBlock.has(block)) byBlock.set(block, { pageId: page.id, nodeId: node.id })
+      if (!byBlock.has(block) && !reviewResource(node.data)) byBlock.set(block, { pageId: page.id, nodeId: node.id })
     }
     return { byNode, byBlock }
-  }, [canvas.pages, blocks, projectId])
+  }, [canvas.pages, blocks, projectId, sourceCatalog])
   const sectionLinks = useMemo(() => {
     const byNode = new Map<ResearchNodeData, OutlineHeading>()
     const byHeading = new Map<string, CanvasLocation>()
@@ -124,7 +143,7 @@ function Workspace({ sample }: WorkspaceProps) {
           const heading = resolveSectionAnchor(archiveIndex, archiveProject, node.data.sourceAnchor)
           if (!heading) continue
           byNode.set(node.data, heading)
-          if (!byHeading.has(headingKey(heading))) byHeading.set(headingKey(heading), { pageId: page.id, nodeId: node.id })
+          if (!byHeading.has(headingKey(heading)) && !reviewResource(node.data)) byHeading.set(headingKey(heading), { pageId: page.id, nodeId: node.id })
         }
       }
     }
@@ -138,6 +157,23 @@ function Workspace({ sample }: WorkspaceProps) {
     }
     return byLine
   }, [generated.nodes, canvas.pages])
+
+  const projectSearchLinks = useMemo(() => {
+    if (!searchOpen) return []
+    const links: SearchSourceLink[] = []
+    for (const page of canvas.pages) for (const node of page.nodes) {
+      let source: SourceLocation | undefined = sectionLinks.byNode.get(node.data) ?? blockLinks.byNode.get(node.data)
+        ?? bibliographyLinks.byNode.get(node.data) ?? reviewSources.get(node.data)
+      const line = generated.nodes.get(node.data)
+      if (!source && generated.source && line !== undefined) {
+        const start = sourceOffsetAtPosition(generated.source, { lineNumber: line, column: 1 })
+        const end = start + (generated.source.slice(start).match(/^[^\r\n]*/)?.[0].length ?? 0)
+        source = { path: 'main.tex', start, end, line }
+      }
+      if (source) links.push({ pageId: page.id, nodeId: node.id, pageName: page.name, title: researchNodeTitle(node.data), source })
+    }
+    return links
+  }, [searchOpen, canvas.pages, sectionLinks, blockLinks, bibliographyLinks, reviewSources, generated])
 
   useEffect(() => {
     if (fileSystem) return
@@ -305,16 +341,8 @@ function Workspace({ sample }: WorkspaceProps) {
     switchView('write')
   }
 
-  function anchorBlock(block: LatexBlock): FigureAnchor | undefined {
-    if (!projectId) return undefined
-    const { kind, path } = block
-    for (const label of block.labels) {
-      const anchor = { project: projectId, kind, label, path, caption: block.caption }
-      if (locateLatexBlock(blocks, projectId, anchor) === block) return anchor
-    }
-    const caption = blockFingerprint(block)
-    const anchor = { project: projectId, kind, path, caption }
-    if (caption && locateLatexBlock(blocks, projectId, anchor) === block) return anchor
+  function anchorBlock(block: LatexBlock) {
+    return sourceCatalog && anchorLatexBlock(sourceCatalog, block)
   }
 
   function addBlockCard(block: LatexBlock, pageId: string) {
@@ -386,6 +414,35 @@ function Workspace({ sample }: WorkspaceProps) {
     },
   }
 
+  const review: WritingReviewActions = {
+    items: reviews,
+    bind: (location, pageId, role, content, target) => {
+      if (!sourceCatalog || !resolveReviewTarget(sourceCatalog, target)) return false
+      if (location) {
+        const current = liveCanvas.current.pages.find(page => page.id === location.pageId)?.nodes.find(node => node.id === location.nodeId)
+        if (!current || !reviewResource(current.data)) return false
+        editPage(page => ({ ...page, nodes: page.nodes.map(node => node.id === location.nodeId
+          ? { ...node, data: bindReviewTarget(node.data, target) } : node) }), undefined, location.pageId)
+      } else {
+        if (!liveCanvas.current.pages.some(page => page.id === pageId)) return false
+        addCard(bindReviewTarget({ section: 'custom', content, level: 1, order: 0,
+          resource: { kind: 'research', role, status: 'open' } }, target), pageId, false)
+      }
+      return true
+    },
+    status: (location, status) => editPage(page => {
+      const node = page.nodes.find(node => node.id === location.nodeId)
+      const resource = node && reviewResource(node.data)
+      if (!node || !resource || (resource.status ?? 'open') === status) return page
+      return { ...page, nodes: page.nodes.map(item => item !== node ? item
+        : { ...item, data: { ...item.data, resource: { ...resource, status } } }) }
+    }, undefined, location.pageId),
+    locateCanvas: location => {
+      switchView('canvas')
+      locateNode(location)
+    },
+  }
+
   function importNodes(nodes: ResearchNode[]) {
     editPage(current => {
       const top = current.nodes.reduce((max, node) => Math.max(max, node.position.y + 340), 0)
@@ -404,6 +461,7 @@ function Workspace({ sample }: WorkspaceProps) {
     setMobileExplorer(false)
     setNodeJump(undefined)
     setArchiveOutline(undefined)
+    setSourceLinksDialog(undefined)
   }
 
   if (!fileSystem) return <p role="status">Opening research project…</p>
@@ -427,13 +485,17 @@ function Workspace({ sample }: WorkspaceProps) {
         <DropdownMenu>
           <DropdownMenuTrigger asChild><Button variant="ghost" size="sm" className="order-2 justify-self-end md:order-none">Project menu <ChevronDown /></Button></DropdownMenuTrigger>
           <DropdownMenuContent align="end">
+            <DropdownMenuItem onSelect={() => setSearchOpen(true)}>Project search</DropdownMenuItem>
             <DropdownMenuItem onSelect={() => setImportOpen(true)}>Import LaTeX</DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={() => void exportResearchToLatexWithFileSystem(paper, fileSystem, true)}>Export LaTeX ZIP</DropdownMenuItem>
             <DropdownMenuItem onSelect={() => exportResearchToMarkdown(paper)}>Export Outline as Markdown</DropdownMenuItem>
             <DropdownMenuItem onSelect={() => void exportResearchToPdf(paper)}>Print Outline as PDF</DropdownMenuItem>
             <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={() => setBackupOpen(true)}>Project Backup</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => setSourceLinksDialog({})}>
+              Source link check{sourceIssues.length > 0 && ` (${sourceIssues.length})`}
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => setBackupOpen({ writing: writing.current?.getDraftBackup() })}>Project Backup</DropdownMenuItem>
             <DropdownMenuItem onSelect={() => setSnapshotsOpen(true)} disabled={!storage || !storageKey}>Project Snapshots</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -451,7 +513,7 @@ function Workspace({ sample }: WorkspaceProps) {
             <Button size="sm" variant={overview ? 'ghost' : 'secondary'} aria-pressed={!overview} onClick={() => enterPage(page.id)}>Single page</Button>
           </div>
           <span className="hidden max-w-56 truncate px-1 text-xs text-muted-foreground sm:block">{overview ? `${canvas.pages.length} pages` : page.name}</span>
-          <Button variant="ghost" size="sm" onClick={() => setSearchOpen(true)}><Search /><span className="hidden sm:inline">Search canvas</span><span className="sr-only sm:hidden">Search canvas</span></Button>
+          <Button variant="ghost" size="sm" aria-label="Search project" onClick={() => setSearchOpen(true)}><Search /><span className="hidden sm:inline">Search project</span></Button>
           <Button variant="outline" size="sm" onClick={() => {
             const arrangement = arrangeCanvas(liveCanvas.current, () => crypto.randomUUID())
             setPendingEdit({ ...arrangement, arrangement })
@@ -503,19 +565,20 @@ function Workspace({ sample }: WorkspaceProps) {
               referenceLocations={data => data.resource?.kind === 'bibliography' && bibliographyLinks.byNode.has(data)
                 ? references?.uses.get(data.resource.key) ?? [] : []}
               onOpenReference={openReferenceLocation}
+              onRepairSource={nodeId => firstSourceIssue.has(nodeId) ? () => setSourceLinksDialog({ nodeId }) : undefined}
               sourceStatus={node => {
                 if (generated.nodes.has(node) || sectionLinks.byNode.has(node) || blockLinks.byNode.has(node)
-                  || bibliographyLinks.byNode.has(node)) return 'available'
-                if (archiveOutline && (node.sourceAnchor || node.figureAnchor || node.resource?.kind === 'bibliography')) return 'unavailable'
+                  || bibliographyLinks.byNode.has(node) || reviewSources.has(node)) return 'available'
+                if (archiveOutline && (node.sourceAnchor || node.figureAnchor || node.selectionAnchor || node.resource?.kind === 'bibliography')) return 'unavailable'
               }} onOpenSource={node => {
-                const location = sectionLinks.byNode.get(node) ?? blockLinks.byNode.get(node) ?? bibliographyLinks.byNode.get(node)
+                const location = sectionLinks.byNode.get(node) ?? blockLinks.byNode.get(node) ?? bibliographyLinks.byNode.get(node) ?? reviewSources.get(node)
                 if (location) writing.current?.locate(location)
                 else if (generated.nodes.has(node)) writing.current?.openGeneratedNode(node)
                 else return
                 switchView('write')
               }} onUnlinkSource={nodeId => (overview ? editOverview : editPage)(current => ({
                 ...current, nodes: current.nodes.map(node => node.id === nodeId
-                  ? { ...node, data: { ...node.data, sourceAnchor: undefined, figureAnchor: undefined,
+                  ? { ...node, data: { ...node.data, sourceAnchor: undefined, figureAnchor: undefined, selectionAnchor: undefined,
                     resource: node.data.resource?.kind === 'image' ? { kind: 'image', path: blockLinks.byNode.get(node.data)?.imagePath ?? node.data.resource.path } : node.data.resource,
                   } } : node),
               }))} sample={view === 'canvas' && !overview && Boolean(sample) && fileSystem.canvas === undefined} />
@@ -530,13 +593,29 @@ function Workspace({ sample }: WorkspaceProps) {
         <SourceProjectWorkspace key={sourceVersion} ref={writing} project={fileSystem} actions={writingActions}
           active={view === 'write'} generateSource={fileSystem.metadata.sourceMode === 'archive' ? undefined : generateSource}
           onOpenCanvas={() => switchView('canvas')} outlineCanvas={outlineCanvas} onArchiveOutline={setArchiveOutline}
-          referenceCanvasAction={referenceCanvasAction} />
+          referenceCanvasAction={referenceCanvasAction} review={review} />
       </div>
-      {searchOpen && <CanvasBlockContext.Provider value={blockLinks.byNode}>
-        <CanvasBibliographyContext.Provider value={bibliographyLinks.byNode}>
-          <CanvasSearchDialog pages={canvas.pages} onOpenChange={setSearchOpen} onLocate={locateNode} />
-        </CanvasBibliographyContext.Provider>
-      </CanvasBlockContext.Provider>}
+      {searchOpen && <ProjectSearchDialog pages={canvas.pages} catalog={sourceCatalog} blocks={blockLinks.byNode}
+        bibliography={bibliographyLinks.byNode} headings={sectionLinks.byNode} links={projectSearchLinks}
+        onClose={() => setSearchOpen(false)}
+        onCanvas={location => { switchView('canvas'); locateNode(location) }}
+        onSource={location => { setSearchOpen(false); openReferenceLocation(location) }} />}
+      {sourceLinksDialog && <SourceLinksDialog canvas={canvas} catalog={sourceCatalog} issues={sourceIssues}
+        initialNode={sourceLinksDialog.nodeId} onClose={() => setSourceLinksDialog(undefined)}
+        onLocate={issue => {
+          setSourceLinksDialog(undefined)
+          switchView('canvas')
+          locateNode(issue)
+        }}
+        onRepair={(issue, target) => {
+          if (!sourceCatalog) return false
+          const current = liveCanvas.current
+          const repaired = repairSourceLink(current, sourceCatalog, issue, target)
+          if (repaired === current) return false
+          editGraph(() => repaired)
+          return true
+        }}
+        onUndo={() => stepHistory('undo')} />}
       {pendingCard && <Dialog open onOpenChange={open => { if (!open) setPendingCard(undefined) }}>
         <DialogContent>
           <DialogTitle>Add to Canvas</DialogTitle>
@@ -590,12 +669,20 @@ function Workspace({ sample }: WorkspaceProps) {
           switchView('write')
           return true
         }} />
-      {backupOpen && <ProjectBackupDialog canvas={canvas} project={fileSystem} onRestore={async project => {
-        if (await writing.current?.prepareReplacement() === false) return false
+      {backupOpen && <ProjectBackupDialog canvas={canvas} project={fileSystem} writing={backupOpen.writing} onRestore={async (project, incoming) => {
+        if (!storage || !storageKey) {
+          if (incoming) throw new Error('Local storage is required to restore the drafts in this backup.')
+          if (await writing.current?.prepareReplacement() === false) return false
+          resetProjectViews()
+          setFileSystem(project)
+          return true
+        }
+        if (!await writing.current?.confirmBackupReplacement()) return false
+        await restoreProjectBackup(storage, [storageKey, fileSystem.metadata.createdAt], project, incoming)
         resetProjectViews()
-        setFileSystem(project)
+        acceptStoredProject(project)
         return true
-      }} onClose={() => setBackupOpen(false)} />}
+      }} onClose={() => setBackupOpen(undefined)} />}
       {snapshotsOpen && storage && storageKey && <ProjectSnapshotsDialog database={storage} storageKey={storageKey}
         project={{ ...fileSystem, canvas }} verifyRestore={() => writing.current
           ? writing.current.snapshotRestoreBlock() : 'Wait for Writing to finish opening before restoring a snapshot.'}

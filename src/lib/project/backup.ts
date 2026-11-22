@@ -2,6 +2,8 @@ import JSZip from 'jszip'
 import { z } from 'zod'
 import { researchCanvasSchema, type ResearchCanvas } from './research-graph'
 import type { ProjectDirectory, ProjectFile, ProjectFileSystem } from './types'
+import { isProjectPath } from './source-archive'
+import { draftConflicts, type PortableWritingState } from './writing-drafts'
 
 const format = 'research-canvas'
 export const projectBackupExtension = '.research-canvas'
@@ -22,9 +24,14 @@ const fileEntry = z.object({
   attachment: z.object({ entry: z.string().regex(/^attachments\/\d+$/), type: z.string() }).optional(),
 })
 
-const manifestSchema = z.object({
+const backupPath = z.string().refine(isProjectPath)
+const writingSchema = z.object({
+  drafts: z.record(backupPath, z.object({ base: z.string(), text: z.string() })),
+  view: z.object({ path: backupPath, lineNumber: z.number().int().positive(), column: z.number().int().positive() }).optional(),
+})
+
+const savedManifest = z.object({
   format: z.literal(format),
-  version: z.literal(2),
   canvas: researchCanvasSchema,
   project: z.object({
     metadata: z.object({
@@ -57,8 +64,12 @@ const manifestSchema = z.object({
     files: z.array(fileEntry),
   }),
 })
+const manifestSchema = z.discriminatedUnion('version', [
+  savedManifest.extend({ version: z.literal(2) }),
+  savedManifest.extend({ version: z.literal(3), writing: writingSchema }),
+])
 
-export async function encodeProjectBackup(canvas: ResearchCanvas, project: ProjectFileSystem): Promise<Blob> {
+export async function encodeProjectBackup(canvas: ResearchCanvas, project: ProjectFileSystem, writing?: PortableWritingState): Promise<Blob> {
   const archive = new JSZip()
   const files = await Promise.all([...project.files.values()].map(async (entry, index) => {
     if (entry.type === 'directory') return { type: entry.type, path: entry.path, name: entry.name }
@@ -70,7 +81,7 @@ export async function encodeProjectBackup(canvas: ResearchCanvas, project: Proje
   }))
   archive.file(manifestName, JSON.stringify({
     format,
-    version: 2,
+    ...(writing ? { version: 3, writing: writingSchema.parse(writing) } : { version: 2 }),
     canvas,
     project: { template: project.template, metadata: project.metadata, files },
   }))
@@ -83,8 +94,8 @@ export async function decodeProjectBackup(file: Blob) {
   if (!manifestFile) throw new Error('This file is not a Research Canvas backup.')
   const data: unknown = JSON.parse(await manifestFile.async('text'))
   const header = z.object({ format: z.literal(format), version: z.number() }).safeParse(data)
-  if (header.success && header.data.version !== 2) {
-    throw new Error('The project backup uses an unsupported version. This workspace supports version 2.')
+  if (header.success && header.data.version !== 2 && header.data.version !== 3) {
+    throw new Error('The project backup uses an unsupported version. This workspace supports versions 2 and 3.')
   }
   const manifest = manifestSchema.safeParse(data)
   if (!manifest.success) throw new Error('The project backup is invalid.')
@@ -111,8 +122,7 @@ export async function decodeProjectBackup(file: Blob) {
     }
   }
 
-  return {
-    canvas: canvas,
-    project: { ...project, files, canvas } satisfies ProjectFileSystem,
-  }
+  const restored = { ...project, files, canvas } satisfies ProjectFileSystem
+  const writing = manifest.data.version === 3 ? manifest.data.writing : undefined
+  return { canvas, project: restored, writing, conflicts: writing ? draftConflicts(restored, writing.drafts) : [] }
 }

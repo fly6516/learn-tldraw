@@ -3,6 +3,7 @@ import JSZip from 'jszip'
 import { decodeProjectBackup, encodeProjectBackup } from './backup'
 import { addFigure, createProjectFileSystem, updateFileContent } from './file-system'
 import { emptyPage } from './research-graph'
+import { applyWritingDrafts } from './writing-drafts'
 
 const template = { documentClass: 'article', preamble: '', packages: [], metadata: {} }
 const node = (id, x, data = {}) => ({
@@ -52,4 +53,24 @@ test('rejects old backups, invalid graphs and missing attachments', async () => 
   await expect(read(corrupted)).rejects.toThrow('invalid')
   archive.remove('attachments')
   await expect(read(manifest)).rejects.toThrow('Missing project attachment')
+})
+
+test('keeps portable drafts separate and reports changed or missing baselines on import', async () => {
+  const project = updateFileContent(createProjectFileSystem(template), 'preamble.tex', 'Saved preamble')
+  const view = { path: 'preamble.tex', lineNumber: 1, column: 3 }
+  const writing = { view, drafts: {
+    'preamble.tex': { base: 'Saved preamble', text: 'Local draft' },
+    'missing.tex': { base: 'Prior source', text: 'Keep this local draft' },
+  } }
+  const savedOnly = await decodeProjectBackup(await encodeProjectBackup(canvas, project))
+  expect(savedOnly.writing).toBeUndefined()
+  const portable = await decodeProjectBackup(await encodeProjectBackup(canvas, project, writing))
+  expect(portable.writing).toEqual(writing)
+  expect(portable.conflicts).toEqual(['missing.tex'])
+  expect(portable.project.files.get('preamble.tex').content).toBe('Saved preamble')
+  expect(applyWritingDrafts(portable.project, portable.writing.drafts).files.get('preamble.tex').content).toBe('Local draft')
+  const conflicting = updateFileContent(project, 'preamble.tex', 'A newer saved version')
+  const restored = await decodeProjectBackup(await encodeProjectBackup(canvas, conflicting, writing))
+  expect(restored.conflicts).toEqual(['preamble.tex', 'missing.tex'])
+  expect(applyWritingDrafts(restored.project, restored.writing.drafts)).toBe(restored.project)
 })

@@ -5,6 +5,7 @@ export type WritingDraft = { base: string; text: string }
 export type WritingDrafts = Record<string, WritingDraft>
 export type WritingView = { path: string; lineNumber: number; column: number }
 export type WritingKey = [workspace: string, project: string]
+export type PortableWritingState = { drafts: WritingDrafts; view?: WritingView }
 
 export function editableSource(project: ProjectFileSystem, path: string) {
   const file = project.files.get(path)

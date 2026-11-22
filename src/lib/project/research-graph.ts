@@ -33,6 +33,10 @@ const nodeSchema = z.object({
       z.object({ kind: z.literal('heading'), project: z.string().min(1), path: z.string().min(1),
         command: z.string().min(1), titleSource: z.string().min(1) }),
     ]).optional(),
+    selectionAnchor: z.object({
+      project: z.string().min(1), path: z.string().min(1), quote: z.string().min(1).max(4000),
+      before: z.string().max(48), after: z.string().max(48),
+    }).optional(),
     metadata: z.object({
       originalTitle: z.string().optional(), sectionNumber: z.string().optional(),
       imported: z.boolean().optional(), importSource: z.string().optional(),
@@ -90,6 +94,7 @@ export const researchCanvasSchema = z.object({
 export type ResearchNode = z.infer<typeof nodeSchema>
 export type SectionAnchor = NonNullable<ResearchNode['data']['sourceAnchor']>
 export type FigureAnchor = NonNullable<ResearchNode['data']['figureAnchor']>
+export type SelectionAnchor = NonNullable<ResearchNode['data']['selectionAnchor']>
 export type ResearchEdge = z.infer<typeof edgeSchema>
 export type ResearchPage = z.infer<typeof pageSchema>
 export type ResearchCanvas = z.infer<typeof researchCanvasSchema>

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, 
 import { createPortal } from 'react-dom'
 import dynamic from 'next/dynamic'
 import type { editor, IPosition } from 'monaco-editor'
-import { BookOpen, ChevronRight, CircleAlert, Download, Ellipsis, FileCode2, FileText, Folder, LocateFixed, PanelLeft, Play, Save, Sparkles, X } from 'lucide-react'
+import { BookOpen, ChevronRight, CircleAlert, Download, Ellipsis, FileCode2, FileText, Folder, ListChecks, LocateFixed, PanelLeft, Play, Save, Sparkles, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
@@ -19,16 +19,19 @@ import { ReferencesPanel } from './ReferencesPanel'
 import { OutlinePanel, type OutlineCanvasActions } from './OutlinePanel'
 import { buildProjectOutline } from '@/lib/project/outline'
 import { indexOutline } from '@/lib/project/section-links'
-import { readProjectLatexBlocks, type LatexBlock } from '@/lib/project/latex-blocks'
+import { readProjectLatexBlocks } from '@/lib/project/latex-blocks'
+import type { CanvasSourceCatalog } from '@/lib/project/canvas-source-links'
 import { checkCitations, collectBibliography, indexCanvasReferences, type BibliographyEntry } from '@/lib/project/references'
-import { sourcePosition, type SourceLocation } from '@/lib/project/latex-source'
+import { indexLatexLabels, sourceOffsetAtPosition, sourcePosition, type SourceLocation } from '@/lib/project/latex-source'
 import type { SourceProblem } from './MonacoSourceEditor'
 import type { CompileDiagnostic, CompileReport } from '@/lib/project/compile-diagnostics'
 import { findPdfRegion, type SyncRegion } from '@/lib/project/source-sync'
-import { applyWritingDrafts, draftConflicts, editableSource, type WritingDrafts } from '@/lib/project/writing-drafts'
+import { applyWritingDrafts, draftConflicts, editableSource, type PortableWritingState, type WritingDrafts } from '@/lib/project/writing-drafts'
 import { clearWritingState, commitWritingDrafts } from '@/lib/project/storage'
 import { useWritingDrafts } from './useWritingDrafts'
 import { SourceSearchPanel } from './SourceSearchPanel'
+import { WritingReviewPanel, type WritingReviewActions } from './WritingReviewPanel'
+import { makeSelectionAnchor, type ReviewTarget } from '@/lib/project/review-links'
 
 const MonacoSourceEditor = dynamic(() => import('./MonacoSourceEditor').then(module => module.MonacoSourceEditor), {
   ssr: false,
@@ -100,6 +103,8 @@ export interface SourceWorkspaceHandle {
   openGeneratedNode: (node: ResearchNodeData) => void
   confirmLeave: () => boolean
   snapshotRestoreBlock: () => string | undefined
+  getDraftBackup: () => PortableWritingState | undefined
+  confirmBackupReplacement: () => Promise<boolean>
   prepareReplacement: () => Promise<boolean>
 }
 
@@ -120,7 +125,7 @@ function editorSourcePath(model: editor.ITextModel | null) {
   return path.slice(path.indexOf('/', 1) + 1)
 }
 
-export function SourceProjectWorkspace({ project, ref, active, actions, generateSource, onOpenCanvas, outlineCanvas, onArchiveOutline, referenceCanvasAction }: {
+export function SourceProjectWorkspace({ project, ref, active, actions, generateSource, onOpenCanvas, outlineCanvas, onArchiveOutline, referenceCanvasAction, review }: {
   project: ProjectFileSystem
   ref: Ref<SourceWorkspaceHandle>
   active: boolean
@@ -128,9 +133,9 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   generateSource?: GenerateSource
   onOpenCanvas: () => void
   outlineCanvas: OutlineCanvasActions
-  onArchiveOutline: (outline: { project: string; index: ReturnType<typeof indexOutline>; blocks: LatexBlock[];
-    references: ReturnType<typeof indexCanvasReferences> } | undefined) => void
+  onArchiveOutline: (outline: CanvasSourceCatalog | undefined) => void
   referenceCanvasAction: (entry: BibliographyEntry) => { label: string; run: () => void } | undefined
+  review: WritingReviewActions
 }) {
   const { setFileSystem, storage, storageKey, acceptStoredProject } = useProjectFileSystem()
   const journal = useWritingDrafts(storage, storageKey, project.metadata.createdAt)
@@ -161,7 +166,8 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const [pdfPage, setPdfPage] = useState(1)
   const [pdfTarget, setPdfTarget] = useState<SyncRegion | null>(null)
   const [syncMessage, setSyncMessage] = useState('')
-  const [panel, setPanel] = useState<'problems' | 'references' | 'ai' | null>(null)
+  const [panel, setPanel] = useState<'problems' | 'references' | 'ai' | 'review' | null>(null)
+  const [reviewCursor, setReviewCursor] = useState<{ path: string; line: number }>()
   const [navigation, setNavigation] = useState<'files' | 'outline' | 'search'>('files')
   const [searchQuery, setSearchQuery] = useState('')
   const [narrowView, setNarrowView] = useState<'source' | 'pdf'>('source')
@@ -197,8 +203,9 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     const preamble = new Map<string, string>()
     const headings = buildProjectOutline(source, main, undefined, (path, text) => documents.set(path, text),
       (path, text) => preamble.set(path, text))
-    const blocks = readProjectLatexBlocks(source, main, documents, preamble)
-    return { headings, blocks, index: indexOutline(headings) }
+    const labels = indexLatexLabels(new Map([...preamble, ...documents]))
+    const blocks = readProjectLatexBlocks(source, main, documents, preamble, labels)
+    return { headings, blocks, index: indexOutline(headings, labels) }
   }, [workingFiles, main])
   const source = currentFile?.content ?? ''
   const workingFile = workingProject.files.get(selected)
@@ -210,9 +217,11 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const tree = useMemo(() => getFileTree(project), [project])
   const bibliography = useMemo(() => collectBibliography(workingProject), [workingProject])
   const references = useMemo(() => indexCanvasReferences(workingProject, bibliography), [workingProject, bibliography])
+  const catalog = useMemo(() => ({ project: project.metadata.createdAt, index, blocks, references, files: workingFiles }),
+    [index, blocks, references, workingFiles, project.metadata.createdAt])
   useLayoutEffect(() => {
-    onArchiveOutline(journal.ready ? { project: project.metadata.createdAt, index, blocks, references } : undefined)
-  }, [index, blocks, references, journal.ready, onArchiveOutline, project.metadata.createdAt])
+    onArchiveOutline(journal.ready ? catalog : undefined)
+  }, [catalog, journal.ready, onArchiveOutline])
   const currentDiagnostics = useMemo(() => diagnosticsStale ? [] : diagnostics.filter(issue => {
     const file = workingFiles.get(issue.path)
     return file && 'content' in file && typeof file.content === 'string'
@@ -240,7 +249,21 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     return () => window.removeEventListener('beforeunload', warn)
   }, [unprotected, journal.ready])
 
-  const captureCursor = useCallback((path: string, position: IPosition) => recordView({ path, ...position }), [recordView])
+  const captureCursor = useCallback((path: string, position: IPosition) => {
+    recordView({ path, ...position })
+    if (panel === 'review') setReviewCursor(current => current?.path === path && current.line === position.lineNumber
+      ? current : { path, line: position.lineNumber })
+  }, [recordView, panel])
+
+  function readReviewSelection(): ReviewTarget | undefined {
+    const model = editorRef.current?.getModel()
+    const selection = editorRef.current?.getSelection()
+    if (!isTex || currentFile?.type === 'generated' || !model || !selection || selection.isEmpty()
+      || editorSourcePath(model) !== selected) return
+    const anchor = makeSelectionAnchor(project.metadata.createdAt, selected, draft,
+      sourceOffsetAtPosition(draft, selection.getStartPosition()), sourceOffsetAtPosition(draft, selection.getEndPosition()))
+    if (anchor) return { type: 'selection', anchor }
+  }
 
   const applyPendingJump = useCallback((instance: editor.IStandaloneCodeEditor | null) => {
     editorRef.current = instance
@@ -314,6 +337,22 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       if (journal.loadError) return 'Local drafts could not be checked. Reopen the project before restoring a snapshot.'
     },
     confirmLeave: () => !unprotected || window.confirm('Some drafts have not been saved locally. Leave this page?'),
+    getDraftBackup() {
+      if (!journal.ready || journal.loadError) return
+      const instance = editorRef.current
+      const position = instance?.getPosition()
+      const view = position && editorSourcePath(instance?.getModel() ?? null) === selected ? { path: selected, ...position } : restoredView
+      return { drafts, view }
+    },
+    async confirmBackupReplacement() {
+      if (writeInProgress.current || !journal.ready || journal.loadError) {
+        setSaveError('Wait for local drafts to finish loading or saving before replacing the project.')
+        return false
+      }
+      if (!confirmDiscard()) return false
+      await journal.storedDrafts()
+      return true
+    },
     async prepareReplacement() {
       if (writeInProgress.current || !journal.ready || !confirmDiscard()) return false
       try {
@@ -636,10 +675,13 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       <section aria-label="Writing tools" className="flex min-h-0 max-h-[42%] shrink-0 flex-col border-t bg-white [@media(max-height:550px)]:max-h-[32%]">
         <div className="flex shrink-0 flex-wrap items-center gap-0.5 px-1.5 py-1 sm:gap-1 sm:px-2">
           {([
-            ['problems', 'Problems', CircleAlert], ['references', 'References', BookOpen], ['ai', 'Chapter AI', Sparkles],
+            ['problems', 'Problems', CircleAlert], ['references', 'References', BookOpen], ['review', 'Review', ListChecks], ['ai', 'Chapter AI', Sparkles],
           ] as const).map(([tab, label, Icon]) => <Button key={tab} size="sm" variant={panel === tab ? 'secondary' : 'ghost'}
             className="gap-1 px-1.5 text-xs sm:gap-1.5 sm:px-3 sm:text-sm" aria-expanded={panel === tab} aria-controls="writing-tools-content" disabled={tab === 'ai' && (!isTex || readOnly)}
-            onClick={() => setPanel(current => current === tab ? null : tab)}>
+            onClick={() => {
+              if (tab === 'review') setReviewCursor({ path: selected, line: editorRef.current?.getPosition()?.lineNumber ?? 1 })
+              setPanel(current => current === tab ? null : tab)
+            }}>
             <Icon className="hidden sm:block" /> {label}
             {tab === 'problems' && (problems.length > 0 || error || currentWarnings) && <span className={currentDiagnostics.some(problem => problem.severity === 'error') || error
               ? 'rounded-full bg-red-100 px-1.5 text-xs text-red-900' : 'rounded-full bg-amber-100 px-1.5 text-xs text-amber-900'}>
@@ -673,6 +715,9 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
           </div>}
           {panel === 'references' && <ReferencesPanel project={workingProject} entries={bibliography} path={selected} draft={draft}
             canInsert={isTex && !readOnly && !locked} onInsert={insertReference} onLocate={locate} canvasAction={referenceCanvasAction} />}
+          {panel === 'review' && <WritingReviewPanel key={selected} path={selected} line={reviewCursor?.path === selected ? reviewCursor.line : 1}
+            catalog={catalog} canvas={outlineCanvas.canvas} actions={review} canSelect={isTex && currentFile?.type !== 'generated'}
+            readSelection={readReviewSelection} onLocate={locate} />}
           {panel === 'ai' && isTex && !readOnly && <ChapterAiPanel key={selected} project={workingProject} path={selected} main={main}
             source={source} draft={draft} log={log} bibliography={bibliography} disabled={locked}
             onApply={text => {

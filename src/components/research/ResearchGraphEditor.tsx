@@ -97,7 +97,7 @@ function canSetParent(page: ResearchPage, nodeId: string, parentId: string) {
 }
 
 function NodeDetails({ node, page, onEdit, onFinishEdit, onConnect, onOpenSource, sourceUnavailable, onUnlinkSource, canParent,
-  remoteLinks, references, onOpenReference }: {
+  remoteLinks, references, onOpenReference, onRepairSource }: {
   node: ResearchNode
   page: ResearchPage
   onEdit: (data: ResearchNode['data'], field?: string) => void
@@ -110,6 +110,7 @@ function NodeDetails({ node, page, onEdit, onFinishEdit, onConnect, onOpenSource
   remoteLinks: { id: string; title: string; onLocate: () => void; onRemove: () => void }[]
   references: ReferenceLocation[]
   onOpenReference: (reference: ReferenceLocation) => void
+  onRepairSource?: () => void
 }) {
   const { data } = node
   const research = data.resource?.kind === 'research' ? data.resource : undefined
@@ -118,8 +119,9 @@ function NodeDetails({ node, page, onEdit, onFinishEdit, onConnect, onOpenSource
   return (
     <aside aria-label="Research node properties" className="space-y-3 p-3">
       <h2 className="font-semibold">Research Node</h2>
-      {(onOpenSource || onUnlinkSource) && <div className="flex flex-wrap gap-2">
+      {(onOpenSource || onUnlinkSource || onRepairSource) && <div className="flex flex-wrap gap-2">
         {onOpenSource && <Button size="sm" variant="outline" onClick={onOpenSource}>Open source</Button>}
+        {onRepairSource && <Button size="sm" variant="outline" onClick={onRepairSource}>Repair source link</Button>}
         {onUnlinkSource && <Button size="sm" variant="ghost" onClick={onUnlinkSource}>Remove source link</Button>}
       </div>}
       {sourceUnavailable && <p className="text-sm text-muted-foreground">Linked source is missing or ambiguous.</p>}
@@ -228,7 +230,7 @@ function NodeDetails({ node, page, onEdit, onFinishEdit, onConnect, onOpenSource
 
 export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, onHistory, canUndo, canRedo,
   sample, actions, sourceStatus, onOpenSource, onUnlinkSource, jumpTo, onJumpHandled, overview, validateConnection,
-  canParent, remoteLinks, referenceLocations, onOpenReference }: {
+  canParent, remoteLinks, referenceLocations, onOpenReference, onRepairSource }: {
   page: ResearchPage
   updatePage: (update: (current: ResearchPage) => ResearchPage) => void
   editPage: (update: (current: ResearchPage) => ResearchPage, group?: string) => void
@@ -255,6 +257,7 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
   remoteLinks: (nodeId: string) => Parameters<typeof NodeDetails>[0]['remoteLinks']
   referenceLocations: (data: ResearchNode['data']) => ReferenceLocation[]
   onOpenReference: (reference: ReferenceLocation) => void
+  onRepairSource: (nodeId: string) => (() => void) | undefined
 }) {
   const [selectedNodes, setSelectedNodes] = useState<string[]>([])
   const [selectedEdges, setSelectedEdges] = useState<string[]>([])
@@ -580,9 +583,11 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
           <NodeDetails key={activeNode.id} node={activeNode} page={page}
             onOpenSource={sourceStatus(activeNode.data) === 'available' ? () => onOpenSource(activeNode.data) : undefined}
             sourceUnavailable={sourceStatus(activeNode.data) === 'unavailable'}
-            onUnlinkSource={activeNode.data.sourceAnchor || activeNode.data.figureAnchor ? () => onUnlinkSource(activeNode.id) : undefined}
+            onUnlinkSource={activeNode.data.sourceAnchor || activeNode.data.figureAnchor || activeNode.data.selectionAnchor
+              ? () => onUnlinkSource(activeNode.id) : undefined}
             canParent={canParent} remoteLinks={remoteLinks(activeNode.id)}
             references={referenceLocations(activeNode.data)} onOpenReference={onOpenReference}
+            onRepairSource={onRepairSource(activeNode.id)}
             onFinishEdit={onFinishEdit}
             onEdit={(data, field) => editPage(current => ({
               ...current, nodes: current.nodes.map(node => node.id === activeNode.id ? { ...node, data } : node),
