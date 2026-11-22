@@ -33,6 +33,7 @@ import { clearWritingState, commitFileOperation, commitWritingDrafts } from '@/l
 import type { FileOperation } from '@/lib/project/file-refactor'
 import { FileOperationDialog, type FileOperationPlan } from './FileOperationDialog'
 import { SubmissionDialog } from './SubmissionDialog'
+import { RevisionRoundsDialog } from './RevisionRoundsDialog'
 import { exportExternalBuild, prepareSubmission, type SubmissionIssue, type SubmissionVersion } from '@/lib/project/submission'
 import type { ExternalEngine } from '@/lib/project/compile-compatibility'
 import { useWritingDrafts } from './useWritingDrafts'
@@ -177,6 +178,8 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const [busy, setBusy] = useState(false)
   const [writing, setWriting] = useState(false)
   const [submissionOpen, setSubmissionOpen] = useState(false)
+  const [revision, setRevision] = useState<{ submissionId?: string }>()
+  const [revisionRoundId, setRevisionRoundId] = useState<string>()
   const [includeDrafts, setIncludeDrafts] = useState(false)
   const [submissionResult, setSubmissionResult] = useState<CompiledSubmission>()
   const [externalSubmission, setExternalSubmission] = useState<ExternalSubmission>()
@@ -218,6 +221,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const pendingJump = useRef<{ path: string; range?: { start: IPosition; end: IPosition } } | null>(null)
   const isTex = /\.tex$/i.test(selected)
   const draftPaths = Object.keys(drafts)
+  const revisionDraftPaths = useMemo(() => new Set(Object.keys(drafts)), [drafts])
   const dirty = draftPaths.length > 0
   const conflicts = useMemo(() => draftConflicts(project, drafts), [project, drafts])
   const unprotected = journal.pending > 0 || (dirty && (journal.loadError || journal.failed.size > 0))
@@ -945,6 +949,8 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         </div>
         <div className="flex flex-wrap items-center gap-x-3">
           <span>{/\.bib$/i.test(selected) ? 'BibTeX' : isTex ? 'LaTeX' : 'Plain text'} · Ctrl / ⌘ + S to save</span>
+          {storage && journal.key && <Button variant="outline" size="sm" className="h-7" disabled={locked}
+            onClick={() => setRevision({})}>Revision rounds</Button>}
           <Button variant="outline" size="sm" className="h-7" disabled={!main || locked} onClick={() => {
             resetSubmissionBuild()
             setSubmissionOpen(true)
@@ -975,11 +981,17 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
           if (checked && working && 'content' in checked && 'content' in working && checked.content === working.content) locate(location)
           else openFile(location.path, location.line)
         }}
+        onStartRevision={submissionId => { setSubmissionOpen(false); setRevision({ submissionId }) }}
         onCompile={() => {
           resetSubmissionBuild()
           const selection = getSubmissionSelection()
           if (selection) void compile(selection)
         }} />}
+      {revision && storage && journal.key && <RevisionRoundsDialog database={storage} storageKey={journal.key}
+        initialSubmission={revision.submissionId} roundId={revisionRoundId} onSelectRound={setRevisionRoundId}
+        current={workingProject} catalog={catalog} cards={review.items} drafts={revisionDraftPaths} conflicts={conflicts}
+        openSource={(path, location) => { setRevision(undefined); openFile(path, location?.line, location) }}
+        openCanvas={card => { setRevision(undefined); review.locateCanvas(card) }} onClose={() => setRevision(undefined)} />}
       {fileOperation && <FileOperationDialog request={fileOperation.request} project={project} writing={{ drafts, view: fileOperation.view }}
         main={main} onClose={() => setFileOperation(undefined)} onApply={applyFileOperation} />}
       {comparison && comparedDraft && <Dialog open onOpenChange={open => { if (!open) setComparison(undefined) }}>

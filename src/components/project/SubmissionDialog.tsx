@@ -24,7 +24,7 @@ type VersionDraft = Omit<SubmissionVersion, 'id' | 'createdAt' | 'name'>
 
 export function SubmissionDialog({ main, drafts, includeDrafts, onDraftChoice, conflicting, paths, excluded, onToggle,
   issues, ready, busy, error, log, result, compilerIssues, onClose, onCompile, onLocate, database, storageKey,
-  compatibility, external, onPrepareExternal, onAttachExternal }: {
+  compatibility, external, onPrepareExternal, onAttachExternal, onStartRevision }: {
   main: string
   drafts: string[]
   includeDrafts: boolean
@@ -49,6 +49,7 @@ export function SubmissionDialog({ main, drafts, includeDrafts, onDraftChoice, c
   external?: { downloadUrl: string; checksum: string }
   onPrepareExternal: () => Promise<void>
   onAttachExternal: (pdf: File, engine: ExternalEngine, checksum: string) => void
+  onStartRevision: (submissionId: string) => void
 }) {
   const [versions, setVersions] = useState<SubmissionVersionInfo[]>([])
   const [versionName, setVersionName] = useState('')
@@ -172,6 +173,7 @@ export function SubmissionDialog({ main, drafts, includeDrafts, onDraftChoice, c
           <div className="mt-2 flex flex-wrap gap-2">
             <Button size="sm" variant="outline" onClick={() => void downloadArchived(version, 'zip')}>Download archived ZIP</Button>
             <Button size="sm" variant="outline" onClick={() => void downloadArchived(version, 'pdf')}>Download archived PDF</Button>
+            <Button size="sm" variant="outline" onClick={() => onStartRevision(version.id)}>Start revision</Button>
           </div>
         </details>)}
       </section>}

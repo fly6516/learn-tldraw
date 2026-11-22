@@ -2,6 +2,7 @@ import type { ProjectFileSystem } from './types'
 import type { ProjectSnapshot, ProjectSnapshotInfo } from './snapshots'
 import { restoreSnapshotFiles } from './snapshots'
 import type { SubmissionVersion, SubmissionVersionInfo } from './submission'
+import type { RevisionComment, RevisionResponse, RevisionRound } from './revision-rounds'
 import { applyWritingDrafts, draftConflicts, sameDraft, type PortableWritingState, type WritingDraft, type WritingDrafts, type WritingKey, type WritingView } from './writing-drafts'
 
 const storeName = 'projects'
@@ -60,6 +61,72 @@ export async function readSubmissionFiles(database: IDBDatabase, key: WritingKey
     const request = transaction.objectStore(storeName).get(['submission-files', ...key, id])
     await complete(transaction)
     return request.result as Pick<SubmissionVersion, 'pdf' | 'zip'> | undefined
+}
+
+export async function listRevisionRounds(database: IDBDatabase, key: WritingKey) {
+    const transaction = database.transaction(storeName)
+    const prefix = ['revision-round', ...key]
+    const request = transaction.objectStore(storeName).getAll(IDBKeyRange.bound(prefix, [...prefix, []], true, true))
+    await complete(transaction)
+    return (request.result as RevisionRound[]).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+}
+
+export async function createRevisionRound(database: IDBDatabase, key: WritingKey, round: RevisionRound) {
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    const store = transaction.objectStore(storeName)
+    const baseline = store.getKey(['submission-files', ...key, round.submissionId])
+    baseline.onsuccess = () => {
+        if (baseline.result) store.add(round, ['revision-round', ...key, round.id])
+    }
+    await complete(transaction)
+    if (!baseline.result) throw new Error('The archived source ZIP is unavailable.')
+}
+
+export async function addRevisionComment(database: IDBDatabase, key: WritingKey, roundId: string, comment: RevisionComment) {
+    return updateRevisionRound(database, key, roundId, round => {
+        if (comment.kind === 'canvas' && round.comments.some(item => item.kind === 'canvas' && item.nodeId === comment.nodeId)) {
+            throw new Error('This Canvas card is already in the round.')
+        }
+        return { ...round, comments: [...round.comments, comment] }
+    })
+}
+
+export async function saveRevisionResponse(database: IDBDatabase, key: WritingKey, roundId: string, commentId: string, response?: RevisionResponse) {
+    return updateRevisionRound(database, key, roundId, round => {
+        if (!round.comments.some(item => item.id === commentId)) throw new Error('The reviewer comment is unavailable.')
+        return { ...round, comments: round.comments.map(item => item.id === commentId ? { ...item, response } : item) }
+    })
+}
+
+export async function linkRevisedSubmission(database: IDBDatabase, key: WritingKey, roundId: string, submissionId?: string) {
+    return updateRevisionRound(database, key, roundId, round => {
+        if (submissionId === round.submissionId) throw new Error('Choose a separate revised submission.')
+        return { ...round, revisedSubmissionId: submissionId }
+    }, submissionId)
+}
+
+async function updateRevisionRound(database: IDBDatabase, key: WritingKey, roundId: string,
+    update: (round: RevisionRound) => RevisionRound, submissionId?: string) {
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    const store = transaction.objectStore(storeName)
+    const entry = ['revision-round', ...key, roundId]
+    const version = submissionId ? store.getKey(['submission-files', ...key, submissionId]) : undefined
+    const request = store.get(entry)
+    let updated: RevisionRound | undefined
+    let failure: unknown
+    request.onsuccess = () => {
+        const round = request.result as RevisionRound | undefined
+        if (!round) return
+        try {
+            if (version && !version.result) throw new Error('The revised source ZIP is unavailable.')
+            updated = update(round)
+            store.put(updated, entry)
+        } catch (cause) { failure = cause }
+    }
+    await complete(transaction)
+    if (failure) throw failure
+    if (!updated) throw new Error('The revision round is unavailable.')
+    return updated
 }
 
 export async function listProjectSnapshots(database: IDBDatabase, key: WritingKey) {

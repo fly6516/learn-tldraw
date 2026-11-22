@@ -1,5 +1,5 @@
 import JSZip from 'jszip'
-import type { ProjectFileSystem } from './types'
+import type { ProjectDirectory, ProjectFile, ProjectFileSystem } from './types'
 
 export const projectTextExtension = /\.(tex|bib|cls|sty|bst|bbl|cfg|def|ltx|tikz|txt|md|csv|tsv|jsonl?|toml)$/i
 const imageTypes: Record<string, string> = {
@@ -63,13 +63,20 @@ export async function importSourceArchive(file: File, maxBytes = 128 * 1024 * 10
   }
 }
 
+export function sourceArchiveEntry(entry: ProjectFile | ProjectDirectory) {
+  if (entry.type === 'directory' || !('content' in entry || 'blob' in entry)) return undefined
+  return entry.blob ?? entry.content
+}
+
 export async function exportSourceArchive(project: ProjectFileSystem, entryDate?: Date): Promise<Blob> {
   const archive = new JSZip()
   const options = { createFolders: false, date: entryDate }
   for (const entry of project.files.values()) {
     if (entry.type === 'directory') archive.file(entry.path, '', { ...options, dir: true })
-    else if ('blob' in entry && entry.blob) archive.file(entry.path, await entry.blob.arrayBuffer(), options)
-    else if ('content' in entry && entry.content !== undefined) archive.file(entry.path, entry.content, options)
+    else {
+      const content = sourceArchiveEntry(entry)
+      if (content !== undefined) archive.file(entry.path, content instanceof Blob ? await content.arrayBuffer() : content, options)
+    }
   }
   return archive.generateAsync({ type: 'blob' })
 }

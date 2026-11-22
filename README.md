@@ -106,6 +106,24 @@ and the current Canvas. Resolve any local drafts for the selected files first. F
 restore requires resolving all drafts. Each restore keeps a recovery snapshot. Snapshots
 live in this browser. Use **Project Backup** to move a saved project between browsers.
 
+## Revision rounds
+
+In **Prepare submission → Archived submissions**, open a saved version and choose **Start
+revision**. Name the round and add a reviewer comment at a source file or heading, or link an
+existing Canvas review card. Reopen the round from **Revision rounds** in Writing. Source links
+use the current manuscript, and a linked card can also be located on Canvas.
+
+**Compare files** reads the original archived ZIP and compares it with current project files,
+including applicable local drafts. It lists added, removed, modified, and unchanged files and
+opens a side-by-side diff for text. A file excluded from the original ZIP has no archived copy.
+Revision rounds and their submission archives are stored in the current browser.
+
+In **Responses and letter**, write a response for each comment. Link the changed files or
+explain why you kept the text. After archiving the revised submission, select it in the round.
+**Compare files** can then show the two archived ZIPs directly. Preview or download the
+response letter as Markdown. The letter marks unanswered comments and evidence that cannot
+be verified against the selected revised ZIP.
+
 ## Whole-paper Canvas and LaTeX blocks
 
 Open **Whole paper** to edit all Canvas pages together, or choose **Single page** to focus
