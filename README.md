@@ -157,11 +157,27 @@ Set `DEEPSEEK_API_KEY` on the local Next.js server to use the official DeepSeek 
 `OPENAI_BASE_URL` optionally points to a compatible Responses server. Keep the key on the
 server and run the workbench on loopback.
 
-Select a `.tex` file in **Files**, open **Chapter AI**, then choose **Review Chapter**
-or **Rewrite Chapter**. The request includes the selected draft, related source excerpts such
-as the main file, bibliography and local macros, and the end of the most recent compile log.
-Review the before/after passages and choose **Apply to Source** to save the edits to that file.
-Choose **Compile PDF** to typeset the updated project.
+Open an editable `.tex` file and toggle **Chapter AI** beside PDF Preview, or in the Writing
+toolbar on narrow screens. Choose **Review Chapter** or **Rewrite Chapter**. The Vercel AI SDK
+gives the configured model read-only tools for project search, bounded source excerpts,
+bibliography and label lookup, and compiler diagnostics. The model receives the selected chapter
+and the excerpts its tools request. Compiler output from an earlier source version is marked stale.
+
+Select a result in **Project evidence** to locate the source. The chapter being reviewed stays
+pinned while you inspect another file. Review the before/after passages, then choose **Apply to
+Source** to save to the target file. Changes to the target or main file require a new suggestion
+before applying. Choose **Compile PDF** to typeset the updated project.
+
+In **Multiple files**, select two to six editable LaTeX files. **Review files** shows
+findings with source locations verified against tool results. **Propose edits** groups the
+diffs by file. Select individual changes and apply them together to local drafts, then save
+to the project when ready. Changes to any selected source invalidate its old proposal.
+
+In **Revision rounds → Responses and letter**, select a revised submission and the files
+that support the response. **Draft response with AI** sends the reviewer comment, author
+notes and bounded excerpts from the two archived ZIPs. For retained text, supply your own
+reason. **Use AI draft** puts the proposal in the response editor; save the response
+separately after review.
 
 ## References
 

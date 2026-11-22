@@ -102,5 +102,18 @@ export function useWritingDrafts(storage: IDBDatabase | null, workspace: string 
     setFailed(new Set())
   }
 
-  return { key, drafts, restoredView, ready, loadError, pending, failed, change, discard, storedDrafts, forget, recordView, acceptWritingState }
+  function acceptDraftBatch(entries: WritingDrafts) {
+    const merge = (current: WritingDrafts) => {
+      const next = { ...current }
+      for (const [path, draft] of Object.entries(entries)) {
+        if (draft.text === draft.base) delete next[path]
+        else next[path] = draft
+      }
+      return next
+    }
+    stored.current = merge(stored.current)
+    setDrafts(merge)
+  }
+
+  return { key, drafts, restoredView, ready, loadError, pending, failed, change, discard, storedDrafts, forget, recordView, acceptWritingState, acceptDraftBatch }
 }

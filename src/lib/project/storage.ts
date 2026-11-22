@@ -3,7 +3,7 @@ import type { ProjectSnapshot, ProjectSnapshotInfo } from './snapshots'
 import { restoreSnapshotFiles } from './snapshots'
 import type { SubmissionVersion, SubmissionVersionInfo } from './submission'
 import type { RevisionComment, RevisionResponse, RevisionRound } from './revision-rounds'
-import { applyWritingDrafts, draftConflicts, sameDraft, type PortableWritingState, type WritingDraft, type WritingDrafts, type WritingKey, type WritingView } from './writing-drafts'
+import { applyWritingDrafts, draftConflicts, editableSource, sameDraft, type PortableWritingState, type WritingDraft, type WritingDrafts, type WritingKey, type WritingView } from './writing-drafts'
 
 const storeName = 'projects'
 
@@ -265,6 +265,32 @@ export async function writeWritingView(database: IDBDatabase, key: WritingKey, v
     const transaction = database.transaction(storeName, 'readwrite')
     transaction.objectStore(storeName).put(view, ['view', ...key])
     await complete(transaction)
+}
+
+export async function writeWritingDraftBatch(database: IDBDatabase, key: WritingKey, edits: WritingDrafts, expected: WritingDrafts,
+    expectedMain: string | undefined) {
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    const store = transaction.objectStore(storeName)
+    const project = store.get(key[0])
+    const requests = Object.entries(edits).map(([path, draft]) => {
+        const entry = ['draft', ...key, path]
+        return { path, draft, entry, request: store.get(entry) }
+    })
+    let accepted = false
+    const last = requests.at(-1)
+    if (last) last.request.onsuccess = () => {
+        const saved = project.result as ProjectFileSystem | undefined
+        if (!saved || saved.metadata.createdAt !== key[1] || saved.metadata.mainFile !== expectedMain
+            || requests.some(({ path, draft, request }) => editableSource(saved, path) !== draft.base
+                || !sameDraft(request.result, Object.hasOwn(expected, path) ? expected[path] : undefined))) return
+        for (const { draft, entry } of requests) {
+            if (draft.base === draft.text) store.delete(entry)
+            else store.put(draft, entry)
+        }
+        accepted = true
+    }
+    await complete(transaction)
+    if (!accepted) throw new Error('The project or its local drafts changed. Request a new proposal.')
 }
 
 export async function commitWritingDrafts(database: IDBDatabase, key: WritingKey, fallback: ProjectFileSystem,

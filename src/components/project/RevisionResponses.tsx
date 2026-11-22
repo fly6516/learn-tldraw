@@ -1,10 +1,11 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { buildRevisionLetter, type RevisionResponse, type RevisionRound, type RevisionFile } from '@/lib/project/revision-rounds'
 import type { SubmissionVersionInfo } from '@/lib/project/submission'
+import { archiveReplyEvidence, revisionDraftSchema } from '@/lib/project/ai-revision'
 
 export function RevisionResponses({ round, baseline, versions, files, reportError, paths, busy, onLink, onSave }: {
   round: RevisionRound; baseline: string; versions: SubmissionVersionInfo[]; files?: RevisionFile[]; reportError?: string
@@ -46,7 +47,9 @@ export function RevisionResponses({ round, baseline, versions, files, reportErro
     </label>}
     {comment && <>
       <blockquote className="whitespace-pre-wrap break-words border-l-2 pl-3 text-sm">{comment.text}</blockquote>
-      <ResponseForm key={comment.id} initial={comment.response} paths={paths} files={files} busy={busy} onSave={response => onSave(comment.id, response)} />
+      <ResponseForm key={comment.id} initial={comment.response} paths={paths} files={files} busy={busy}
+        archive={revised ? { original: baseline, revised: revised.name, id: revised.id } : undefined} comment={comment.text}
+        onSave={response => onSave(comment.id, response)} />
     </>}
     {reportError && <p role="alert" className="text-sm text-red-800">{reportError}</p>}
     {revised && !letter && !reportError && <p role="status" className="text-sm">Comparing the archived submission ZIPs…</p>}
@@ -59,22 +62,50 @@ export function RevisionResponses({ round, baseline, versions, files, reportErro
   </section>
 }
 
-function ResponseForm({ initial, paths, files, busy, onSave }: {
+function ResponseForm({ initial, paths, files, busy, onSave, archive, comment }: {
   initial?: RevisionResponse; paths: string[]; files?: RevisionFile[]; busy: boolean
   onSave: (response?: RevisionResponse) => Promise<boolean>
+  archive?: { original: string; revised: string; id: string }; comment: string
 }) {
   const [kind, setKind] = useState<RevisionResponse['kind']>(initial?.kind ?? 'changed')
   const [text, setText] = useState(initial?.text ?? '')
   const [selected, setSelected] = useState(initial?.paths ?? [])
   const [saved, setSaved] = useState(false)
   const [query, setQuery] = useState('')
+  const [aiBusy, setAiBusy] = useState(false)
+  const [aiError, setAiError] = useState('')
+  const [proposal, setProposal] = useState<{ key: string; draft: string }>()
+  const aiRequest = useRef<AbortController | null>(null)
+  useEffect(() => () => aiRequest.current?.abort(), [])
   const states = new Map(files?.map(file => [file.path, file.status]))
   const options = [...new Set([...selected, ...paths])].sort().filter(path => selected.includes(path) || path.toLowerCase().includes(query.toLowerCase().trim()))
+  const key = JSON.stringify([archive?.id, kind, text, selected, comment])
+  const eligible = Boolean(archive && files && (kind === 'retained' ? text.trim() : selected.some(path => states.has(path) && states.get(path) !== 'Unchanged')))
   useEffect(() => {
     if (!saved) return
     const timeout = setTimeout(() => setSaved(false), 3000)
     return () => clearTimeout(timeout)
   }, [saved])
+
+  async function generateReply() {
+    if (!eligible || !files || !archive || aiBusy) return
+    const controller = new AbortController()
+    aiRequest.current = controller
+    setAiBusy(true); setAiError(''); setProposal(undefined)
+    try {
+      const changes = kind === 'changed' ? await archiveReplyEvidence(files, selected) : []
+      const response = await fetch('/api/latex/revision-response', { method: 'POST', signal: controller.signal,
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind, comment, original: archive.original,
+          revised: archive.revised, changes, authorNote: text.slice(0, 1500) }) })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.error || 'Could not draft a response.')
+      if (!controller.signal.aborted) setProposal({ key, ...revisionDraftSchema.parse(data) })
+    } catch (cause) {
+      if (!controller.signal.aborted) setAiError(cause instanceof Error ? cause.message : 'Could not draft a response.')
+    } finally {
+      if (aiRequest.current === controller) { aiRequest.current = null; setAiBusy(false) }
+    }
+  }
   return <form className="space-y-2 rounded border p-2" onSubmit={async event => {
     event.preventDefault()
     if (busy || !text.trim() || (kind === 'changed' && !selected.length)) return
@@ -101,10 +132,19 @@ function ResponseForm({ initial, paths, files, busy, onSave }: {
     </fieldset>
     <div className="flex flex-wrap items-center gap-2">
       <Button type="submit" size="sm" disabled={busy || !text.trim() || (kind === 'changed' && !selected.length)}>Save response</Button>
+      <Button type="button" size="sm" variant="outline" disabled={busy || aiBusy || !eligible} onClick={() => void generateReply()}>
+        {aiBusy ? 'Drafting with AI…' : 'Draft response with AI'}
+      </Button>
+      {aiBusy && <Button type="button" size="sm" variant="ghost" onClick={() => aiRequest.current?.abort()}>Cancel draft</Button>}
       {initial && <Button type="button" size="sm" variant="outline" disabled={busy} onClick={async () => {
         if (await onSave()) { setText(''); setSelected([]); setSaved(false) }
       }}>Mark awaiting response</Button>}
       {saved && <span role="status" className="text-sm">Response saved.</span>}
     </div>
+    {aiError && <p role="alert" className="text-sm text-red-800">{aiError}</p>}
+    {proposal?.key === key && <section aria-label="AI response draft" className="space-y-2 rounded border bg-slate-50 p-2 text-sm">
+      <p className="whitespace-pre-wrap break-words">{proposal.draft}</p>
+      <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => { setText(proposal.draft); setProposal(undefined); setSaved(false) }}>Use AI draft</Button>
+    </section>}
   </form>
 }
