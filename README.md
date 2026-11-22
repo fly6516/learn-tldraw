@@ -65,10 +65,15 @@ file. Open a definition or use to locate it in the editor, or insert a `\ref` or
 at the cursor. **Problems** lists undefined reference keys and duplicate `\label` definitions
 from statically included sources and their drafts.
 
-Choose **Prepare submission** to compile the same ZIP you will download. Review the main
-file, draft choice, and citation and label issues before compiling. Select saved project
-files or explicitly include local drafts in both downloads. A successful compile makes
-the matching PDF and source ZIP available together.
+Choose **Prepare submission** to select saved source or include local drafts. Open **ZIP files**
+to review the package and exclude files, leaving the main file included. **Preflight** checks
+literal dependencies, citations, and LaTeX labels against the resulting package. Select a finding
+to locate it in Writing. Dynamic paths need manual review. The compiler uses the same ZIP offered
+for download, and the report shows any compiler diagnostics.
+
+After a successful compile, enter a name and choose **Save submission version**. **Archived
+submissions** lets you download the original PDF and ZIP after reopening the project, even after
+editing the manuscript. The archive and its file list and findings live in the current browser.
 
 After compiling, place the cursor on a LaTeX line and choose **Show in PDF** to highlight
 its typeset location. Click typeset content in **PDF Preview** to open its source file

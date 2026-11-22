@@ -1,6 +1,7 @@
 import type { ProjectFileSystem } from './types'
 import type { ProjectSnapshot, ProjectSnapshotInfo } from './snapshots'
 import { restoreSnapshotFiles } from './snapshots'
+import type { SubmissionVersion, SubmissionVersionInfo } from './submission'
 import { applyWritingDrafts, draftConflicts, sameDraft, type PortableWritingState, type WritingDraft, type WritingDrafts, type WritingKey, type WritingView } from './writing-drafts'
 
 const storeName = 'projects'
@@ -35,6 +36,30 @@ function snapshotEntry(key: WritingKey, id: string) {
 
 function snapshotList(key: WritingKey) {
     return ['snapshots', ...key]
+}
+
+export async function listSubmissionVersions(database: IDBDatabase, key: WritingKey) {
+    const transaction = database.transaction(storeName)
+    const prefix = ['submission-info', ...key]
+    const request = transaction.objectStore(storeName).getAll(IDBKeyRange.bound(prefix, [...prefix, []], true, true))
+    await complete(transaction)
+    return (request.result as SubmissionVersionInfo[]).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+}
+
+export async function saveSubmissionVersion(database: IDBDatabase, key: WritingKey, version: SubmissionVersion) {
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    const store = transaction.objectStore(storeName)
+    const { pdf, zip, ...info } = version
+    store.add({ pdf, zip }, ['submission-files', ...key, version.id])
+    store.add(info, ['submission-info', ...key, version.id])
+    await complete(transaction)
+}
+
+export async function readSubmissionFiles(database: IDBDatabase, key: WritingKey, id: string) {
+    const transaction = database.transaction(storeName)
+    const request = transaction.objectStore(storeName).get(['submission-files', ...key, id])
+    await complete(transaction)
+    return request.result as Pick<SubmissionVersion, 'pdf' | 'zip'> | undefined
 }
 
 export async function listProjectSnapshots(database: IDBDatabase, key: WritingKey) {

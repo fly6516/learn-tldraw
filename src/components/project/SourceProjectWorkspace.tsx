@@ -32,7 +32,8 @@ import { applyWritingDrafts, draftConflicts, editableSource, type PortableWritin
 import { clearWritingState, commitFileOperation, commitWritingDrafts } from '@/lib/project/storage'
 import type { FileOperation } from '@/lib/project/file-refactor'
 import { FileOperationDialog, type FileOperationPlan } from './FileOperationDialog'
-import { SubmissionDialog, type SubmissionFiles } from './SubmissionDialog'
+import { SubmissionDialog } from './SubmissionDialog'
+import { prepareSubmission, type SubmissionIssue, type SubmissionVersion } from '@/lib/project/submission'
 import { useWritingDrafts } from './useWritingDrafts'
 import { SourceSearchPanel } from './SourceSearchPanel'
 import { WritingReviewPanel, type WritingReviewActions } from './WritingReviewPanel'
@@ -104,6 +105,19 @@ function Files({ nodes, selected, main, onSelect, dirty, sourcePaths, onSetMain,
 
 type GenerateSource = (project: ProjectFileSystem, onNode?: (node: ResearchNodeData, line: number) => void) => string
 type CompileSnapshot = { main: string; files: ProjectFileSystem['files'] }
+type SubmissionSelection = Pick<SubmissionVersion, 'paths' | 'excluded' | 'drafts' | 'issues'> & { target: ProjectFileSystem }
+type CompiledSubmission = Omit<SubmissionVersion, 'id' | 'name' | 'createdAt'>
+
+function submissionDiagnostics(diagnostics: CompileDiagnostic[], files: ProjectFileSystem['files']): SubmissionIssue[] {
+  return diagnostics.map(({ path, line, severity, message }) => {
+    const file = files.get(path)
+    const source = file && 'content' in file ? file.content : undefined
+    const lines = source?.split(/\r\n|\n|\r/)
+    if (!source || !lines || line > lines.length) return { severity, message }
+    const start = sourceOffsetAtPosition(source, { lineNumber: line, column: 1 })
+    return { severity, message, location: { path, line, start, end: start + lines[line - 1].length } }
+  })
+}
 
 export interface SourceWorkspaceHandle {
   openFile: (path: string, line?: number) => void
@@ -162,8 +176,11 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const [writing, setWriting] = useState(false)
   const [submissionOpen, setSubmissionOpen] = useState(false)
   const [includeDrafts, setIncludeDrafts] = useState(false)
-  const [submissionResult, setSubmissionResult] = useState<SubmissionFiles>()
+  const [submissionResult, setSubmissionResult] = useState<CompiledSubmission>()
+  const [submissionExcluded, setSubmissionExcluded] = useState<ReadonlySet<string>>(new Set())
   const [submissionError, setSubmissionError] = useState('')
+  const [submissionLog, setSubmissionLog] = useState('')
+  const [submissionCompilerIssues, setSubmissionCompilerIssues] = useState<SubmissionIssue[]>([])
   const [saveError, setSaveError] = useState('')
   const [fileOperation, setFileOperation] = useState<{ request: FileOperation; view?: PortableWritingState['view'] }>()
   const [fileUndo, setFileUndo] = useState<{ before: ProjectFileSystem; writing: PortableWritingState; after: FileOperationPlan }>()
@@ -244,14 +261,13 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const bibliography = useMemo(() => collectBibliography(workingProject), [workingProject])
   const references = useMemo(() => indexCanvasReferences(workingProject, bibliography), [workingProject, bibliography])
   const citationIssues = useMemo(() => checkCitations(workingProject, bibliography), [workingProject, bibliography])
-  const submissionIssues = useMemo(() => {
-    if (!submissionOpen || includeDrafts || !dirty) return { citations: citationIssues.length, references: crossReferences.issues.length }
-    const saved = withGeneratedSource(project)
-    const sources = new Map<string, string>()
-    const add = (path: string, text: string) => { sources.set(path, text) }
-    buildProjectOutline(saved, main, undefined, add, add)
-    return { citations: checkCitations(saved, collectBibliography(saved)).length, references: indexCrossReferences(sources).issues.length }
-  }, [submissionOpen, includeDrafts, dirty, citationIssues, crossReferences, main, project, withGeneratedSource])
+  const submission = useMemo(() => {
+    if (!submissionOpen) return
+    const source = includeDrafts ? workingProject : withGeneratedSource(project)
+    const paths = [...source.files].filter(([, file]) => file.type !== 'directory').map(([path]) => path).sort()
+    const excluded = new Set(paths.filter(path => path !== main && submissionExcluded.has(path)))
+    return { ...prepareSubmission(source, main, excluded), paths, excluded }
+  }, [submissionOpen, includeDrafts, workingProject, withGeneratedSource, project, main, submissionExcluded])
   const catalog = useMemo(() => ({ project: project.metadata.createdAt, index, blocks, references, files: workingFiles }),
     [index, blocks, references, workingFiles, project.metadata.createdAt])
   useLayoutEffect(() => {
@@ -584,18 +600,18 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     markSourceChanged()
   }
 
-  async function compile(submissionSource?: ProjectFileSystem) {
+  async function compile(submissionSelection?: SubmissionSelection) {
     if (!main || locked || compileRequest.current) return
-    if (!submissionSource && conflicts.length) {
+    if (!submissionSelection && conflicts.length) {
       setComparison(conflicts[0])
       return
     }
     const controller = new AbortController()
     compileRequest.current = controller
     setBusy(true)
-    const target = submissionSource ?? workingProject
+    const target = submissionSelection?.target ?? workingProject
     // A saved-only submission may differ from the sources in Monaco.
-    const updatePreview = !submissionSource || sameSources(target.files, workingFiles)
+    const updatePreview = !submissionSelection || sameSources(target.files, new Map([...workingFiles].filter(([, file]) => file.type !== 'directory')))
     if (updatePreview) {
       setSyncMessage('')
       setError('')
@@ -605,7 +621,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       setHasWarnings(false)
     }
     try {
-      const snapshot = { main, files: target.files }
+      const snapshot = { main, files: updatePreview ? workingFiles : target.files }
       const archive = await exportSourceArchive(target)
       const response = await fetch(`/api/latex/compile?main=${encodeURIComponent(main)}&sync=1`, {
         method: 'POST', body: archive, signal: controller.signal,
@@ -613,7 +629,10 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       if (!response.ok) {
         const failure = await response.json()
         if (controller.signal.aborted) return
-        if (submissionSource) setSubmissionError([failure.error, !updatePreview && failure.log].filter(Boolean).join('\n'))
+        if (submissionSelection) {
+          setSubmissionError([failure.error, failure.log].filter(Boolean).join('\n'))
+          setSubmissionCompilerIssues(submissionDiagnostics(failure.diagnostics ?? [], target.files))
+        }
         if (updatePreview) {
           setError(failure.error)
           setLog(failure.log ?? '')
@@ -630,7 +649,14 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       const map = result.get('sourceMap')
       const report = result.get('report')
       const info = typeof report === 'string' ? JSON.parse(report) as CompileReport : undefined
-      if (submissionSource) setSubmissionResult({ pdf, zip: archive, warnings: Boolean(info?.hasWarnings) })
+      if (submissionSelection) {
+        const { paths, excluded, drafts, issues } = submissionSelection
+        const diagnostics = submissionDiagnostics(info?.diagnostics ?? [], target.files)
+        if (info?.hasWarnings && !diagnostics.length) diagnostics.push({ severity: 'warning', message: 'The compiler reported warnings without a source location. See the compiler output.' })
+        setSubmissionCompilerIssues(diagnostics)
+        setSubmissionResult({ main, paths, excluded, drafts, issues, pdf, zip: archive, warnings: Boolean(info?.hasWarnings), diagnostics })
+        if (info?.hasWarnings) setSubmissionLog(info.log)
+      }
       if (updatePreview) {
         if (info) {
           setDiagnostics(info.diagnostics)
@@ -648,7 +674,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     } catch (cause) {
       if (controller.signal.aborted) return
       const message = cause instanceof Error ? cause.message : 'Could not compile the project.'
-      if (submissionSource) setSubmissionError(message)
+      if (submissionSelection) setSubmissionError(message)
       if (updatePreview) {
         setError(message)
         setPanel('problems')
@@ -657,6 +683,13 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       compileRequest.current = null
       setBusy(false)
     }
+  }
+
+  function resetSubmissionBuild() {
+    setSubmissionResult(undefined)
+    setSubmissionError('')
+    setSubmissionLog('')
+    setSubmissionCompilerIssues([])
   }
 
   function closeMobileFiles(restoreFocus = false) {
@@ -875,19 +908,39 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         <div className="flex flex-wrap items-center gap-x-3">
           <span>{/\.bib$/i.test(selected) ? 'BibTeX' : isTex ? 'LaTeX' : 'Plain text'} · Ctrl / ⌘ + S to save</span>
           <Button variant="outline" size="sm" className="h-7" disabled={!main || locked} onClick={() => {
-            setIncludeDrafts(false)
-            setSubmissionResult(undefined)
-            setSubmissionError('')
+            resetSubmissionBuild()
             setSubmissionOpen(true)
           }}>Prepare submission</Button>
         </div>
       </footer>
-      {submissionOpen && <SubmissionDialog main={main} draftCount={draftPaths.length} includeDrafts={includeDrafts}
-        citationCount={submissionIssues.citations} referenceCount={submissionIssues.references} conflicting={includeDrafts && conflicts.length > 0}
-        ready={!locked} busy={busy} error={submissionError} result={submissionResult}
-        onDraftChoice={include => { setIncludeDrafts(include); setSubmissionResult(undefined); setSubmissionError('') }}
-        onClose={() => setSubmissionOpen(false)} onProblems={() => { setSubmissionOpen(false); setPanel('problems') }}
-        onCompile={() => { setSubmissionError(''); void compile(includeDrafts ? workingProject : withGeneratedSource(project)) }} />}
+      {submission && <SubmissionDialog main={main} drafts={draftPaths} includeDrafts={includeDrafts} paths={submission.paths}
+        excluded={submission.excluded} issues={submission.issues} compilerIssues={submissionCompilerIssues}
+        conflicting={includeDrafts && conflicts.some(path => !submission.excluded.has(path))}
+        ready={!locked} busy={busy} error={submissionError} log={submissionLog} result={submissionResult} database={storage} storageKey={journal.key}
+        onDraftChoice={include => { setIncludeDrafts(include); resetSubmissionBuild() }}
+        onToggle={path => {
+          setSubmissionExcluded(current => {
+            const next = new Set(current)
+            if (next.has(path)) next.delete(path)
+            else next.add(path)
+            return next
+          })
+          resetSubmissionBuild()
+        }}
+        onClose={() => setSubmissionOpen(false)} onLocate={issue => {
+          const { location } = issue
+          if (!location) return
+          const checked = submission.target.files.get(location.path)
+          const working = workingFiles.get(location.path)
+          setSubmissionOpen(false)
+          if (checked && working && 'content' in checked && 'content' in working && checked.content === working.content) locate(location)
+          else openFile(location.path, location.line)
+        }}
+        onCompile={() => {
+          resetSubmissionBuild()
+          void compile({ target: submission.target, paths: [...submission.target.files.keys()].sort(), excluded: [...submission.excluded],
+            issues: submission.issues, drafts: includeDrafts ? draftPaths.filter(path => submission.target.files.has(path)) : [] })
+        }} />}
       {fileOperation && <FileOperationDialog request={fileOperation.request} project={project} writing={{ drafts, view: fileOperation.view }}
         main={main} onClose={() => setFileOperation(undefined)} onApply={applyFileOperation} />}
       {comparison && comparedDraft && <Dialog open onOpenChange={open => { if (!open) setComparison(undefined) }}>
