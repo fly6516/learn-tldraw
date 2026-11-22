@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { readWritingState, writeWritingDraft, writeWritingView } from '@/lib/project/storage'
-import { sameDraft, type WritingDraft, type WritingDrafts, type WritingKey, type WritingView } from '@/lib/project/writing-drafts'
+import { sameDraft, type PortableWritingState, type WritingDraft, type WritingDrafts, type WritingKey, type WritingView } from '@/lib/project/writing-drafts'
 
 export function useWritingDrafts(storage: IDBDatabase | null, workspace: string | undefined, project: string) {
   const key = useMemo<WritingKey | undefined>(() => workspace ? [workspace, project] : undefined, [workspace, project])
@@ -94,5 +94,13 @@ export function useWritingDrafts(storage: IDBDatabase | null, workspace: string 
     return { ...stored.current }
   }
 
-  return { key, drafts, restoredView, ready, loadError, pending, failed, change, discard, storedDrafts, forget, recordView }
+  function acceptWritingState(writing: PortableWritingState) {
+    stored.current = { ...writing.drafts }
+    lastView.current = writing.view ?? null
+    setDrafts(writing.drafts)
+    setRestoredView(writing.view)
+    setFailed(new Set())
+  }
+
+  return { key, drafts, restoredView, ready, loadError, pending, failed, change, discard, storedDrafts, forget, recordView, acceptWritingState }
 }

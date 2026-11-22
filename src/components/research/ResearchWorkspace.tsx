@@ -684,11 +684,11 @@ function Workspace({ sample }: WorkspaceProps) {
         return true
       }} onClose={() => setBackupOpen(undefined)} />}
       {snapshotsOpen && storage && storageKey && <ProjectSnapshotsDialog database={storage} storageKey={storageKey}
-        project={{ ...fileSystem, canvas }} verifyRestore={() => writing.current
-          ? writing.current.snapshotRestoreBlock() : 'Wait for Writing to finish opening before restoring a snapshot.'}
-        onRestore={project => {
-          resetProjectViews()
-          acceptStoredProject(project)
+        project={{ ...fileSystem, canvas }} verifyRestore={paths => writing.current
+          ? writing.current.snapshotRestoreBlock(paths) : 'Wait for Writing to finish opening before restoring a snapshot.'}
+        onRestore={(project, selectedFiles) => {
+          if (!selectedFiles) resetProjectViews()
+          acceptStoredProject(project, selectedFiles ? fileSystem : undefined)
         }} onClose={() => setSnapshotsOpen(false)} />}
     </main>
   )

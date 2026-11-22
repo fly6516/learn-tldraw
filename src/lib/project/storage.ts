@@ -1,5 +1,6 @@
 import type { ProjectFileSystem } from './types'
 import type { ProjectSnapshot, ProjectSnapshotInfo } from './snapshots'
+import { restoreSnapshotFiles } from './snapshots'
 import { applyWritingDrafts, draftConflicts, sameDraft, type PortableWritingState, type WritingDraft, type WritingDrafts, type WritingKey, type WritingView } from './writing-drafts'
 
 const storeName = 'projects'
@@ -90,6 +91,44 @@ export async function restoreProjectSnapshot(database: IDBDatabase, key: Writing
         })
         restored = project
         store.put(project, key[0])
+    }
+    await complete(transaction)
+    if (!restored) throw new Error(error)
+    return restored
+}
+
+export async function restoreSelectedSnapshotFiles(database: IDBDatabase, key: WritingKey, id: string,
+    checkpoint: ProjectSnapshot, paths: readonly string[]) {
+    if (!paths.length) throw new Error('Select at least one file to restore.')
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    const store = transaction.objectStore(storeName)
+    const current = store.get(key[0])
+    const saved = store.get(snapshotEntry(key, id))
+    const list = store.get(snapshotList(key))
+    const drafts = store.getAllKeys(draftRange(key))
+    let restored: ProjectFileSystem | undefined
+    let error = 'The selected snapshot is unavailable.'
+    drafts.onsuccess = () => {
+        const before = current.result as ProjectFileSystem | undefined
+        const snapshot = saved.result as ProjectFileSystem | undefined
+        if (before?.metadata.createdAt !== key[1] || before.metadata.updatedAt !== checkpoint.project.metadata.updatedAt) {
+            error = 'The saved project changed. Reopen the restore preview and try again.'
+            return
+        }
+        if (!snapshot || snapshot.metadata.createdAt !== key[1]) return
+        const selected = new Set(paths)
+        if (drafts.result.some(entry => selected.has((entry as [string, ...WritingKey, string])[3]))) {
+            error = 'Save or discard local drafts for the selected files before restoring them.'
+            return
+        }
+        try {
+            restored = restoreSnapshotFiles(before, snapshot, paths)
+        } catch (cause) {
+            error = cause instanceof Error ? cause.message : 'Could not restore the selected files.'
+            return
+        }
+        storeSnapshot(store, key, list.result ?? [], { ...checkpoint, project: before })
+        store.put(restored, key[0])
     }
     await complete(transaction)
     if (!restored) throw new Error(error)
@@ -190,6 +229,36 @@ export async function restoreProjectBackup(database: IDBDatabase, current: Writi
     }
     await complete(transaction)
     if (!replaced) throw new Error('This project was replaced in another tab. Reload it before restoring a backup.')
+}
+
+export async function commitFileOperation(database: IDBDatabase, key: WritingKey,
+    before: ProjectFileSystem, expectedDrafts: WritingDrafts, after: ProjectFileSystem, writing: PortableWritingState) {
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    const store = transaction.objectStore(storeName)
+    const project = store.get(key[0])
+    const values = store.getAll(draftRange(key))
+    const keys = store.getAllKeys(draftRange(key))
+    let applied = false
+    keys.onsuccess = () => {
+        const current = project.result as ProjectFileSystem | undefined
+        if (current?.metadata.createdAt !== key[1] || JSON.stringify(current.metadata) !== JSON.stringify(before.metadata)
+            || JSON.stringify(current.canvas) !== JSON.stringify(before.canvas) || current.files.size !== before.files.size) return
+        for (const [path, file] of current.files) {
+            const expected = before.files.get(path)
+            if (!expected || file.type !== expected.type || ('content' in file &&
+                (!('content' in expected) || file.content !== expected.content || file.blob?.size !== expected.blob?.size))) return
+        }
+        if (keys.result.length !== Object.keys(expectedDrafts).length || keys.result.some((entry, index) =>
+            !sameDraft(values.result[index], expectedDrafts[(entry as [string, ...WritingKey, string])[3]]))) return
+        store.put(after, key[0])
+        store.delete(draftRange(key))
+        for (const [path, draft] of Object.entries(writing.drafts)) store.put(draft, ['draft', ...key, path])
+        if (writing.view) store.put(writing.view, ['view', ...key])
+        else store.delete(['view', ...key])
+        applied = true
+    }
+    await complete(transaction)
+    if (!applied) throw new Error('The saved project or local drafts changed. Reopen the preview and try again.')
 }
 
 export function readProject(database: IDBDatabase, key: string): Promise<ProjectFileSystem | undefined> {

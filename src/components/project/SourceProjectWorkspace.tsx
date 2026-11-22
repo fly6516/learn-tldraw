@@ -4,7 +4,7 @@ import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, 
 import { createPortal } from 'react-dom'
 import dynamic from 'next/dynamic'
 import type { editor, IPosition } from 'monaco-editor'
-import { BookOpen, ChevronRight, CircleAlert, Download, Ellipsis, FileCode2, FileText, Folder, ListChecks, LocateFixed, PanelLeft, Play, Save, Sparkles, X } from 'lucide-react'
+import { BookOpen, ChevronRight, CircleAlert, Download, Ellipsis, FileCode2, FileText, Folder, Link2, ListChecks, LocateFixed, PanelLeft, Play, Save, Sparkles, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
@@ -16,6 +16,8 @@ import { exportSourceArchive } from '@/lib/project/source-archive'
 import type { ProjectFile, ProjectFileSystem, ResearchNodeData } from '@/lib/project/types'
 import { ChapterAiPanel } from './ChapterAiPanel'
 import { ReferencesPanel } from './ReferencesPanel'
+import { CrossReferencesPanel } from './CrossReferencesPanel'
+import { indexCrossReferences } from '@/lib/project/cross-references'
 import { OutlinePanel, type OutlineCanvasActions } from './OutlinePanel'
 import { buildProjectOutline } from '@/lib/project/outline'
 import { indexOutline } from '@/lib/project/section-links'
@@ -27,7 +29,10 @@ import type { SourceProblem } from './MonacoSourceEditor'
 import type { CompileDiagnostic, CompileReport } from '@/lib/project/compile-diagnostics'
 import { findPdfRegion, type SyncRegion } from '@/lib/project/source-sync'
 import { applyWritingDrafts, draftConflicts, editableSource, type PortableWritingState, type WritingDrafts } from '@/lib/project/writing-drafts'
-import { clearWritingState, commitWritingDrafts } from '@/lib/project/storage'
+import { clearWritingState, commitFileOperation, commitWritingDrafts } from '@/lib/project/storage'
+import type { FileOperation } from '@/lib/project/file-refactor'
+import { FileOperationDialog, type FileOperationPlan } from './FileOperationDialog'
+import { SubmissionDialog, type SubmissionFiles } from './SubmissionDialog'
 import { useWritingDrafts } from './useWritingDrafts'
 import { SourceSearchPanel } from './SourceSearchPanel'
 import { WritingReviewPanel, type WritingReviewActions } from './WritingReviewPanel'
@@ -43,7 +48,7 @@ const SyncedPdfPreview = dynamic(() => import('./SyncedPdfPreview').then(module 
 })
 const WritingDraftComparison = dynamic(() => import('./MonacoSourceEditor').then(module => module.WritingDraftComparison), { ssr: false })
 
-function Files({ nodes, selected, main, onSelect, dirty, sourcePaths, onSetMain }: {
+function Files({ nodes, selected, main, onSelect, dirty, sourcePaths, onSetMain, onMove }: {
   nodes: FileTreeNode[]
   selected: string
   main: string
@@ -51,6 +56,7 @@ function Files({ nodes, selected, main, onSelect, dirty, sourcePaths, onSetMain 
   onSelect: (path: string) => void
   sourcePaths: ReadonlySet<string>
   onSetMain: (path: string) => void
+  onMove?: (path: string) => void
 }) {
   return (
     <ul className="space-y-0.5">
@@ -64,7 +70,7 @@ function Files({ nodes, selected, main, onSelect, dirty, sourcePaths, onSetMain 
               </summary>
               <div className="ml-3 border-l border-slate-200 pl-2">
                 <Files nodes={node.children ?? []} selected={selected} main={main} dirty={dirty} onSelect={onSelect}
-                  sourcePaths={sourcePaths} onSetMain={onSetMain} />
+                  sourcePaths={sourcePaths} onSetMain={onSetMain} onMove={onMove} />
               </div>
             </details>
           ) : (
@@ -77,12 +83,14 @@ function Files({ nodes, selected, main, onSelect, dirty, sourcePaths, onSetMain 
               {node.path === main && <span className="ml-auto rounded border border-indigo-200 bg-white px-1 text-[10px] text-indigo-700">Main</span>}
               {Object.hasOwn(dirty, node.path) && <span aria-label="Unsaved" className="size-1.5 shrink-0 rounded-full bg-amber-500" />}
             </button>
-            {/\.tex$/i.test(node.path) && sourcePaths.has(node.path) && (
+            {(onMove || (/\.tex$/i.test(node.path) && sourcePaths.has(node.path))) && (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" className="size-7 shrink-0"
                   aria-label={`Actions for ${node.name}`}><Ellipsis /></Button></DropdownMenuTrigger>
                 <DropdownMenuContent align="start">
-                  <DropdownMenuItem disabled={node.path === main} onSelect={() => onSetMain(node.path)}>Set as main file</DropdownMenuItem>
+                  {/\.tex$/i.test(node.path) && sourcePaths.has(node.path) &&
+                    <DropdownMenuItem disabled={node.path === main} onSelect={() => onSetMain(node.path)}>Set as main file</DropdownMenuItem>}
+                  {onMove && <DropdownMenuItem onSelect={() => onMove(node.path)}>Rename or move…</DropdownMenuItem>}
                 </DropdownMenuContent>
               </DropdownMenu>
             )}
@@ -102,7 +110,7 @@ export interface SourceWorkspaceHandle {
   locate: (location: SourceLocation) => void
   openGeneratedNode: (node: ResearchNodeData) => void
   confirmLeave: () => boolean
-  snapshotRestoreBlock: () => string | undefined
+  snapshotRestoreBlock: (paths?: readonly string[]) => string | undefined
   getDraftBackup: () => PortableWritingState | undefined
   confirmBackupReplacement: () => Promise<boolean>
   prepareReplacement: () => Promise<boolean>
@@ -152,7 +160,13 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const selected = sourcePaths.has(wanted) ? wanted : main
   const [busy, setBusy] = useState(false)
   const [writing, setWriting] = useState(false)
+  const [submissionOpen, setSubmissionOpen] = useState(false)
+  const [includeDrafts, setIncludeDrafts] = useState(false)
+  const [submissionResult, setSubmissionResult] = useState<SubmissionFiles>()
+  const [submissionError, setSubmissionError] = useState('')
   const [saveError, setSaveError] = useState('')
+  const [fileOperation, setFileOperation] = useState<{ request: FileOperation; view?: PortableWritingState['view'] }>()
+  const [fileUndo, setFileUndo] = useState<{ before: ProjectFileSystem; writing: PortableWritingState; after: FileOperationPlan }>()
   const [comparison, setComparison] = useState<string>()
   const [error, setError] = useState('')
   const [log, setLog] = useState('')
@@ -166,7 +180,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const [pdfPage, setPdfPage] = useState(1)
   const [pdfTarget, setPdfTarget] = useState<SyncRegion | null>(null)
   const [syncMessage, setSyncMessage] = useState('')
-  const [panel, setPanel] = useState<'problems' | 'references' | 'ai' | 'review' | null>(null)
+  const [panel, setPanel] = useState<'problems' | 'references' | 'cross-references' | 'ai' | 'review' | null>(null)
   const [reviewCursor, setReviewCursor] = useState<{ path: string; line: number }>()
   const [navigation, setNavigation] = useState<'files' | 'outline' | 'search'>('files')
   const [searchQuery, setSearchQuery] = useState('')
@@ -197,15 +211,27 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   }, [generateSource])
   const workingProject = useMemo(() => withGeneratedSource(applyWritingDrafts(project, drafts)), [drafts, project, withGeneratedSource])
   const workingFiles = workingProject.files
-  const { headings, blocks, index } = useMemo(() => {
+  const { headings, blocks, index, crossReferences, labelTitles } = useMemo(() => {
     const source = { files: workingFiles }
     const documents = new Map<string, string>()
     const preamble = new Map<string, string>()
     const headings = buildProjectOutline(source, main, undefined, (path, text) => documents.set(path, text),
       (path, text) => preamble.set(path, text))
-    const labels = indexLatexLabels(new Map([...preamble, ...documents]))
+    const sources = new Map([...preamble, ...documents])
+    const labels = indexLatexLabels(sources)
     const blocks = readProjectLatexBlocks(source, main, documents, preamble, labels)
-    return { headings, blocks, index: indexOutline(headings, labels) }
+    const index = indexOutline(headings, labels)
+    const labelTitles = new Map<string, string>()
+    const pending = [...headings]
+    while (pending.length) {
+      const heading = pending.pop()!
+      pending.push(...heading.children)
+      if (heading.label) labelTitles.set(heading.label, heading.title)
+    }
+    for (const block of blocks) {
+      for (const label of block.labels) labelTitles.set(label, block.caption || block.kind)
+    }
+    return { headings, blocks, index, crossReferences: indexCrossReferences(sources, labels), labelTitles }
   }, [workingFiles, main])
   const source = currentFile?.content ?? ''
   const workingFile = workingProject.files.get(selected)
@@ -217,6 +243,15 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const tree = useMemo(() => getFileTree(project), [project])
   const bibliography = useMemo(() => collectBibliography(workingProject), [workingProject])
   const references = useMemo(() => indexCanvasReferences(workingProject, bibliography), [workingProject, bibliography])
+  const citationIssues = useMemo(() => checkCitations(workingProject, bibliography), [workingProject, bibliography])
+  const submissionIssues = useMemo(() => {
+    if (!submissionOpen || includeDrafts || !dirty) return { citations: citationIssues.length, references: crossReferences.issues.length }
+    const saved = withGeneratedSource(project)
+    const sources = new Map<string, string>()
+    const add = (path: string, text: string) => { sources.set(path, text) }
+    buildProjectOutline(saved, main, undefined, add, add)
+    return { citations: checkCitations(saved, collectBibliography(saved)).length, references: indexCrossReferences(sources).issues.length }
+  }, [submissionOpen, includeDrafts, dirty, citationIssues, crossReferences, main, project, withGeneratedSource])
   const catalog = useMemo(() => ({ project: project.metadata.createdAt, index, blocks, references, files: workingFiles }),
     [index, blocks, references, workingFiles, project.metadata.createdAt])
   useLayoutEffect(() => {
@@ -229,11 +264,15 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   }), [diagnostics, diagnosticsStale, workingFiles])
   const problems = useMemo<SourceProblem[]>(() => [
     ...currentDiagnostics,
-    ...checkCitations(workingProject, bibliography).map(issue => ({
+    ...citationIssues.map(issue => ({
       path: issue.path, line: issue.line, severity: 'warning' as const, location: issue,
       message: issue.kind === 'missing' ? `Unknown citation key: ${issue.key}` : `Duplicate bibliography key: ${issue.key}`,
     })),
-  ], [bibliography, currentDiagnostics, workingProject])
+    ...crossReferences.issues.map(issue => ({
+      path: issue.path, line: issue.line, severity: 'warning' as const, location: issue,
+      message: issue.kind === 'missing' ? `Undefined LaTeX reference: ${issue.key}` : `Duplicate LaTeX label: ${issue.key}`,
+    })),
+  ], [citationIssues, crossReferences, currentDiagnostics])
 
   useEffect(() => () => { if (pdfUrl) URL.revokeObjectURL(pdfUrl) }, [pdfUrl])
   useEffect(() => () => compileRequest.current?.abort(), [])
@@ -331,19 +370,14 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   useImperativeHandle(ref, () => ({
     openFile,
     locate,
-    snapshotRestoreBlock: () => {
+    snapshotRestoreBlock: paths => {
       if (locked || journal.pending) return 'Wait for Writing to finish its current operation before restoring a snapshot.'
-      if (dirty) return 'Save or discard the local drafts in Writing before restoring a snapshot.'
       if (journal.loadError) return 'Local drafts could not be checked. Reopen the project before restoring a snapshot.'
+      if (paths?.some(path => Object.hasOwn(drafts, path))) return 'Save or discard the local drafts for the selected files in Writing first.'
+      if (!paths && dirty) return 'Save or discard the local drafts in Writing before restoring a snapshot.'
     },
     confirmLeave: () => !unprotected || window.confirm('Some drafts have not been saved locally. Leave this page?'),
-    getDraftBackup() {
-      if (!journal.ready || journal.loadError) return
-      const instance = editorRef.current
-      const position = instance?.getPosition()
-      const view = position && editorSourcePath(instance?.getModel() ?? null) === selected ? { path: selected, ...position } : restoredView
-      return { drafts, view }
-    },
+    getDraftBackup: captureWritingState,
     async confirmBackupReplacement() {
       if (writeInProgress.current || !journal.ready || journal.loadError) {
         setSaveError('Wait for local drafts to finish loading or saving before replacing the project.')
@@ -375,6 +409,77 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
 
   function locate(location: SourceLocation) {
     openFile(location.path, location.line, location)
+  }
+
+  function captureWritingState(): PortableWritingState | undefined {
+    if (!journal.ready || journal.loadError) return
+    const instance = editorRef.current
+    const position = instance?.getPosition()
+    const view = position && editorSourcePath(instance?.getModel() ?? null) === selected ? { path: selected, ...position } : restoredView
+    return { drafts, view }
+  }
+
+  function openFileOperation(request: FileOperation) {
+    setFileOperation({ request, view: captureWritingState()?.view })
+  }
+
+  async function writeFileOperation(before: ProjectFileSystem, after: ProjectFileSystem, writingState: PortableWritingState) {
+    if (locked || writeInProgress.current || !storage || !journal.key || journal.loadError) throw new Error('Writing storage is not ready.')
+    writeInProgress.current = true
+    setWriting(true)
+    try {
+      const stored = await journal.storedDrafts()
+      if (JSON.stringify(Object.entries(stored).sort()) !== JSON.stringify(Object.entries(drafts).sort())) {
+        throw new Error('Some drafts are not synchronized with local storage.')
+      }
+      await commitFileOperation(storage, journal.key, before, stored, after, writingState)
+      acceptStoredProject(after)
+      journal.acceptWritingState(writingState)
+      setSelected(writingState.view?.path)
+      restoredCursor.current = false
+      pendingJump.current = null
+      setComparison(undefined)
+      markSourceChanged()
+    } finally {
+      writeInProgress.current = false
+      setWriting(false)
+    }
+  }
+
+  async function applyFileOperation(plan: FileOperationPlan, before: ProjectFileSystem, prior: PortableWritingState, destination: string) {
+    if (before !== project || prior.drafts !== drafts) throw new Error('Project data changed. Go back and preview the latest changes.')
+    const movedCurrent = prior.view && plan.writing.view?.path !== prior.view.path
+    const writingState = plan.project.files.get(destination)?.type === 'editable'
+      ? { ...plan.writing, view: movedCurrent ? plan.writing.view : { path: destination, lineNumber: 1, column: 1 } }
+      : plan.writing
+    await writeFileOperation(before, plan.project, writingState)
+    setFileUndo({ before, writing: prior, after: plan })
+  }
+
+  async function undoFileOperation() {
+    if (!fileUndo || locked) return
+    setSaveError('')
+    const graph = (value?: ProjectFileSystem['canvas']) => JSON.stringify([
+      value?.pages.map(({ id, name, nodes, edges }) => ({ id, name, nodes, edges })), value?.crossPageEdges,
+    ])
+    if (project.files !== fileUndo.after.project.files || project.metadata !== fileUndo.after.project.metadata
+      || graph(project.canvas) !== graph(fileUndo.after.project.canvas)
+      || JSON.stringify(Object.entries(drafts).sort()) !== JSON.stringify(Object.entries(fileUndo.after.writing.drafts).sort())) {
+      setSaveError('Undo is unavailable after editing files, drafts or cards again.')
+      return
+    }
+    try {
+      const before = fileUndo.before
+      const current = project.canvas
+      const canvas = before.canvas && current ? { ...before.canvas, activePageId: current.activePageId,
+        display: current.display, overviewViewport: current.overviewViewport,
+        pages: before.canvas.pages.map(page => ({ ...page, viewport: current.pages.find(item => item.id === page.id)?.viewport ?? page.viewport })),
+      } : before.canvas
+      await writeFileOperation(project, { ...before, canvas }, fileUndo.writing)
+      setFileUndo(undefined)
+    } catch (cause) {
+      setSaveError(cause instanceof Error ? cause.message : 'Could not undo the file changes.')
+    }
   }
 
   const canSync = !locked && !pdfStale && sourceMap.length > 0
@@ -454,13 +559,13 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     markSourceChanged()
   }
 
-  function insertReference(key: string) {
+  function insertReference(key: string, command = 'cite') {
     const instance = editorRef.current
     const range = instance?.getSelection()
     if (!instance || !range || !isTex || readOnly || locked || editorSourcePath(instance.getModel()) !== selected) return
     setNarrowView('source')
     instance.pushUndoStop()
-    instance.executeEdits('citation', [{ range, text: `\\cite{${key}}`, forceMoveMarkers: true }])
+    instance.executeEdits('reference', [{ range, text: `\\${command}{${key}}`, forceMoveMarkers: true }])
     instance.pushUndoStop()
     requestAnimationFrame(() => instance.focus())
   }
@@ -479,35 +584,43 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     markSourceChanged()
   }
 
-  async function compile() {
+  async function compile(submissionSource?: ProjectFileSystem) {
     if (!main || locked || compileRequest.current) return
-    if (conflicts.length) {
+    if (!submissionSource && conflicts.length) {
       setComparison(conflicts[0])
       return
     }
     const controller = new AbortController()
     compileRequest.current = controller
     setBusy(true)
-    setSyncMessage('')
-    setError('')
-    setLog('')
-    setDiagnostics([])
-    setDiagnosticSnapshot(undefined)
-    setHasWarnings(false)
+    const target = submissionSource ?? workingProject
+    // A saved-only submission may differ from the sources in Monaco.
+    const updatePreview = !submissionSource || sameSources(target.files, workingFiles)
+    if (updatePreview) {
+      setSyncMessage('')
+      setError('')
+      setLog('')
+      setDiagnostics([])
+      setDiagnosticSnapshot(undefined)
+      setHasWarnings(false)
+    }
     try {
-      const snapshot = { main, files: workingFiles }
-      const archive = await exportSourceArchive(workingProject)
+      const snapshot = { main, files: target.files }
+      const archive = await exportSourceArchive(target)
       const response = await fetch(`/api/latex/compile?main=${encodeURIComponent(main)}&sync=1`, {
         method: 'POST', body: archive, signal: controller.signal,
       })
       if (!response.ok) {
         const failure = await response.json()
         if (controller.signal.aborted) return
-        setError(failure.error)
-        setLog(failure.log ?? '')
-        setDiagnostics(failure.diagnostics ?? [])
-        setDiagnosticSnapshot(snapshot)
-        setPanel('problems')
+        if (submissionSource) setSubmissionError([failure.error, !updatePreview && failure.log].filter(Boolean).join('\n'))
+        if (updatePreview) {
+          setError(failure.error)
+          setLog(failure.log ?? '')
+          setDiagnostics(failure.diagnostics ?? [])
+          setDiagnosticSnapshot(snapshot)
+          setPanel('problems')
+        }
         return
       }
       const result = await response.formData()
@@ -516,23 +629,30 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       if (!(pdf instanceof Blob)) throw new Error('The compiler did not return a PDF.')
       const map = result.get('sourceMap')
       const report = result.get('report')
-      if (typeof report === 'string') {
-        const { diagnostics, hasWarnings, log } = JSON.parse(report) as CompileReport
-        setDiagnostics(diagnostics)
-        setHasWarnings(hasWarnings)
-        setLog(log)
-        setDiagnosticSnapshot(snapshot)
+      const info = typeof report === 'string' ? JSON.parse(report) as CompileReport : undefined
+      if (submissionSource) setSubmissionResult({ pdf, zip: archive, warnings: Boolean(info?.hasWarnings) })
+      if (updatePreview) {
+        if (info) {
+          setDiagnostics(info.diagnostics)
+          setHasWarnings(info.hasWarnings)
+          setLog(info.log)
+          setDiagnosticSnapshot(snapshot)
+        }
+        setSourceMap(typeof map === 'string' ? JSON.parse(map) : [])
+        setPdfTarget(null)
+        setPdfUrl(URL.createObjectURL(pdf))
+        setPdfFilename(main.split('/').at(-1)?.replace(/\.tex$/i, '.pdf') ?? 'project.pdf')
+        setLastCompile(snapshot)
+        setNarrowView('pdf')
       }
-      setSourceMap(typeof map === 'string' ? JSON.parse(map) : [])
-      setPdfTarget(null)
-      setPdfUrl(URL.createObjectURL(pdf))
-      setPdfFilename(main.split('/').at(-1)?.replace(/\.tex$/i, '.pdf') ?? 'project.pdf')
-      setLastCompile(snapshot)
-      setNarrowView('pdf')
     } catch (cause) {
       if (controller.signal.aborted) return
-      setError(cause instanceof Error ? cause.message : 'Could not compile the project.')
-      setPanel('problems')
+      const message = cause instanceof Error ? cause.message : 'Could not compile the project.'
+      if (submissionSource) setSubmissionError(message)
+      if (updatePreview) {
+        setError(message)
+        setPanel('problems')
+      }
     } finally {
       compileRequest.current = null
       setBusy(false)
@@ -561,7 +681,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
           <span className="hidden max-w-56 truncate font-mono font-medium min-[385px]:block">{main || 'None'}</span>
         </div>
         <Button size="sm" variant="outline" onClick={save} disabled={!dirty || locked}><Save /> {writing ? 'Saving…' : 'Save'}</Button>
-        <Button size="sm" className="bg-indigo-700 text-white hover:bg-indigo-800" onClick={compile} disabled={!main || locked}>
+        <Button size="sm" className="bg-indigo-700 text-white hover:bg-indigo-800" onClick={() => void compile()} disabled={!main || locked}>
           <Play /> {busy ? 'Compiling…' : 'Compile PDF'}
         </Button>
       </>, actions)}
@@ -608,8 +728,19 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
               ) : (
                 <div className="min-h-0 flex-1 overflow-auto p-2">
                   {navigation === 'files'
-                    ? <Files nodes={tree} selected={selected} main={main} dirty={drafts} sourcePaths={sourcePaths}
-                        onSelect={openFile} onSetMain={setMain} />
+                    ? <>
+                        {project.metadata.sourceMode === 'archive' && <div className="flex flex-wrap gap-1 pb-2">
+                          <Button size="sm" variant="outline" disabled={locked || editableSource(project, selected) === undefined || !isTex}
+                            onClick={() => openFileOperation({ kind: 'chapter', parent: selected,
+                              to: selected.replace(/\.tex$/i, '-detail.tex'), title: '' })}>New chapter</Button>
+                          {fileUndo && <Button size="sm" variant="outline" disabled={locked} onClick={() => void undoFileOperation()}>
+                            Undo file changes
+                          </Button>}
+                        </div>}
+                        <Files nodes={tree} selected={selected} main={main} dirty={drafts} sourcePaths={sourcePaths}
+                          onSelect={openFile} onSetMain={setMain} onMove={project.metadata.sourceMode === 'archive' && !locked
+                            ? path => openFileOperation({ kind: 'move', from: path, to: path }) : undefined} />
+                      </>
                     : <OutlinePanel headings={headings} blocks={blocks} main={main} onLocate={locate} canvas={outlineCanvas} />}
                 </div>
               )}
@@ -675,7 +806,8 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       <section aria-label="Writing tools" className="flex min-h-0 max-h-[42%] shrink-0 flex-col border-t bg-white [@media(max-height:550px)]:max-h-[32%]">
         <div className="flex shrink-0 flex-wrap items-center gap-0.5 px-1.5 py-1 sm:gap-1 sm:px-2">
           {([
-            ['problems', 'Problems', CircleAlert], ['references', 'References', BookOpen], ['review', 'Review', ListChecks], ['ai', 'Chapter AI', Sparkles],
+            ['problems', 'Problems', CircleAlert], ['references', 'References', BookOpen], ['cross-references', 'Cross-references', Link2],
+            ['review', 'Review', ListChecks], ['ai', 'Chapter AI', Sparkles],
           ] as const).map(([tab, label, Icon]) => <Button key={tab} size="sm" variant={panel === tab ? 'secondary' : 'ghost'}
             className="gap-1 px-1.5 text-xs sm:gap-1.5 sm:px-3 sm:text-sm" aria-expanded={panel === tab} aria-controls="writing-tools-content" disabled={tab === 'ai' && (!isTex || readOnly)}
             onClick={() => {
@@ -715,6 +847,8 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
           </div>}
           {panel === 'references' && <ReferencesPanel project={workingProject} entries={bibliography} path={selected} draft={draft}
             canInsert={isTex && !readOnly && !locked} onInsert={insertReference} onLocate={locate} canvasAction={referenceCanvasAction} />}
+          {panel === 'cross-references' && <CrossReferencesPanel index={crossReferences} titles={labelTitles} onLocate={locate}
+            canInsert={isTex && !readOnly && !locked} onInsert={(command, key) => insertReference(key, command)} />}
           {panel === 'review' && <WritingReviewPanel key={selected} path={selected} line={reviewCursor?.path === selected ? reviewCursor.line : 1}
             catalog={catalog} canvas={outlineCanvas.canvas} actions={review} canSelect={isTex && currentFile?.type !== 'generated'}
             readSelection={readReviewSelection} onLocate={locate} />}
@@ -738,8 +872,24 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
             if (confirmDiscard()) void discard(draftPaths)
           }} disabled={locked}>Discard drafts</Button>}
         </div>
-        <span>{/\.bib$/i.test(selected) ? 'BibTeX' : isTex ? 'LaTeX' : 'Plain text'} · Ctrl / ⌘ + S to save</span>
+        <div className="flex flex-wrap items-center gap-x-3">
+          <span>{/\.bib$/i.test(selected) ? 'BibTeX' : isTex ? 'LaTeX' : 'Plain text'} · Ctrl / ⌘ + S to save</span>
+          <Button variant="outline" size="sm" className="h-7" disabled={!main || locked} onClick={() => {
+            setIncludeDrafts(false)
+            setSubmissionResult(undefined)
+            setSubmissionError('')
+            setSubmissionOpen(true)
+          }}>Prepare submission</Button>
+        </div>
       </footer>
+      {submissionOpen && <SubmissionDialog main={main} draftCount={draftPaths.length} includeDrafts={includeDrafts}
+        citationCount={submissionIssues.citations} referenceCount={submissionIssues.references} conflicting={includeDrafts && conflicts.length > 0}
+        ready={!locked} busy={busy} error={submissionError} result={submissionResult}
+        onDraftChoice={include => { setIncludeDrafts(include); setSubmissionResult(undefined); setSubmissionError('') }}
+        onClose={() => setSubmissionOpen(false)} onProblems={() => { setSubmissionOpen(false); setPanel('problems') }}
+        onCompile={() => { setSubmissionError(''); void compile(includeDrafts ? workingProject : withGeneratedSource(project)) }} />}
+      {fileOperation && <FileOperationDialog request={fileOperation.request} project={project} writing={{ drafts, view: fileOperation.view }}
+        main={main} onClose={() => setFileOperation(undefined)} onApply={applyFileOperation} />}
       {comparison && comparedDraft && <Dialog open onOpenChange={open => { if (!open) setComparison(undefined) }}>
         <DialogContent className="flex h-[85dvh] min-h-0 flex-col sm:max-w-[90vw]">
           <DialogTitle>Compare local draft</DialogTitle>

@@ -1,4 +1,5 @@
 import type { ProjectDirectory, ProjectFile, ProjectFileSystem } from './types'
+import { rebuildProjectDirectories } from './file-system'
 
 export interface ProjectSnapshotInfo {
   id: string
@@ -32,16 +33,61 @@ function projectValue(value: unknown) {
     ? Object.fromEntries(Object.entries(item).sort(([first], [second]) => first.localeCompare(second))) : item)
 }
 
-export async function describeSnapshotRestore(current: ProjectFileSystem, target: ProjectFileSystem) {
+export type SnapshotFileChange = { path: string; action: 'Add' | 'Remove' | 'Restore'; current?: ProjectFile; saved?: ProjectFile }
+
+export async function compareSnapshotFiles(current: ProjectFileSystem, target: ProjectFileSystem): Promise<SnapshotFileChange[]> {
   const paths = [...new Set([...current.files.keys(), ...target.files.keys()])].sort()
+  const changes: SnapshotFileChange[] = []
+  for (const path of paths) {
+    const before = current.files.get(path)
+    const after = target.files.get(path)
+    if (before?.type === 'directory' || after?.type === 'directory') continue
+    if (!before && after) changes.push({ path, action: 'Add', saved: after })
+    else if (before && !after) changes.push({ path, action: 'Remove', current: before })
+    else if (before && after && !await sameFile(before, after)) changes.push({ path, action: 'Restore', current: before, saved: after })
+  }
+  return changes
+}
+
+export function restoreSnapshotFiles(current: ProjectFileSystem, target: ProjectFileSystem, paths: readonly string[]) {
+  const files = new Map(current.files)
+  for (const path of paths) {
+    const before = files.get(path)
+    const after = target.files.get(path)
+    if ([before?.type, after?.type].some(type => type === 'directory' || type === 'generated')) {
+      throw new Error(`This file cannot be restored individually: ${path}`)
+    }
+    if (after) files.set(path, after)
+    else if (path === current.metadata.mainFile) throw new Error('Choose a different main file before removing the current entry.')
+    else files.delete(path)
+  }
+  const occupied = new Map<string, string>()
+  for (const [path, entry] of files) {
+    const parts = path.replace(/\/$/, '').split('/')
+    let stem = ''
+    for (const [index, part] of parts.entries()) {
+      stem += part
+      if (index < parts.length - 1 || entry.type === 'directory') stem += '/'
+      const key = stem.replace(/\/$/, '').toLowerCase()
+      const other = occupied.get(key)
+      if (other && other !== stem) throw new Error(`Conflicting project paths: ${other} and ${stem}`)
+      occupied.set(key, stem)
+    }
+  }
+  return { ...current, files: rebuildProjectDirectories(files), metadata: { ...current.metadata, updatedAt: new Date().toISOString() } }
+}
+
+export async function describeSnapshotRestore(current: ProjectFileSystem, target: ProjectFileSystem,
+  changes?: readonly SnapshotFileChange[]) {
+  const paths = [...new Set([...current.files.keys(), ...target.files.keys()])].sort()
+  const changed = new Map((changes ?? await compareSnapshotFiles(current, target)).map(change => [change.path, change.action]))
   const files: string[] = []
   for (const path of paths) {
     const before = current.files.get(path)
     const after = target.files.get(path)
-    if (before?.type === 'directory' && after?.type === 'directory') continue
-    if (!before) files.push(`Add ${path}`)
-    else if (!after) files.push(`Remove ${path}`)
-    else if (!await sameFile(before, after)) files.push(`Restore ${path}`)
+    const action = changed.get(path) ?? (before?.type === 'directory' || after?.type === 'directory'
+      ? !before ? 'Add' : !after ? 'Remove' : before.type !== after.type ? 'Restore' : undefined : undefined)
+    if (action) files.push(`${action} ${path}`)
   }
   const beforePages = new Map(current.canvas?.pages.map(page => [page.id, page]))
   const afterPages = new Map(target.canvas?.pages.map(page => [page.id, page]))

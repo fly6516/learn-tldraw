@@ -1,11 +1,12 @@
 import { expect, test } from 'bun:test'
-import { describeSnapshotRestore } from './snapshots'
+import { compareSnapshotFiles, describeSnapshotRestore, restoreSnapshotFiles } from './snapshots'
 import { createCanvasFixture } from './canvas-test-fixture'
 import { buildProjectOutline } from './outline'
 import { indexOutline, resolveSectionAnchor } from './section-links'
 import { encodeProjectBackup, decodeProjectBackup } from './backup'
 import { exportSourceArchive } from './source-archive'
 import { updateFileContent } from './file-system'
+import { applyWritingDrafts } from './writing-drafts'
 import { POST } from '../../app/api/latex/compile/route'
 
 test('summarizes changed source, equal-size attachments, canvas pages and the active page before restoring', async () => {
@@ -28,6 +29,25 @@ test('summarizes changed source, equal-size attachments, canvas pages and the ac
   const restoredOutline = indexOutline(buildProjectOutline(backup.project, 'main.tex'))
   expect(resolveSectionAnchor(restoredOutline, backup.project.metadata.createdAt, evidence.nodes[0].data.sourceAnchor))
     .toMatchObject({ path: 'sections/results.tex', line: 1 })
+})
+
+test('restores one selected source while retaining other files, drafts, and the current Canvas', async () => {
+  const snapshot = await createCanvasFixture()
+  const results = 'sections/results.tex'
+  const nested = 'sections/nested.tex'
+  const edited = updateFileContent(updateFileContent(snapshot, results, 'Edited results'), nested, 'Saved nested revision')
+  edited.canvas = { ...snapshot.canvas, activePageId: snapshot.canvas.pages[1].id }
+  const choices = await compareSnapshotFiles(edited, snapshot)
+  expect(choices.map(({ action, path }) => [action, path])).toEqual([['Restore', nested], ['Restore', results]])
+  expect(choices.find(change => change.path === results)).toMatchObject({ current: { content: 'Edited results' } })
+  const partial = restoreSnapshotFiles(edited, snapshot, [results])
+  expect(partial.canvas).toBe(edited.canvas)
+  expect(partial.metadata.mainFile).toBe(edited.metadata.mainFile)
+  expect(partial.files.get(results)).toBe(snapshot.files.get(results))
+  expect(partial.files.get(nested)).toBe(edited.files.get(nested))
+  expect(applyWritingDrafts(partial, { [nested]: { base: 'Saved nested revision', text: 'Nested local draft' } }).files.get(nested).content)
+    .toBe('Nested local draft')
+  expect(() => restoreSnapshotFiles(edited, { ...snapshot, files: new Map() }, [edited.metadata.mainFile])).toThrow('main file')
 })
 
 test.skipIf(process.env.LATEX_COMPILE_ENABLED !== '1')('compiles a multi-file project with figure, references and a source map', async () => {

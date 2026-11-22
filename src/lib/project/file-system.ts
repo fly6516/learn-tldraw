@@ -275,6 +275,24 @@ export interface FileTreeNode {
   mimeType?: string
 }
 
+export function rebuildProjectDirectories(files: ProjectFileSystem['files']) {
+  const result: ProjectFileSystem['files'] = new Map()
+  const directory = (path: string) => path.slice(0, path.lastIndexOf('/') + 1)
+  for (const item of files.values()) {
+    result.set(item.path, 'files' in item ? { ...item, files: [] } : item)
+  }
+  for (const item of [...result.values()]) {
+    for (let folder = directory(item.path.replace(/\/$/, '')); folder; folder = directory(folder.slice(0, -1))) {
+      if (!result.has(folder)) result.set(folder, { type: 'directory', path: folder, name: folder.split('/').at(-2)!, files: [] })
+    }
+  }
+  for (const item of result.values()) {
+    const parent = result.get(directory(item.path.replace(/\/$/, '')))
+    if (parent && 'files' in parent) parent.files.push(item)
+  }
+  return result
+}
+
 export function getFileTree(fs: ProjectFileSystem): FileTreeNode[] {
   const tree: FileTreeNode[] = []
   const directories = new Map<string, FileTreeNode[]>()

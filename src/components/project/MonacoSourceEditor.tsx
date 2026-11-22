@@ -62,7 +62,9 @@ monaco.languages.setMonarchTokensProvider('research-bib', {
   },
 })
 
-export function WritingDraftComparison({ path, original, modified }: { path: string; original: string; modified: string }) {
+export function WritingDraftComparison({ path, original, modified, originalLabel = 'Project source', modifiedLabel = 'Local draft' }: {
+  path: string; original: string; modified: string; originalLabel?: string; modifiedLabel?: string
+}) {
   const container = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (!container.current) return
@@ -71,7 +73,7 @@ export function WritingDraftComparison({ path, original, modified }: { path: str
     const after = monaco.editor.createModel(modified, language)
     const diff = monaco.editor.createDiffEditor(container.current, {
       theme: 'research-paper', automaticLayout: true, readOnly: true, originalEditable: false,
-      originalAriaLabel: 'Project source', modifiedAriaLabel: 'Local draft',
+      originalAriaLabel: originalLabel, modifiedAriaLabel: modifiedLabel,
       renderSideBySide: true, minimap: { enabled: false }, wordWrap: 'on',
     })
     diff.setModel({ original: before, modified: after })
@@ -81,7 +83,7 @@ export function WritingDraftComparison({ path, original, modified }: { path: str
       before.dispose()
       after.dispose()
     }
-  }, [path, original, modified])
+  }, [path, original, modified, originalLabel, modifiedLabel])
   return <div ref={container} className="size-full" />
 }
 

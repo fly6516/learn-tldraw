@@ -52,6 +52,24 @@ Set `TECTONIC_ONLY_CACHED=1` to compile offline once the required files are cach
    On narrow screens, use **Source**, **PDF**, and the **Files** drawer. **Project menu →
    Export LaTeX ZIP** downloads the saved source tree.
 
+For imported source projects, select an editable `.tex` file in **Files** and choose
+**New chapter** to create a child file and insert its `\input` in the selected source.
+Choose **Rename or move…** from a file's menu to change its project-relative path.
+Review the affected LaTeX paths, local drafts, and Canvas or review links before applying.
+The preview identifies dynamic paths that need a manual check. **Undo file changes**
+restores the latest file operation, including its draft and link changes, while the
+Writing workspace remains open and before any further edits to files, drafts, or cards.
+
+Open **Cross-references** in Writing to search LaTeX labels by key, heading, caption, or
+file. Open a definition or use to locate it in the editor, or insert a `\ref` or `\pageref`
+at the cursor. **Problems** lists undefined reference keys and duplicate `\label` definitions
+from statically included sources and their drafts.
+
+Choose **Prepare submission** to compile the same ZIP you will download. Review the main
+file, draft choice, and citation and label issues before compiling. Select saved project
+files or explicitly include local drafts in both downloads. A successful compile makes
+the matching PDF and source ZIP available together.
+
 After compiling, place the cursor on a LaTeX line and choose **Show in PDF** to highlight
 its typeset location. Click typeset content in **PDF Preview** to open its source file
 and line. When a source line has no typeset output, the forward jump uses the nearest
@@ -66,9 +84,11 @@ available in **Canvas** and the project menu.
 
 Open **Project menu → Project Snapshots** to name a version of the saved source files,
 Canvas pages and attachments. **Review restore** shows which files, pages and project
-settings would change. Save or discard local Writing drafts before restoring. Each restore
-keeps a recovery snapshot of the project it replaces. Snapshots live in this browser and
-are scoped to the project. Use **Project Backup** to move a saved project between browsers.
+settings would change. Use **Compare** to inspect one file, then check the files you want
+to restore. **Restore selected files** preserves the other saved files, their local drafts,
+and the current Canvas. Resolve any local drafts for the selected files first. Full snapshot
+restore requires resolving all drafts. Each restore keeps a recovery snapshot. Snapshots
+live in this browser. Use **Project Backup** to move a saved project between browsers.
 
 ## Whole-paper Canvas and LaTeX blocks
 
