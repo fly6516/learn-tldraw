@@ -33,7 +33,8 @@ import { clearWritingState, commitFileOperation, commitWritingDrafts } from '@/l
 import type { FileOperation } from '@/lib/project/file-refactor'
 import { FileOperationDialog, type FileOperationPlan } from './FileOperationDialog'
 import { SubmissionDialog } from './SubmissionDialog'
-import { prepareSubmission, type SubmissionIssue, type SubmissionVersion } from '@/lib/project/submission'
+import { exportExternalBuild, prepareSubmission, type SubmissionIssue, type SubmissionVersion } from '@/lib/project/submission'
+import type { ExternalEngine } from '@/lib/project/compile-compatibility'
 import { useWritingDrafts } from './useWritingDrafts'
 import { SourceSearchPanel } from './SourceSearchPanel'
 import { WritingReviewPanel, type WritingReviewActions } from './WritingReviewPanel'
@@ -107,6 +108,7 @@ type GenerateSource = (project: ProjectFileSystem, onNode?: (node: ResearchNodeD
 type CompileSnapshot = { main: string; files: ProjectFileSystem['files'] }
 type SubmissionSelection = Pick<SubmissionVersion, 'paths' | 'excluded' | 'drafts' | 'issues'> & { target: ProjectFileSystem }
 type CompiledSubmission = Omit<SubmissionVersion, 'id' | 'name' | 'createdAt'>
+type ExternalSubmission = Omit<CompiledSubmission, 'pdf' | 'warnings' | 'diagnostics'> & { checksum: string; downloadUrl: string }
 
 function submissionDiagnostics(diagnostics: CompileDiagnostic[], files: ProjectFileSystem['files']): SubmissionIssue[] {
   return diagnostics.map(({ path, line, severity, message }) => {
@@ -177,6 +179,8 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const [submissionOpen, setSubmissionOpen] = useState(false)
   const [includeDrafts, setIncludeDrafts] = useState(false)
   const [submissionResult, setSubmissionResult] = useState<CompiledSubmission>()
+  const [externalSubmission, setExternalSubmission] = useState<ExternalSubmission>()
+  const externalPreparation = useRef(0)
   const [submissionExcluded, setSubmissionExcluded] = useState<ReadonlySet<string>>(new Set())
   const [submissionError, setSubmissionError] = useState('')
   const [submissionLog, setSubmissionLog] = useState('')
@@ -291,6 +295,8 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   ], [citationIssues, crossReferences, currentDiagnostics])
 
   useEffect(() => () => { if (pdfUrl) URL.revokeObjectURL(pdfUrl) }, [pdfUrl])
+  const externalUrl = externalSubmission?.downloadUrl
+  useEffect(() => () => { if (externalUrl) URL.revokeObjectURL(externalUrl) }, [externalUrl])
   useEffect(() => () => compileRequest.current?.abort(), [])
 
   useEffect(() => {
@@ -686,7 +692,39 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   }
 
   function resetSubmissionBuild() {
+    externalPreparation.current++
+    setExternalSubmission(undefined)
     setSubmissionResult(undefined)
+    setSubmissionError('')
+    setSubmissionLog('')
+    setSubmissionCompilerIssues([])
+  }
+
+  function getSubmissionSelection(): SubmissionSelection | undefined {
+    if (!submission) return
+    return { target: submission.target, paths: [...submission.target.files.keys()].sort(), excluded: [...submission.excluded],
+      issues: submission.issues, drafts: includeDrafts ? draftPaths.filter(path => submission.target.files.has(path)) : [] }
+  }
+
+  async function prepareExternalSubmission() {
+    const selection = getSubmissionSelection()
+    if (!selection || locked) return
+    const { target, ...info } = selection
+    const token = ++externalPreparation.current
+    try {
+      const { zip, checksum } = await exportExternalBuild(target)
+      if (token !== externalPreparation.current) return
+      setExternalSubmission({ ...info, main, zip, checksum, downloadUrl: URL.createObjectURL(zip) })
+    } catch {
+      if (token === externalPreparation.current) throw new Error('Could not prepare the external build ZIP.')
+    }
+  }
+
+  function attachExternalPdf(pdf: File, engine: ExternalEngine, checksum: string) {
+    if (!externalSubmission || externalSubmission.checksum !== checksum) return
+    const { main, paths, excluded, drafts, issues, zip } = externalSubmission
+    setSubmissionResult({ main, paths, excluded, drafts, issues, zip, pdf: pdf.slice(0, pdf.size, 'application/pdf'),
+      warnings: false, diagnostics: [], externalEngine: engine, sourceChecksum: checksum })
     setSubmissionError('')
     setSubmissionLog('')
     setSubmissionCompilerIssues([])
@@ -915,6 +953,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       </footer>
       {submission && <SubmissionDialog main={main} drafts={draftPaths} includeDrafts={includeDrafts} paths={submission.paths}
         excluded={submission.excluded} issues={submission.issues} compilerIssues={submissionCompilerIssues}
+        compatibility={submission.compatibility} external={externalSubmission} onPrepareExternal={prepareExternalSubmission} onAttachExternal={attachExternalPdf}
         conflicting={includeDrafts && conflicts.some(path => !submission.excluded.has(path))}
         ready={!locked} busy={busy} error={submissionError} log={submissionLog} result={submissionResult} database={storage} storageKey={journal.key}
         onDraftChoice={include => { setIncludeDrafts(include); resetSubmissionBuild() }}
@@ -938,8 +977,8 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         }}
         onCompile={() => {
           resetSubmissionBuild()
-          void compile({ target: submission.target, paths: [...submission.target.files.keys()].sort(), excluded: [...submission.excluded],
-            issues: submission.issues, drafts: includeDrafts ? draftPaths.filter(path => submission.target.files.has(path)) : [] })
+          const selection = getSubmissionSelection()
+          if (selection) void compile(selection)
         }} />}
       {fileOperation && <FileOperationDialog request={fileOperation.request} project={project} writing={{ drafts, view: fileOperation.view }}
         main={main} onClose={() => setFileOperation(undefined)} onApply={applyFileOperation} />}

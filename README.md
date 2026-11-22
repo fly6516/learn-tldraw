@@ -82,8 +82,19 @@ mapped line in the same file. Compile again after editing to refresh both direct
 
 The compile endpoint accepts ZIPs up to 32 MB, including after extraction. The standard compiler
 supports XeLaTeX and BibTeX workflows. Documents that require a different engine, Biber, or
-shell escape may need external compilation. The canvas preview and print workflow are also
+packages unavailable to Tectonic can use **Prepare submission → External compilation**.
+Prepare the final ZIP after setting exclusions. The handoff shows the main file, engine and
+bibliography hints, a `latexmk` command, and the ZIP SHA-256. Build in your own TeX installation,
+then attach the resulting PDF and confirm its source. Saved versions identify externally built
+PDFs and retain the original ZIP. The canvas preview and print workflow are also
 available in **Canvas** and the project menu.
+
+For example, the [Springer Nature December 2024 journal template](https://www.springernature.com/in/authors/campaigns/latex-author-support)
+uses pdfLaTeX, BibTeX, an EPS image and a `bst/` folder. From the extracted main-file directory,
+set `BSTINPUTS` as shown in the handoff, convert `fig.eps` with
+`epstopdf --outfile=fig-eps-converted-to.pdf fig.eps`, then build `sn-article.tex` with pdfLaTeX.
+In a minimal TeX Live installation, add `ncctools` if `manyfoot.sty` is missing. The official
+template ZIP includes a sample PDF and manual that can be excluded from the handoff.
 
 ## Project snapshots
 

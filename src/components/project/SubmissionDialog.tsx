@@ -8,6 +8,8 @@ import { Download } from 'lucide-react'
 import type { SubmissionIssue, SubmissionVersion, SubmissionVersionInfo } from '@/lib/project/submission'
 import type { WritingKey } from '@/lib/project/writing-drafts'
 import { listSubmissionVersions, readSubmissionFiles, saveSubmissionVersion } from '@/lib/project/storage'
+import { ExternalCompilePanel } from './ExternalCompilePanel'
+import type { CompileCompatibility, ExternalEngine } from '@/lib/project/compile-compatibility'
 
 function download(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob)
@@ -21,7 +23,8 @@ function download(blob: Blob, name: string) {
 type VersionDraft = Omit<SubmissionVersion, 'id' | 'createdAt' | 'name'>
 
 export function SubmissionDialog({ main, drafts, includeDrafts, onDraftChoice, conflicting, paths, excluded, onToggle,
-  issues, ready, busy, error, log, result, compilerIssues, onClose, onCompile, onLocate, database, storageKey }: {
+  issues, ready, busy, error, log, result, compilerIssues, onClose, onCompile, onLocate, database, storageKey,
+  compatibility, external, onPrepareExternal, onAttachExternal }: {
   main: string
   drafts: string[]
   includeDrafts: boolean
@@ -42,6 +45,10 @@ export function SubmissionDialog({ main, drafts, includeDrafts, onDraftChoice, c
   onLocate: (issue: SubmissionIssue) => void
   database: IDBDatabase | null
   storageKey?: WritingKey
+  compatibility: CompileCompatibility
+  external?: { downloadUrl: string; checksum: string }
+  onPrepareExternal: () => Promise<void>
+  onAttachExternal: (pdf: File, engine: ExternalEngine, checksum: string) => void
 }) {
   const [versions, setVersions] = useState<SubmissionVersionInfo[]>([])
   const [versionName, setVersionName] = useState('')
@@ -93,7 +100,7 @@ export function SubmissionDialog({ main, drafts, includeDrafts, onDraftChoice, c
   return <Dialog open onOpenChange={open => { if (!open && !saving) onClose() }}>
     <DialogContent showCloseButton={!saving} className="max-h-[90dvh] overflow-auto sm:max-w-xl">
       <DialogTitle>Prepare submission</DialogTitle>
-      <DialogDescription>The PDF is compiled from the exact source ZIP offered for download. Archived versions keep both files in this browser.</DialogDescription>
+      <DialogDescription>Build the final source ZIP here or in your own TeX installation. Archived versions keep both files in this browser.</DialogDescription>
       <p className="text-sm">Compile entry <code className="break-all">{main}</code></p>
       {drafts.length > 0 && <fieldset disabled={busy || saving} className="space-y-1 text-sm">
         <legend className="font-medium">Source to submit</legend>
@@ -126,7 +133,8 @@ export function SubmissionDialog({ main, drafts, includeDrafts, onDraftChoice, c
         </ul>
       </section>
       <p role="status" className="text-sm" aria-label="Compilation">
-        {busy ? 'Compiling the confirmed source ZIP…' : result ? (result.warnings ? 'Compiled with warnings' : 'Compiled successfully') : error ? 'Compilation failed' : 'Ready to compile'}
+        {busy ? 'Compiling the confirmed source ZIP…' : result?.externalEngine ? `External PDF attached · ${result.externalEngine} · Source match confirmed by you`
+          : result ? (result.warnings ? 'Compiled with warnings' : 'Compiled successfully') : error ? 'Compilation failed' : 'Ready to compile'}
       </p>
       {(error || log) && <details open={Boolean(error)} className={error ? 'text-sm text-red-800' : 'text-sm text-amber-800'}>
         <summary>Compiler output</summary><p className="max-h-40 overflow-auto whitespace-pre-wrap break-words">{error || log}</p>
@@ -137,6 +145,10 @@ export function SubmissionDialog({ main, drafts, includeDrafts, onDraftChoice, c
           <Button onClick={() => download(result.pdf, `${name}.pdf`)}><Download /> Download submission PDF</Button>
         </> : <Button onClick={onCompile} disabled={busy || !ready || conflicting}>Compile submission files</Button>}
       </div>
+      {!result && <ExternalCompilePanel main={main} compatibility={compatibility} error={error} checksum={external?.checksum}
+        downloadUrl={external?.downloadUrl}
+        busy={busy} ready={ready && !conflicting} onPrepare={onPrepareExternal}
+        onAttach={(pdf, engine) => { if (external) onAttachExternal(pdf, engine, external.checksum) }} />}
       {result && database && storageKey && <form className="flex flex-wrap items-end gap-2" onSubmit={event => { event.preventDefault(); void archive() }}>
         <label className="flex-1 space-y-1 text-sm font-medium"><span>Version name</span>
           <Input value={versionName} onChange={event => setVersionName(event.target.value)} maxLength={100} disabled={saving} />
@@ -148,7 +160,8 @@ export function SubmissionDialog({ main, drafts, includeDrafts, onDraftChoice, c
         {versions.map(version => <details key={version.id} className="rounded border p-2">
           <summary className="cursor-pointer break-all font-medium">{version.name} · {new Date(version.createdAt).toLocaleString()}</summary>
           <p className="mt-1 break-all">{version.main} · {version.paths.length} files · {version.drafts.length} local drafts</p>
-          <p>{version.warnings ? 'Compiled with warnings' : 'Compiled successfully'} · {version.issues.length} preflight findings</p>
+          <p>{version.externalEngine ? `External PDF · ${version.externalEngine}` : version.warnings ? 'Compiled with warnings' : 'Compiled successfully'} · {version.issues.length} preflight findings</p>
+          {version.sourceChecksum && <p className="break-all text-xs">ZIP SHA-256 <code>{version.sourceChecksum}</code></p>}
           <details className="mt-1"><summary>Files and findings</summary>
             <ul className="max-h-40 overflow-auto break-all">
               {version.paths.map(path => <li key={path}>{path}{version.drafts.includes(path) && ' · Local draft'}</li>)}

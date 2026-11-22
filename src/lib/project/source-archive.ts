@@ -63,12 +63,13 @@ export async function importSourceArchive(file: File, maxBytes = 128 * 1024 * 10
   }
 }
 
-export async function exportSourceArchive(project: ProjectFileSystem): Promise<Blob> {
+export async function exportSourceArchive(project: ProjectFileSystem, entryDate?: Date): Promise<Blob> {
   const archive = new JSZip()
+  const options = { createFolders: false, date: entryDate }
   for (const entry of project.files.values()) {
-    if (entry.type === 'directory') archive.file(entry.path, '', { dir: true, createFolders: false })
-    else if ('blob' in entry && entry.blob) archive.file(entry.path, await entry.blob.arrayBuffer(), { createFolders: false })
-    else if ('content' in entry && entry.content !== undefined) archive.file(entry.path, entry.content, { createFolders: false })
+    if (entry.type === 'directory') archive.file(entry.path, '', { ...options, dir: true })
+    else if ('blob' in entry && entry.blob) archive.file(entry.path, await entry.blob.arrayBuffer(), options)
+    else if ('content' in entry && entry.content !== undefined) archive.file(entry.path, entry.content, options)
   }
   return archive.generateAsync({ type: 'blob' })
 }

@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import JSZip from 'jszip'
-import { prepareSubmission } from './submission'
+import { exportExternalBuild, prepareSubmission } from './submission'
 import { exportSourceArchive } from './source-archive'
 
 test('preflights the final ZIP with exact locations for missing and excluded files and bad references', async () => {
@@ -24,4 +24,16 @@ test('preflights the final ZIP with exact locations for missing and excluded fil
   const zip = await JSZip.loadAsync(await (await exportSourceArchive(target)).arrayBuffer())
   expect(Object.keys(zip.files).sort()).toEqual(['paper/main.tex', 'paper/refs.bib', 'paper/results.tex'])
   expect(project.files.has('paper/private.txt')).toBe(true)
+})
+
+test('external build ZIP bytes stay identical across export order and carry the displayed SHA-256', async () => {
+  const files = new Map([['main.tex', { type: 'editable', path: 'main.tex', content: 'Main' }],
+    ['figure.eps', { type: 'asset', path: 'figure.eps', blob: new Blob(['figure data']) }]])
+  const first = await exportExternalBuild({ files })
+  const second = await exportExternalBuild({ files: new Map([...files].reverse()) })
+  const bytes = await first.zip.arrayBuffer()
+  expect(second.checksum).toBe(first.checksum)
+  expect(first.checksum).toBe(new Bun.CryptoHasher('sha256').update(bytes).digest('hex'))
+  const archive = await JSZip.loadAsync(bytes)
+  expect(await archive.file('figure.eps').async('text')).toBe('figure data')
 })

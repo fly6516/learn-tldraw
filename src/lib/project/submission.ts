@@ -3,12 +3,22 @@ import { indexCrossReferences } from './cross-references'
 import { checkCitations, collectBibliography } from './references'
 import { groupEnd, lineNumber, maskLatexCode, type SourceLocation } from './latex-source'
 import type { ProjectFileSystem } from './types'
+import { detectCompileCompatibility, type ExternalEngine } from './compile-compatibility'
+import { exportSourceArchive } from './source-archive'
 
 export type SubmissionIssue = { severity: 'error' | 'warning'; message: string; location?: SourceLocation }
 export type SubmissionFiles = { pdf: Blob; zip: Blob; warnings: boolean; diagnostics: SubmissionIssue[] }
 export type SubmissionVersion = SubmissionFiles & { id: string; name: string; createdAt: string; main: string;
-  paths: string[]; excluded: string[]; drafts: string[]; issues: SubmissionIssue[] }
+  paths: string[]; excluded: string[]; drafts: string[]; issues: SubmissionIssue[]; externalEngine?: ExternalEngine; sourceChecksum?: string }
 export type SubmissionVersionInfo = Omit<SubmissionVersion, 'pdf' | 'zip'>
+
+export async function exportExternalBuild(project: ProjectFileSystem) {
+  const files = new Map([...project.files].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0))
+  const zip = await exportSourceArchive({ ...project, files }, new Date('1980-01-01T00:00:00Z'))
+  const digest = await crypto.subtle.digest('SHA-256', await zip.arrayBuffer())
+  const checksum = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
+  return { zip, checksum }
+}
 
 const suffixes: Record<string, string[]> = {
   input: ['.tex'], include: ['.tex'], includegraphics: ['.pdf', '.png', '.jpg', '.jpeg', '.eps'],
@@ -85,5 +95,5 @@ export function prepareSubmission(project: ProjectFileSystem, main: string, excl
   for (const { key, kind, ...location } of checkCitations({ ...target, files: reachable }, citations)) {
     issues.push({ severity: 'warning', location, message: kind === 'missing' ? `Unknown citation key: ${key}` : `Duplicate bibliography key: ${key}` })
   }
-  return { target, issues }
+  return { target, issues, compatibility: detectCompileCompatibility(sources, main, files.keys()) }
 }
