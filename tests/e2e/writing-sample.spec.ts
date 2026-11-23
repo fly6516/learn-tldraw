@@ -33,7 +33,9 @@ async function finishSample(page: Page, mode: 'Use example edits' | 'Use configu
     applied = await appliedFiles()
   }
   const review = page.getByRole('dialog', { name: 'Review manuscript task' })
-  await expect(review.getByRole('status')).toContainText('Manuscript verification passed.')
+  await expect(review.getByRole('status')).toContainText('Manuscript verification passed.', {
+    timeout: process.env.RESEARCH_TRIAL_E2E_URL ? 370_000 : 12_000,
+  })
   for (const path of ['sections/methods.tex', 'sections/results.tex']) {
     await review.getByRole('button', { name: path, exact: true }).click()
     for (const confirm of await review.getByRole('button', { name: 'Confirm claim' }).all()) {
@@ -59,7 +61,7 @@ async function finishSample(page: Page, mode: 'Use example edits' | 'Use configu
 }
 
 test('guides a new project from sample import to archive using example edits', async ({ page }) => {
-  test.setTimeout(120_000)
+  test.setTimeout(process.env.RESEARCH_TRIAL_E2E_URL ? 420_000 : 120_000)
   await finishSample(page, 'Use example edits')
 })
 

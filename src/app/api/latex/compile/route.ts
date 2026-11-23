@@ -65,6 +65,7 @@ export async function POST(request: Request) {
     const job = basename(mainFile).replace(/\.tex$/i, '')
     const readLog = () => readFile(join(output, job + '.log'), 'utf8').catch(() => '')
     const onlyCached = process.env.TECTONIC_ONLY_CACHED === '1'
+    const timeout = process.env.RESEARCH_TRIAL_RUNTIME === '1' && !onlyCached ? 360_000 : 120_000
     let outputText: string
     try {
       const { stdout, stderr } = await exec(process.env.TECTONIC_BIN || 'tectonic', [
@@ -74,7 +75,7 @@ export async function POST(request: Request) {
         '--outdir', output, '--', basename(mainFile),
       ], {
         cwd: dirname(join(sources, mainFile)), windowsHide: true,
-        timeout: 120_000, maxBuffer: 2 * 1024 * 1024, signal: request.signal,
+        timeout, maxBuffer: 2 * 1024 * 1024, signal: request.signal,
       })
       outputText = [stderr, stdout].filter(Boolean).join('\n')
     } catch (cause) {

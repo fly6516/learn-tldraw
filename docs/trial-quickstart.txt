@@ -7,8 +7,8 @@ Research Canvas local trial
 4. Choose “Try a writing sample” and “Use example edits”. Follow the sample
    through review, PDF compilation and submission export. No model key is needed.
 
-Keep the launcher window open while editing. The first LaTeX compile might need
-internet access so the bundled Tectonic compiler can obtain LaTeX resources.
+Keep the launcher window open while editing. The first LaTeX compile might take
+several minutes while the bundled Tectonic compiler downloads LaTeX resources.
 “Workbench setup” checks whether the compiler is ready.
 
 Your projects stay in your browser at this address. Before changing browsers,

@@ -15,7 +15,8 @@ const win = process.platform === 'win32'
 const server = spawn(process.execPath, [join(root, 'app', 'server.js')], {
   cwd: join(root, 'app'),
   env: { ...process.env, PORT: String(port), HOSTNAME: '127.0.0.1', NEXT_TELEMETRY_DISABLED: '1',
-    LATEX_COMPILE_ENABLED: '1', RESEARCH_TEST_MODE: '0', TECTONIC_BIN: join(root, 'runtime', win ? 'tectonic.exe' : 'tectonic'),
+    LATEX_COMPILE_ENABLED: '1', RESEARCH_TRIAL_RUNTIME: '1', RESEARCH_TEST_MODE: '0',
+    TECTONIC_BIN: join(root, 'runtime', win ? 'tectonic.exe' : 'tectonic'),
     DEEPSEEK_API_KEY: '', OPENAI_API_KEY: '' },
   stdio: ['ignore', 'pipe', 'inherit'],
 })
