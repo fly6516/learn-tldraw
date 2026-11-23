@@ -32,10 +32,13 @@ export async function POST(request: Request) {
     return error('The example mode only supports the built-in sample task.', 400)
   }
   const provider = input.writingExample || process.env.RESEARCH_TEST_MODE === '1'
-    ? { model: (await import('@/lib/project/test-writing-model')).testWritingModel(input.scope, input.messages.at(-1)?.text ?? '',
+    ? { recipient: input.writingExample ? 'Built-in example' : 'Local test model', model: (await import('@/lib/project/test-writing-model')).testWritingModel(input.scope, input.messages.at(-1)?.text ?? '',
       input.feedback?.status, input.workflow === 'revision', Boolean(input.draftPermission), input.manuscript, input.writingExample) }
     : configuredAi()
   if (!provider) return error('Configure the model on the local server before opening a conversation.', 503)
+  if (input.expectedRecipient && input.expectedRecipient !== provider.recipient.slice(0, 300)) {
+    return error('The configured model changed. Review the context again before sending.', 409)
+  }
   const { source, revision, scope, workflow, run, selection } = input
   const evidenceClaim = input.manuscript?.mode === 'evidence' ? input.manuscript.claim : undefined
   const isRevision = workflow === 'revision'
@@ -239,7 +242,7 @@ export async function POST(request: Request) {
   const required = workflow === 'revision' ? ['read_archived_changes'] : workflow === 'diagnostics' ? ['compile_diagnostics']
     : workflow === 'project' ? ['search_source', 'read_source'] : workflow === 'auto' ? [] : ['read_source']
   const scopedTask = input.manuscript?.mode === 'batch' || input.manuscript?.mode === 'repair' || Boolean(evidenceClaim)
-  const messages = isRevision || scopedTask || explicitEdit || (workflow === 'auto' && explicitTool) ? [{ role: 'user' as const, content: latestRequest }]
+  const messages = input.latestMessageOnly || isRevision || scopedTask || explicitEdit || (workflow === 'auto' && explicitTool) ? [{ role: 'user' as const, content: latestRequest }]
     : input.messages.map(({ role, text }) => ({ role, content: text }))
   const context = { workflow, version: workflowVersion, current: source?.path, main: source?.main, selection,
     editable: scope, draftPermission: input.draftPermission, inventory: inventory.map(({ path, truncated }) => ({ path, truncated })),
@@ -270,8 +273,9 @@ For local state, prefer workspaceActivity and fresh tool evidence to claims in p
 Never claim changes were applied, saved, or compiled by you. State any tool failures or missing evidence.
 Use request_preview_compile when a fresh preview is requested without a source patch. A patch is verified by its own review card. The local compiler result, if provided, describes the output of a previous build or temporary patch.`
   const hasWorkflowResult = () => workflowRequested || ((Boolean(repair) || batch || explicitEdit) && proposed)
+  const { recipient, ...configuration } = provider
   const result = streamText({
-    ...provider, tools, messages, stopWhen: [stepCountIs(10), hasWorkflowResult], maxOutputTokens: 4600, maxRetries: 0,
+    ...configuration, tools, messages, stopWhen: [stepCountIs(10), hasWorkflowResult], maxOutputTokens: 4600, maxRetries: 0,
     prepareStep: ({ stepNumber }) => {
       if (evidenceClaim) {
         const readTools = input.attachments ? ['read_csv_rows', 'calculate_csv', 'read_source', 'query_references', 'search_source'] as const
@@ -312,7 +316,7 @@ Use request_preview_compile when a fresh preview is requested without a source p
     sendReasoning: false,
     onError: () => 'The model stream failed. Retry the request.',
     messageMetadata: ({ part }) => {
-      if (part.type === 'start') return { run, workflow }
+      if (part.type === 'start') return { run, workflow, modelRecipient: recipient.slice(0, 300), historyCount: messages.length - 1 }
       if (part.type === 'finish') {
         const calls = new Set<string>(chapter?.calls)
         if (archived) calls.add('read_archived_changes')

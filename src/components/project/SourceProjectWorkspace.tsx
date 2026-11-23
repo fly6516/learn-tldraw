@@ -1101,6 +1101,9 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
             disabled={locked || Boolean(conflicts.length)} compiler={aiCompiler} selection={aiSelection} onRevision={() => setRevision({})}
             onAction={applyChatAction} onUndoBatches={undoManuscriptBatches} onSaveManuscript={saveManuscript} onLocate={locateAiEvidence}
             onLocateReview={locateReviewSource} onOpenReview={() => setResumeManuscriptReview(undefined)}
+            onReadExclusions={rules => setFileSystem(current => current ? {
+              ...current, metadata: { ...current.metadata, aiReadExclusions: rules.length ? rules : undefined },
+            } : current)}
             onCompile={signal => compile(undefined, signal)} onBuildSubmission={(selection, signal) => compile(selection, signal)}
             onExternalSubmission={(include, excluded) => {
               resetSubmissionBuild()

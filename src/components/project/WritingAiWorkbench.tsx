@@ -32,6 +32,8 @@ import { csvCalculationSchema } from '@/lib/project/csv-calculation'
 import { CalculationEvidence } from './CalculationEvidence'
 import { writingExerciseCommand, writingExerciseData, writingExercisePrompt, writingSampleFiles, writingSamplePrompt } from '@/lib/project/writing-sample'
 import { writingClaimsSchema, type ClaimReview } from '@/lib/project/writing-claims'
+import { aiReadScope, restrictAiProject, type AiContextReceipt } from '@/lib/project/ai-read-scope'
+import { AiContextDetails, AiContextPreview, AiReadExclusionsDialog } from './AiContextDisclosure'
 
 const Diff = dynamic(() => import('./MonacoSourceEditor').then(module => module.WritingDraftComparison), { ssr: false })
 type DraftAccess = 'all' | string[]
@@ -44,6 +46,7 @@ type WorkbenchProps = {
   compiler: ChapterEditRequest['compiler']; onLocate: (path: string, line: number) => void
   onLocateReview: (path: string, line: number, onReturn: () => void) => void
   onOpenReview: () => void
+  onReadExclusions: (rules: string[]) => void
   selection: () => { path: string; start: number; end: number } | undefined
   onAction: (run: string, action: ChatAction) => Promise<ChatCheckpoint['state']>
   onUndoBatches: (runs: readonly string[]) => Promise<string[]>
@@ -82,7 +85,7 @@ export function chatText(message: UIMessage) {
 export const chatTransport = new DefaultChatTransport<WritingChatMessage>({
   api: '/api/latex/chat',
   prepareSendMessagesRequest: ({ messages, body }) => ({ body: {
-    ...body, messages: messages.filter(message => message.role !== 'system' && !message.metadata?.local)
+    ...body, messages: (body?.latestMessageOnly ? messages.slice(-1) : messages).filter(message => message.role !== 'system' && !message.metadata?.local)
       .map(message => ({ role: message.role, text: [chatText(message),
         message.metadata?.actionError && `Workspace validation: ${message.metadata.actionError}`].filter(Boolean).join('\n').slice(0, 12_000) }))
       .filter(message => message.text.trim()).slice(-24),
@@ -256,6 +259,8 @@ function Conversation(props: WorkbenchProps & {
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [mutating, setMutating] = useState(false)
   const [stopped, setStopped] = useState(false)
+  const [exclusionsOpen, setExclusionsOpen] = useState(false)
+  const [contextPreview, setContextPreview] = useState<{ receipt: AiContextReceipt; send: (recipient?: string) => void }>()
   const [manuscript, setManuscript] = useState(props.conversation.manuscript)
   const manuscriptRef = useRef(props.conversation.manuscript)
   const [reviewManuscript, setReviewManuscript] = useState(false)
@@ -270,7 +275,10 @@ function Conversation(props: WorkbenchProps & {
   const localOperation = useRef<AbortController>(null)
   const replyInProgress = useRef(false)
   const [letters, setLetters] = useState<Record<string, Awaited<ReturnType<typeof prepareChatLetter>>>>({})
-  const files = [...props.project.files.keys()].filter(path => /\.tex$/i.test(path)
+  const readScope = useMemo(() => aiReadScope(props.project.metadata.aiReadExclusions ?? [], props.sourceMoves),
+    [props.project.metadata.aiReadExclusions, props.sourceMoves])
+  const shareable = useMemo(() => restrictAiProject(props.working, readScope), [props.working, readScope])
+  const files = [...shareable.files.keys()].filter(path => /\.tex$/i.test(path)
     && (editableSource(props.working, path)?.length ?? Infinity) <= maxChapterLength)
   const targets = (scope ?? (Array.isArray(permission) ? permission : [props.selected])).filter(path => files.includes(path))
   const grant = useRef<DraftGrant>(null)
@@ -279,7 +287,7 @@ function Conversation(props: WorkbenchProps & {
     setWasActive(props.active)
     if (!props.active) { setPermission(undefined); setConsent(undefined); setRunningManuscript(false) }
   }
-  const pending = useRef<{ id: string; grant?: string; manuscriptId?: string; claimId?: string; example?: boolean } | null>(null)
+  const pending = useRef<{ id: string; grant?: string; manuscriptId?: string; claimId?: string; example?: boolean; readRules?: string[] } | null>(null)
   const [runSnapshots, setRunSnapshots] = useState(props.conversation.runs)
   const runs = useRef(props.conversation.runs)
   const latest = useRef(props)
@@ -309,7 +317,8 @@ function Conversation(props: WorkbenchProps & {
       const plan = toolResult(message, 'tool-plan_manuscript', manuscriptPlanSchema)
       const original = messages.find(item => item.role === 'user' && item.metadata?.run === runId)
       if (plan && original && !manuscriptRef.current && latest.current.active) {
-        updateManuscript({ ...plan, id: crypto.randomUUID(), goal: chatText(original).slice(0, 12000), batches: [], example: task?.example })
+        updateManuscript({ ...plan, id: crypto.randomUUID(), goal: chatText(original).slice(0, 12000), batches: [],
+          example: task?.example, readRules: task?.readRules })
       }
       const projectTask = manuscriptRef.current
       if (runId && task?.claimId && task.id === runId && projectTask && run?.manuscriptId === projectTask.id && latest.current.active) {
@@ -506,17 +515,20 @@ function Conversation(props: WorkbenchProps & {
     setError('')
     setMutating(true)
     try {
-      const { reply, revision } = await prepareChatReply(props.storage, props.projectKey, request)
+      const { reply, revision } = await prepareChatReply(props.storage, props.projectKey, request, readScope.denies)
       if (controller.signal.aborted) return
       const id = crypto.randomUUID()
-      runs.current = { ...runs.current, [id]: { sources: {}, reply } }
+      runs.current = { ...runs.current, [id]: { sources: {}, reply, context: {
+        files: revision.changes.map(change => ({ path: change.path, kind: 'archive', partial: true })),
+        diagnostics: false, taskNotes: false, reviewerComment: true, restricted: true,
+      } } }
       setRunSnapshots(runs.current)
       pending.current = null
       clearError()
       setStopped(false)
       setPrompt('')
       atBottom.current = true
-      await sendMessage({ text, metadata: { run: id } }, { body: { run: id, workflow: 'revision', scope: [], revision } })
+      await sendMessage({ text, metadata: { run: id } }, { body: { run: id, workflow: 'revision', scope: [], revision, latestMessageOnly: true } })
     } catch (cause) {
       if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Could not read the archived reply evidence.')
     } finally {
@@ -629,7 +641,7 @@ function Conversation(props: WorkbenchProps & {
 
   function submit(value: string, repair?: { id: string; report: ChatVerification; proposal?: NonNullable<ReturnType<typeof editProposal>>;
     reverify?: boolean; manuscriptTask?: boolean },
-    approvedScope?: string[], taskMode?: 'plan' | 'batch' | 'evidence', evidence?: ReviewedClaim, example = false) {
+    approvedScope?: string[], taskMode?: 'plan' | 'batch' | 'evidence', evidence?: ReviewedClaim, example = false, preview = false) {
     const text = value.trim()
     if (!text || streaming || props.disabled || mutating || !props.active) return false
     setError('')
@@ -637,6 +649,10 @@ function Conversation(props: WorkbenchProps & {
     const command = /^\/([a-z]+)(?:\s+([\s\S]*))?$/i.exec(text)
     const layout = /^(?:把\s*AI\s*面板切到|AI\s*面板切到)\s*(同层|浮层|上层)[。！]?$/i.exec(text)
     const reviewRequest = /^(?:(?:please\s+)?(?:review|verify|save) (?:the )?manuscript task|(?:审阅|验证|保存)(?:当前)?(?:论文|写作)任务)[.。!！]?$/i.test(text)
+    if (preview && (command || layout || reviewRequest)) {
+      setError('This command is resolved in the workspace before its model context is known.')
+      return false
+    }
     if (command) {
       void runLocalCommand(command[1].toLowerCase(), command[2]?.trim() ?? '')
       return
@@ -649,13 +665,29 @@ function Conversation(props: WorkbenchProps & {
       void runLocalCommand('review', '')
       return
     }
-    const current = props.working.files.get(props.selected)
+    if (readScope.restricted && (repair || workflow === 'diagnostics')) {
+      setError('Compiler reports are withheld by the project read exclusions. Switch to Auto to discuss a diagnostic you choose to share.')
+      return false
+    }
+    const rules = props.project.metadata.aiReadExclusions
+    const existing = manuscriptRef.current
+    const changedRules = existing && JSON.stringify([...(existing.readRules ?? [])].sort()) !== JSON.stringify([...(rules ?? [])].sort())
+    if (changedRules && (taskMode === 'batch' || taskMode === 'evidence')) {
+      setError('AI read exclusions changed since this task was planned. Start a new conversation to plan with the current scope.')
+      return false
+    }
+    if (evidence && readScope.denies(evidence.claim.path)) {
+      setError('This claim belongs to a file excluded from AI reading.')
+      return false
+    }
+    const current = shareable.files.get(props.selected)
     const currentSource = current && 'content' in current && /\.tex$/i.test(current.path) && current.content
       && current.content.length <= maxChapterLength ? current : undefined
-    const primary = currentSource?.path ?? targets[0] ?? props.main
-    const file = primary && props.working.files.get(primary)
+    const main = props.main && !readScope.denies(props.main) ? props.main : undefined
+    const primary = currentSource?.path ?? targets[0] ?? main ?? files[0]
+    const file = primary && shareable.files.get(primary)
     if (!primary || !file || !('content' in file) || !file.content || file.content.length > maxChapterLength || !props.main) {
-      setError('Open a complete LaTeX chapter before sending.')
+      setError('Open a complete LaTeX chapter included in AI reading before sending.')
       return
     }
     clearError()
@@ -664,7 +696,7 @@ function Conversation(props: WorkbenchProps & {
     const id = crypto.randomUUID()
     const access = grant.current?.access
     const requested = approvedScope ?? scope ?? (taskMode !== 'plan' && Array.isArray(access) ? access : undefined)
-    const context = buildChapterContext(props.working, primary, props.main, [
+    const context = buildChapterContext(shareable, primary, main ?? primary, [
       ...(requested ?? targets), ...files.filter(path => text.includes(path) || text.includes(path.split('/').at(-1)!)),
     ])
     const completeFiles = new Set([primary, ...context.filter(entry => !entry.truncated).map(entry => entry.path)])
@@ -675,39 +707,37 @@ function Conversation(props: WorkbenchProps & {
       const saved = editableSource(props.project, path)
       return saved === undefined ? [] : [[path, { saved, draft: props.drafts[path] }] as const]
     }))
-    const task = manuscriptRef.current
+    if (approvedScope?.some(path => readScope.denies(path))) {
+      setError('The requested edit scope includes a file excluded from AI reading.')
+      return false
+    }
+    const task = changedRules ? undefined : existing
     const manuscriptId = taskMode === 'batch' || taskMode === 'evidence' || repair?.manuscriptTask
       ? task?.id : repair ? runs.current[repair.id]?.manuscriptId : undefined
     const writingExample = example || (taskMode === 'batch' && Boolean(task?.example))
-    pending.current = { id, grant: repair?.manuscriptTask ? undefined : grant.current?.id, manuscriptId, claimId: evidence?.id,
-      example: writingExample || undefined }
-    const source: ChapterEditRequest = { mode: 'rewrite', path: primary, main: props.main, source: file.content,
-      instruction: '', compiler: props.compiler, context }
-    setPrompt('')
+    const source: ChapterEditRequest = { mode: 'rewrite', path: primary, main: main ?? primary, source: file.content,
+      instruction: '', compiler: readScope.restricted ? { state: 'unavailable', diagnostics: [], log: '' } : props.compiler, context }
     const resultTime = (message: WritingChatMessage) => props.tasks[message.metadata!.run]?.findLast(step =>
       step.kind === 'passed' || step.kind === 'failed')?.at ?? 0
     const resultMessage = [...messages].reverse().filter(message => message.role === 'assistant' && message.metadata
       && (message.metadata.feedback || props.verifications[message.metadata.run]))
       .sort((left, right) => resultTime(right) - resultTime(left))[0]
     const resultId = resultMessage?.metadata?.run
-    const report = repair?.report ?? (resultId ? props.verifications[resultId] : undefined)
+    const report = readScope.restricted ? undefined : repair?.report ?? (resultId ? props.verifications[resultId] : undefined)
     const previousProposal = resultMessage && editProposal(resultMessage)
     const checkpoint = !repair && resultId ? props.checkpoints[resultId] : undefined
     const receipt = checkpoint ? ` Source proposal state: ${checkpoint}.` : ' This result is from a temporary snapshot.'
     const feedback = report ? { status: report.status, message: (report.message + receipt).slice(0, 1000),
       diagnostics: report.diagnostics.slice(0, 40).map(issue => ({ ...issue, message: issue.message.slice(0, 500) })),
-      log: report.log.slice(-4000) } : resultMessage?.metadata?.feedback
+      log: report.log.slice(-4000) } : readScope.restricted ? undefined : resultMessage?.metadata?.feedback
     const failedProposal = (repair?.report.working ? undefined : repair?.proposal) ?? (!repair && previousProposal && report?.status === 'failed' && !checkpoint
       && baseline?.input === input && baseline.raw === report.baseline && report.main === input.main
       ? { summary: previousProposal.summary, edits: report.selected.map(index => previousProposal.edits[index]).filter(Boolean) }
       : undefined)
     const previousRun = repair?.id ?? (failedProposal && /repair|fix|error|修复|修正|报错/i.test(text) ? resultId : undefined)
     const revisionOf = previousRun && (runs.current[previousRun]?.revisionOf ?? previousRun)
-    runs.current = { ...runs.current, [id]: { main: props.project.metadata.mainFile, pathRevision: props.sourceMoves?.length, sources, revisionOf,
-      manuscriptId, replacesBatch: repair && !repair.manuscriptTask && manuscriptId && !props.checkpoints[repair.id] ? repair.id : undefined,
-      verifyRepair: repair?.reverify } }
-    setRunSnapshots(runs.current)
-    const selection = revisionOf || taskMode ? undefined : props.selection()
+    const cursor = revisionOf || taskMode ? undefined : props.selection()
+    const selection = cursor && !readScope.denies(cursor.path) ? cursor : undefined
     const repairFiles = failedProposal ? [...new Set(failedProposal.edits.map(edit => edit.path))] : editPaths
     const taskContext: ManuscriptContext | undefined = taskMode === 'plan' ? { mode: 'plan', goal: text, files: editPaths }
       : taskMode === 'evidence' && task && evidence ? { mode: 'evidence', goal: task.goal, files: [], data: task.delivery?.data,
@@ -716,19 +746,50 @@ function Conversation(props: WorkbenchProps & {
       : task ? { mode: taskMode === 'batch' ? 'batch' : 'context', goal: task.goal, files: taskMode === 'batch' ? editPaths : task.files,
         completed: [...manuscriptProgress(task, props.checkpoints, props.tasks).done], decisions: task.decisions, questions: task.questions,
         data: taskMode === 'batch' ? task.delivery?.data : undefined } : undefined
-    const workspaceActivity = messages.flatMap(message => {
+    if (taskContext) {
+      taskContext.files = taskContext.files.filter(path => !readScope.denies(path))
+      taskContext.completed = taskContext.completed?.filter(path => !readScope.denies(path))
+      taskContext.data = taskContext.data?.filter(file => !readScope.denies(file.path))
+    }
+    const workspaceActivity = readScope.restricted ? undefined : messages.flatMap(message => {
       if (message.role !== 'assistant' || !message.metadata?.run) return []
       const step = props.tasks[message.metadata.run]?.findLast(item => receiptKinds.has(item.kind))
       return step ? [step] : []
     }).sort((left, right) => left.at - right.at).slice(-12).map(step => ({
       action: step.kind, paths: step.paths?.slice(0, 6), detail: step.detail?.slice(0, 300),
     }))
-    void sendMessage({ text, metadata: { run: id, selection } }, {
-      body: { run: id, workflow: turnWorkflow, scope: editPaths, source, selection, feedback, previousProposal: failedProposal,
-        workspaceActivity, draftPermission: access, manuscript: taskContext, writingExample: writingExample || undefined,
-        attachments: buildAttachmentContext(props.working,
-          [text, taskContext?.goal, ...(taskContext?.data ?? []).map(file => file.path)].filter(Boolean).join('\n')) },
-    })
+    const attachments = buildAttachmentContext(shareable,
+      [text, taskContext?.goal, ...(taskContext?.data ?? []).map(file => file.path)].filter(Boolean).join('\n'))
+    const contextReceipt: AiContextReceipt = {
+      files: [{ path: primary, kind: props.drafts[primary] ? 'draft' : 'saved' },
+        ...context.map(({ path, truncated }) => ({ path, kind: props.drafts[path] ? 'draft' as const : 'saved' as const, partial: truncated })),
+        ...attachments.csv.map(({ path, truncated }) => ({ path, kind: props.drafts[path] ? 'csv_draft' as const : 'csv' as const, partial: truncated })),
+        ...attachments.entries.filter(entry => !entry.csv).map(({ path }) => ({ path, kind: 'attachment' as const }))],
+      diagnostics: Boolean(source.compiler.diagnostics.length || source.compiler.log || feedback),
+      taskNotes: Boolean(taskContext && taskContext.mode !== 'plan'), restricted: readScope.restricted,
+    }
+    const send = (expectedRecipient?: string) => {
+      setContextPreview(undefined)
+      if (latest.current.working !== props.working || latest.current.disabled || !latest.current.active) {
+        setError('The project changed. Review the current model context before sending again.')
+        return
+      }
+      pending.current = { id, grant: repair?.manuscriptTask ? undefined : grant.current?.id, manuscriptId, claimId: evidence?.id,
+        example: writingExample || undefined, readRules: rules }
+      runs.current = { ...runs.current, [id]: { main: props.project.metadata.mainFile, pathRevision: props.sourceMoves?.length, sources, revisionOf,
+        context: contextReceipt, manuscriptId, replacesBatch: repair && !repair.manuscriptTask && manuscriptId && !props.checkpoints[repair.id] ? repair.id : undefined,
+        verifyRepair: repair?.reverify } }
+      setRunSnapshots(runs.current)
+      setPrompt('')
+      void sendMessage({ text, metadata: { run: id, selection } }, {
+        body: { run: id, workflow: turnWorkflow, scope: editPaths, source, selection, feedback, previousProposal: failedProposal,
+          workspaceActivity, draftPermission: Array.isArray(access) ? access.filter(path => !readScope.denies(path)) : access,
+          manuscript: taskContext, writingExample: writingExample || undefined, attachments,
+          latestMessageOnly: readScope.restricted || undefined, expectedRecipient },
+      })
+    }
+    if (preview) setContextPreview({ receipt: contextReceipt, send })
+    else send()
     return true
   }
 
@@ -941,6 +1002,10 @@ function Conversation(props: WorkbenchProps & {
           className={message.role === 'user' ? 'rounded-md bg-indigo-50 px-2 py-1.5' : 'space-y-2'}>
           <p className="mb-1 text-xs font-semibold">{message.role === 'user' ? 'You' : 'Assistant'}</p>
           <ChatToolProgress message={message} />
+          {message.role === 'assistant' && run?.context && message.metadata?.modelRecipient && <details className="rounded border px-2 py-1 text-xs">
+            <summary className="cursor-pointer">Model context sent</summary>
+            <AiContextDetails receipt={run.context} recipient={message.metadata.modelRecipient} historyCount={message.metadata.historyCount} />
+          </details>}
           {message.role === 'assistant' ? <WritingMarkdown text={chatText(message)} evidence={evidence} />
             : <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{chatText(message)}</p>}
           {!proposal && calculations.map(calculation => <CalculationEvidence key={calculation.id}
@@ -1113,6 +1178,10 @@ function Conversation(props: WorkbenchProps & {
           setRunningManuscript(false)
           void stop()
         }}>Stop</Button> : <Button className="ml-auto" size="sm" type="submit" disabled={!prompt.trim() || props.disabled || mutating}>Send</Button>}
+        <Button size="sm" variant="ghost" type="button" disabled={!prompt.trim() || props.disabled || streaming || mutating}
+          onClick={() => submit(prompt, undefined, undefined, undefined, undefined, false, true)}>Review context</Button>
+        <Button size="sm" variant={readScope.restricted ? 'outline' : 'ghost'} type="button" disabled={props.disabled || streaming || mutating || runningManuscript}
+          onClick={() => setExclusionsOpen(true)}>Read exclusions{readScope.restricted && ` · ${props.project.metadata.aiReadExclusions?.length}`}</Button>
         {!manuscript && !streaming && <Button size="sm" variant="outline" type="button" disabled={!prompt.trim() || props.disabled || mutating}
           onClick={() => submit(prompt, undefined, undefined, 'plan')}>Plan writing task</Button>}
       </div>
@@ -1125,6 +1194,9 @@ function Conversation(props: WorkbenchProps & {
         }}>Revoke access</Button>
       </div>}
     </form>
+    {contextPreview && <AiContextPreview receipt={contextPreview.receipt} onSend={contextPreview.send} onClose={() => setContextPreview(undefined)} />}
+    {exclusionsOpen && <AiReadExclusionsDialog rules={props.project.metadata.aiReadExclusions ?? []} onClose={() => setExclusionsOpen(false)}
+      onSave={rules => { revokePermission(); props.onReadExclusions(rules); setExclusionsOpen(false) }} />}
     <Dialog open={Boolean(undoBatches)} onOpenChange={open => { if (!open && !mutating) setUndoBatches(undefined) }}>
       <DialogContent>
         <DialogTitle>Undo {undoBatches?.length === 1 ? 'this batch' : 'task batches'}?</DialogTitle>

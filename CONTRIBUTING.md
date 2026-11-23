@@ -55,6 +55,12 @@ In PowerShell set `$env:RESEARCH_LIVE_TEST = '1'` before running the command. To
 local copy of the same fixture, set `RESEARCH_LIVE_TEST_ZIP` to the ZIP path or
 `RESEARCH_LIVE_TEST_PATH` to a locally seeded demo route including `?view=write`.
 
+**Review context** previews the files, drafts, CSV and diagnostic material available to
+the model in a source request. **Read exclusions** accepts project-relative paths and
+folder paths ending in `/`. With exclusions enabled, previous chat text and compiler
+reports stay local. A task planned under different exclusions needs a new plan.
+`tests/e2e/ai-read-scope.spec.ts` checks the actual request body and the saved receipt.
+
 `tests/e2e/submission-evidence.spec.ts` checks saved manuscript claims against the selected
 manifest and the final ZIP. It excludes a supporting CSV, checks source navigation, and
 confirms that the project archive retains the author's exception after a reload.

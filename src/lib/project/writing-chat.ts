@@ -7,6 +7,7 @@ import type { WritingDraft } from './writing-drafts'
 import { manuscriptContextSchema, type ManuscriptTask } from './manuscript-task'
 import { attachmentContextSchema } from './ai-attachments'
 import { writingClaimsSchema } from './writing-claims'
+import type { AiContextReceipt } from './ai-read-scope'
 
 export const writingWorkflows = {
   auto: { name: 'Auto', instruction: 'Infer whether to review, compare, edit, compile, prepare a submission, start a revision round, record a reviewer comment, or draft a reply. Search for relevant files when the file is unclear or the request spans files.' },
@@ -64,6 +65,8 @@ export const chatRequestSchema = z.object({
   previousProposal: chatEditSchema.optional(),
   manuscript: manuscriptContextSchema.optional(),
   writingExample: z.boolean().optional(),
+  latestMessageOnly: z.boolean().optional(),
+  expectedRecipient: z.string().min(1).max(300).optional(),
   attachments: attachmentContextSchema.optional(),
   draftPermission: z.union([z.literal('all'), z.array(z.string().min(1).max(500)).max(6)]).optional(),
   workspaceActivity: z.array(z.object({
@@ -92,6 +95,8 @@ export type WritingChatMessage = UIMessage<{
   evidence?: (z.infer<typeof chapterAnswerSchema>['evidence'][number] & { anchor?: EvidenceQuote })[]
   missing?: string[]
   readPaths?: string[]
+  modelRecipient?: string
+  historyCount?: number
 }>
 export type ChatSource = { saved: string; draft?: WritingDraft }
 export type ChatReplyTarget = {
@@ -99,7 +104,7 @@ export type ChatReplyTarget = {
   previousRevisedId?: string
   previous?: import('./revision-rounds').RevisionResponse; paths: string[]; kind: 'changed' | 'retained'
 }
-export type ChatRun = { main?: string; pathRevision?: number; sources: Record<string, ChatSource>; reply?: ChatReplyTarget; revisionOf?: string;
+export type ChatRun = { main?: string; pathRevision?: number; sources: Record<string, ChatSource>; context?: AiContextReceipt; reply?: ChatReplyTarget; revisionOf?: string;
   manuscriptId?: string; replacesBatch?: string; verifyRepair?: boolean }
 export type ChatTaskStep = {
   kind: 'verify' | 'authorize-save' | 'passed' | 'failed' | 'cancelled' | 'blocked' | 'draft' | 'saved' | 'undone' | 'rejected'

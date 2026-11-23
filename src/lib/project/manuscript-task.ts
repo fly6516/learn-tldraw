@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { isProjectPath } from './source-archive'
 import { claimReviewSchema, writingClaimsSchema } from './writing-claims'
+import { aiReadExclusionsSchema } from './ai-read-scope'
 
 const path = z.string().max(500).refine(isProjectPath)
 const notes = z.array(z.string().trim().min(1).max(450)).max(12)
@@ -24,6 +25,7 @@ export const manuscriptPlanSchema = z.object({
 export const manuscriptTaskSchema = manuscriptPlanSchema.extend({
   id: z.uuid(),
   example: z.boolean().optional(),
+  readRules: aiReadExclusionsSchema.optional(),
   reviewCursor: z.object({ path, item: z.string().max(1200).optional() }).optional(),
   goal: z.string().trim().min(1).max(12000),
   batches: z.array(z.object({ run: z.uuid(), files: z.array(path).min(1).max(6), replaces: z.uuid().optional(),

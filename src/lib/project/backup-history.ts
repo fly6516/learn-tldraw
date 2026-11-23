@@ -11,6 +11,7 @@ import { chatWorkflowSchema, compileFeedbackSchema, revisionSetupSchema, submiss
 import type { ChatVerification, ManuscriptBuild } from './writing-chat-validation'
 import { manuscriptTaskSchema } from './manuscript-task'
 import { submissionEvidenceSchema } from './submission-evidence'
+import { aiContextReceiptSchema } from './ai-read-scope'
 
 export type PortableProjectHistory = {
   publication?: { submissions: SubmissionVersion[]; rounds: RevisionRound[] }
@@ -60,13 +61,15 @@ const message = z.object({ id, role: z.enum(['user', 'assistant', 'system']),
     feedback: compileFeedbackSchema.optional(), local: z.boolean().optional(), submission: submissionChatSchema.optional(), letter: text.max(100).optional(),
     revisionSetup: revisionSetupSchema.optional(), actionError: text.max(1000).optional(),
     selection: z.object({ path, start: positive, end: positive }).optional(), evidence: z.array(evidence).max(40).optional(),
-    missing: z.array(text).max(20).optional(), readPaths: z.array(path).max(49).optional() }).optional(),
+    missing: z.array(text).max(20).optional(), readPaths: z.array(path).max(49).optional(),
+    modelRecipient: text.max(300).optional(), historyCount: z.number().int().min(0).max(23).optional() }).optional(),
 }).transform(value => value as WritingChatMessage)
 const unique = (values: { id: string }[]) => new Set(values.map(value => value.id)).size === values.length
 const ai = z.object({
   history: z.object({ selected: id, conversations: z.array(z.object({
     id, title: text, messages: z.array(message).max(30).refine(unique), manuscript: manuscriptTaskSchema.optional(),
     runs: z.record(id, z.object({ main: path.optional(), pathRevision: z.number().int().nonnegative().optional(), sources, revisionOf: id.optional(),
+      context: aiContextReceiptSchema.optional(),
       manuscriptId: id.optional(), replacesBatch: id.optional(), verifyRepair: z.boolean().optional(),
       reply: z.object({ round: id, roundName: text, comment: id, commentText: text, originalId: id, revisedId: id,
         previousRevisedId: id.optional(), previous: response.optional(), paths: z.array(path), kind: z.enum(['changed', 'retained']) }).optional() })),

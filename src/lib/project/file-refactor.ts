@@ -6,6 +6,7 @@ import type { ProjectFile, ProjectFileSystem } from './types'
 import { rebuildProjectDirectories } from './file-system'
 import { editableSource, type PortableWritingState } from './writing-drafts'
 import { parseBibliography } from './references'
+import { aiReadScope } from './ai-read-scope'
 
 export type FileOperation = { kind: 'move'; from: string; to: string }
   | { kind: 'chapter'; parent: string; to: string; title: string }
@@ -213,9 +214,16 @@ export function planFileOperation(project: ProjectFileSystem, writing: PortableW
     }),
   })) }
   const view = writing.view && { ...writing.view, path: move(writing.view.path) }
+  const readRules = project.metadata.aiReadExclusions
+  const readScope = aiReadScope(readRules ?? [])
+  let aiReadExclusions = readRules
+  if (readRules && moving && readScope.denies(from) && !readScope.denies(to)) {
+    if (readRules.length >= 512) throw new Error('There are too many AI read exclusions to protect the moved file. Consolidate the rules first.')
+    aiReadExclusions = [...readRules, to]
+  }
   return {
     project: { ...project, files: rebuildProjectDirectories(files), canvas,
-      metadata: { ...project.metadata, mainFile: nextMain || project.metadata.mainFile, updatedAt: now } },
+      metadata: { ...project.metadata, mainFile: nextMain || project.metadata.mainFile, updatedAt: now, aiReadExclusions } },
     writing: { drafts, view }, changes, bindings, warnings: [...warningMap.values()],
     draftPaths: Object.keys(writing.drafts).filter(path => move(path) !== path
       || drafts[path].text !== writing.drafts[path].text || drafts[path].base !== writing.drafts[path].base),

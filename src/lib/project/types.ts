@@ -103,6 +103,7 @@ export interface ProjectFileSystem {
     updatedAt: string
     sourceMode?: 'archive'
     writingSample?: boolean
+    aiReadExclusions?: string[]
     mainFile?: string
   }
 }
