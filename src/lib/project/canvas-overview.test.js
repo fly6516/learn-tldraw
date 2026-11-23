@@ -5,13 +5,30 @@ import { createCanvasFixture } from './canvas-test-fixture'
 import { generateProjectSource } from '../export/export-actions'
 import { buildProjectOutline } from './outline'
 import { locateLatexBlock, readLatexBlocks } from './latex-blocks'
-import { researchCanvasSchema, validResearchConnection } from './research-graph'
+import { removeResearchPage, researchCanvasSchema, validResearchConnection } from './research-graph'
 
 const node = (id, order = 0, data = {}) => ({ id, position: { x: 40, y: 40 + order * 80 },
   data: { section: 'custom', customLabel: id, content: `Text for ${id}`, order, level: 1, ...data },
 })
 const page = (id, nodes, edges = []) => ({ id, name: id, nodes, edges, viewport: { x: 0, y: 0, zoom: 1 } })
 const link = (source, target) => ({ id: `${source}-${target}`, source, target })
+
+test('removes a page and only its incident connections while retaining other cards', () => {
+  const editor = normalizeCanvas({ activePageId: 'B', display: 'overview',
+    pages: [page('A', [node('a')]), page('B', [node('b'), node('b2', 1, { parentId: 'b' })], [link('b', 'b2')]),
+      page('C', [node('c', 0, { sourceAnchor: { kind: 'label', project: 'demo', label: 'sec:results' } })])],
+    crossPageEdges: [link('a', 'b'), link('b2', 'c'), link('a', 'c')],
+  })
+  const removed = removeResearchPage(editor, 'B')
+  expect(removed.activePageId).toBe('C')
+  expect(removed.display).toBe('overview')
+  expect(removed.pages).toEqual([editor.pages[0], editor.pages[2]])
+  expect(removed.crossPageEdges).toEqual([link('a', 'c')])
+  expect(researchCanvasSchema.safeParse(removed).success).toBe(true)
+  expect(removeResearchPage(removed, 'missing')).toBe(removed)
+  const remaining = removeResearchPage(removed, 'C')
+  expect(removeResearchPage(remaining, 'A')).toBe(remaining)
+})
 
 test('drops a selected group in another page, maintaining layout, edges and document order', async () => {
   const old = normalizeCanvas({ activePageId: 'A', pages: [page('A', [node('a'), node('b', 1, { parentId: 'a' }), node('c', 2, { parentId: 'a' })], [link('a', 'b'), link('b', 'c')]), page('B', [node('d', 3)])] })

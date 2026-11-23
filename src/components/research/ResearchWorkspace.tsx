@@ -3,7 +3,7 @@
 import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { ChevronDown, FileCode2, LayoutGrid, Network, PanelLeft, Search, X } from 'lucide-react'
+import { ChevronDown, FileCode2, LayoutGrid, Network, PanelLeft, Search, Trash2, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
@@ -20,7 +20,7 @@ import {
 } from '@/lib/export/export-actions'
 import { updateFileContent } from '@/lib/project/file-system'
 import {
-  activeResearchPage, emptyCanvas, emptyPage, validResearchConnection, type ResearchCanvas, type ResearchNode, type ResearchPage,
+  activeResearchPage, emptyCanvas, emptyPage, removeResearchPage, validResearchConnection, type ResearchCanvas, type ResearchNode, type ResearchPage,
 } from '@/lib/project/research-graph'
 import { LatexImportDialog } from './LatexImportDialog'
 import { LatexPreviewPanel } from './LatexPreviewPanel'
@@ -75,6 +75,7 @@ function Workspace({ sample, initialProject, notice, projectListHref, onViewChan
   const [nodeJump, setNodeJump] = useState<CanvasLocation>()
   const [history, setHistory] = useState(emptyHistory)
   const [pendingEdit, setPendingEdit] = useState<{ canvas: ResearchCanvas; detached: ResearchNode[]; arrangement?: ReturnType<typeof arrangeCanvas> }>()
+  const [deletePageId, setDeletePageId] = useState<string>()
   const [pendingCard, setPendingCard] = useState<ResearchNode['data']>()
   const [cardPage, setCardPage] = useState('')
   const [canvasVersion, setCanvasVersion] = useState(0)
@@ -87,6 +88,7 @@ function Workspace({ sample, initialProject, notice, projectListHref, onViewChan
   const rawCanvas = fileSystem?.canvas ?? initialCanvas
   const canvas = useMemo(() => normalizeCanvas(rawCanvas), [rawCanvas])
   const page = activeResearchPage(canvas)
+  const pageToDelete = canvas.pages.find(item => item.id === deletePageId)
   const liveCanvas = useRef(canvas)
   useLayoutEffect(() => { liveCanvas.current = canvas }, [canvas])
   const overview = canvas.display === 'overview'
@@ -307,9 +309,18 @@ function Workspace({ sample, initialProject, notice, projectListHref, onViewChan
 
   function addPage() {
     const id = crypto.randomUUID()
-    editGraph(current => ({
-      ...current, activePageId: id, pages: [...current.pages, emptyPage(`Page ${current.pages.length + 1}`, id)],
-    }))
+    editGraph(current => {
+      const names = new Set(current.pages.map(item => item.name))
+      let number = 1
+      while (names.has(`Page ${number}`)) number++
+      return { ...current, activePageId: id, pages: [...current.pages, emptyPage(`Page ${number}`, id)] }
+    })
+  }
+
+  function deletePage(id: string) {
+    editGraph(current => removeResearchPage(current, id))
+    if (nodeJump?.pageId === id) clearNodeJump()
+    setDeletePageId(undefined)
   }
 
   function enterPage(pageId: string) {
@@ -564,9 +575,14 @@ function Workspace({ sample, initialProject, notice, projectListHref, onViewChan
             </div>
             {filesTab ? <div className="min-h-0 flex-1"><ProjectPanel onOpenWriting={openWriting} onAddMaterial={addMaterialCard} /></div>
               : <nav aria-label="Canvas pages" className="min-h-0 flex-1 space-y-1 overflow-y-auto p-2">
-                {canvas.pages.map(item => <button key={item.id} type="button" aria-current={!overview && item.id === page.id ? 'page' : undefined}
-                  className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent ${item.id === page.id ? 'bg-accent' : ''}`}
-                  onClick={() => enterPage(item.id)}><LayoutGrid className="size-3.5 shrink-0" /><span className="flex-1 break-words">{item.name}</span><span className="text-xs text-muted-foreground">{item.nodes.length}</span></button>)}
+                {canvas.pages.map(item => <div key={item.id} className={`flex items-center rounded ${item.id === page.id ? 'bg-accent' : ''}`}>
+                  <button type="button" aria-current={!overview && item.id === page.id ? 'page' : undefined}
+                    className="flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent"
+                    onClick={() => enterPage(item.id)}><LayoutGrid className="size-3.5 shrink-0" /><span className="flex-1 break-words">{item.name}</span><span className="text-xs text-muted-foreground">{item.nodes.length}</span></button>
+                  <Button variant="ghost" size="icon-sm" aria-label={`Delete page ${item.name}`}
+                    title={canvas.pages.length === 1 ? 'Canvas must keep at least one page' : `Delete ${item.name}`}
+                    disabled={canvas.pages.length === 1} onClick={() => setDeletePageId(item.id)}><Trash2 /></Button>
+                </div>)}
                 <Button variant="ghost" size="sm" onClick={addPage}>Add Page</Button>
                 {!overview && <Input aria-label="Page name" key={`${canvasVersion}:${page.id}`} defaultValue={page.name}
                   onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }}
@@ -664,6 +680,21 @@ function Workspace({ sample, initialProject, notice, projectListHref, onViewChan
             </label>
             <DialogFooter><Button type="submit">Add card</Button></DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>}
+      {pageToDelete && <Dialog open onOpenChange={open => { if (!open) setDeletePageId(undefined) }}>
+        <DialogContent>
+          <DialogTitle className="break-words">Delete {pageToDelete.name}?</DialogTitle>
+          <DialogDescription>
+            {pageToDelete.nodes.length ? `This removes ${pageToDelete.nodes.length} ${pageToDelete.nodes.length === 1 ? 'card' : 'cards'} and their connections, including links to other pages. ` : 'This page is empty. '}
+            {fileSystem?.metadata.sourceMode === 'archive' ? 'Writing source files and attachments stay in the project. '
+              : 'Removed chapter cards will disappear from the generated manuscript. Project files and attachments stay in the project. '}
+            Use Canvas Undo to restore the page.
+          </DialogDescription>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeletePageId(undefined)}>Cancel</Button>
+            <Button variant="destructive" onClick={() => deletePage(pageToDelete.id)}>Delete page</Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>}
       {pendingEdit && <Dialog open onOpenChange={open => { if (!open) setPendingEdit(undefined) }}>

@@ -109,6 +109,17 @@ export function emptyPage(name = 'Page 1', id = 'page-1'): ResearchPage {
 
 export const emptyCanvas: ResearchCanvas = { activePageId: 'page-1', pages: [emptyPage()] }
 
+export function removeResearchPage(canvas: ResearchCanvas, id: string): ResearchCanvas {
+  const index = canvas.pages.findIndex(page => page.id === id)
+  if (index < 0 || canvas.pages.length <= 1) return canvas
+  const removed = new Set(canvas.pages[index].nodes.map(node => node.id))
+  const pages = canvas.pages.filter(page => page.id !== id)
+  return { ...canvas, pages,
+    activePageId: canvas.activePageId === id ? pages[Math.min(index, pages.length - 1)].id : canvas.activePageId,
+    crossPageEdges: canvas.crossPageEdges?.filter(edge => !removed.has(edge.source) && !removed.has(edge.target)),
+  }
+}
+
 export function activeResearchPage(canvas: ResearchCanvas): ResearchPage {
   return canvas.pages.find(page => page.id === canvas.activePageId) ?? canvas.pages[0]
 }
