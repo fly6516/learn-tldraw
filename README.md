@@ -173,9 +173,16 @@ select changes before choosing **Apply to drafts**. **Save to project** is a sep
 The project checks the saved source and local draft before applying or saving. **Undo AI changes**
 restores the original source and draft for the affected files while protecting later edits.
 
-Optional automatic approval applies to the approved files in the current conversation.
-**Auto draft** still leaves saving to you. In **Auto draft and save**, start the specific request
-with “Apply and save.” Refreshing or switching conversations clears the approval.
+Choose **Verify selected changes** to compile a temporary snapshot of the working sources
+with only the checked edits applied. Review the result and jump from a diagnostic to the
+corresponding line in Writing. Verification keeps your source files, drafts, and last PDF
+intact. Changes to the source, compile entry, or selection make the result out of date.
+
+**Save if verification passes** authorizes that proposal and selection to save after a
+fresh passing build. A failed or outdated build leaves the project untouched. Unrelated
+local drafts can take part in verification and stay local afterward. **Auto draft** is
+available for the approved files in the current conversation. Refreshing or switching
+conversations clears that approval.
 
 Choose **Reviewer reply** to open Revision rounds. Select a revised submission and the files
 that support the response before choosing **Draft response with AI**. This workflow reads bounded

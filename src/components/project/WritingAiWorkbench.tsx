@@ -9,15 +9,16 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { Textarea } from '@/components/ui/textarea'
 import { applyProjectEdits, buildChapterContext, maxChapterLength, type ChapterEditRequest } from '@/lib/project/ai-edit'
-import { readChatCheckpoints, readChatHistory, writeChatHistory } from '@/lib/project/storage'
+import { readChatCheckpoints, readChatHistory, readChatVerifications, writeChatHistory, writeChatVerification } from '@/lib/project/storage'
 import { chatEditSchema, writingWorkflows, type ChatCheckpoint, type ChatConversation, type ChatHistory, type ChatRun, type ChatWorkflow, type WritingChatMessage } from '@/lib/project/writing-chat'
 import type { ChatAction } from '@/lib/project/writing-chat-actions'
+import { validateChatProposal, verificationBaseline, type ChatVerification } from '@/lib/project/writing-chat-validation'
 import { editableSource, type WritingDrafts, type WritingKey } from '@/lib/project/writing-drafts'
 import type { ProjectFileSystem } from '@/lib/project/types'
 import { collectBibliography, findNewUnknownCitations } from '@/lib/project/references'
 
 const Diff = dynamic(() => import('./MonacoSourceEditor').then(module => module.WritingDraftComparison), { ssr: false })
-type Approval = 'manual' | 'draft' | 'save'
+type Approval = 'manual' | 'draft'
 type SourceWorkflow = Exclude<ChatWorkflow, 'revision'>
 type Checkpoints = Record<string, ChatCheckpoint['state']>
 type WorkbenchProps = {
@@ -85,18 +86,20 @@ export function WritingAiWorkbench(props: WorkbenchProps) {
   const workspace = projectKey[0], projectId = projectKey[1]
   const [history, setHistory] = useState<ChatHistory>()
   const [checkpoints, setCheckpoints] = useState<Checkpoints>({})
+  const [verifications, setVerifications] = useState<Record<string, ChatVerification>>({})
   const [storageError, setStorageError] = useState('')
   const historyRef = useRef<ChatHistory | undefined>(undefined)
   const persistence = useRef(Promise.resolve())
 
   useEffect(() => {
     let active = true
-    Promise.all([readChatHistory(storage, [workspace, projectId]), readChatCheckpoints(storage, [workspace, projectId])]).then(([saved, states]) => {
+    Promise.all([readChatHistory(storage, [workspace, projectId]), readChatCheckpoints(storage, [workspace, projectId]), readChatVerifications(storage, [workspace, projectId])]).then(([saved, states, reports]) => {
       if (!active) return
       const initial = newConversation()
       historyRef.current = saved ?? { selected: initial.id, conversations: [initial] }
       setHistory(historyRef.current)
       setCheckpoints(states)
+      setVerifications(reports)
     }).catch(() => { if (active) setStorageError('Local AI conversations could not be loaded.') })
     return () => { active = false }
   }, [projectId, storage, workspace])
@@ -113,6 +116,10 @@ export function WritingAiWorkbench(props: WorkbenchProps) {
   const conversation = history?.conversations.find(item => item.id === history.selected)
   if (!conversation) return <p className="p-3 text-sm" role="status">{storageError || 'Loading local conversations…'}</p>
   return <Conversation key={conversation.id} {...props} conversation={conversation} checkpoints={checkpoints} storageError={storageError}
+    verifications={verifications} onVerification={async (id, report) => {
+      await writeChatVerification(storage, [workspace, projectId], id, report)
+      setVerifications(current => ({ ...current, [id]: report }))
+    }}
     conversations={history!.conversations} onSelect={id => persist(value => ({ ...value, selected: id }), true)}
     onNew={() => persist(value => {
       const next = newConversation()
@@ -139,6 +146,7 @@ export function WritingAiWorkbench(props: WorkbenchProps) {
 
 function Conversation(props: WorkbenchProps & {
   conversation: ChatConversation; conversations: ChatConversation[]; storageError: string; checkpoints: Checkpoints
+  verifications: Record<string, ChatVerification>; onVerification: (id: string, report: ChatVerification) => Promise<void>
   onSelect: (id: string) => void; onNew: () => void; onDelete: () => void
   onPersist: (messages: WritingChatMessage[], runs: Record<string, ChatRun>) => void
 }) {
@@ -166,6 +174,7 @@ function Conversation(props: WorkbenchProps & {
   const runs = useRef(props.conversation.runs)
   const latest = useRef(props)
   const scroll = useRef<HTMLDivElement>(null)
+  const composer = useRef<HTMLTextAreaElement>(null)
   const atBottom = useRef(true)
   useEffect(() => { latest.current = props }, [props])
 
@@ -190,11 +199,21 @@ function Conversation(props: WorkbenchProps & {
       const evidence = message.metadata.evidence ?? []
       if (proposal && run && !message.metadata.missing?.length && proposal.edits.every(edit => grant.current?.paths.includes(edit.path)
         && evidence.some(item => item.path === edit.path && item.kind === 'read_source'))) {
-        void mutate(task.id, { kind: task.mode === 'save' ? 'apply-save' : 'apply', run, edits: proposal.edits })
+        void mutate(task.id, { kind: 'apply', run, edits: proposal.edits })
       }
     },
   })
   const streaming = status === 'submitted' || status === 'streaming'
+  const input = useMemo(() => ({ project: props.project, working: props.working, drafts: props.drafts, main: props.main ?? '' }),
+    [props.project, props.working, props.drafts, props.main])
+  const [baseline, setBaseline] = useState<{ input: typeof input; raw: string; working: string }>()
+  useEffect(() => {
+    let active = true
+    void Promise.all([verificationBaseline(input.project, input.drafts), verificationBaseline(input.working, {})]).then(([raw, working]) => {
+      if (active) setBaseline({ input, raw, working })
+    }).catch(() => {})
+    return () => { active = false }
+  }, [input])
   useEffect(() => {
     if (!props.active) grant.current = null
   }, [props.active])
@@ -243,9 +262,7 @@ function Conversation(props: WorkbenchProps & {
     runs.current = { ...runs.current, [id]: { main: props.project.metadata.mainFile, sources } }
     setRunSnapshots(runs.current)
     const authorized = grant.current && targets.length && targets.every(path => grant.current?.paths.includes(path))
-    // An explicit positive instruction is required in addition to the session grant.
-    const requestsSave = /^(?:apply and save|apply & save|应用并保存)(?:[\s:：，,。]|$)/i.test(text)
-    pending.current = { id, grant: grant.current?.id, mode: !authorized || approval === 'save' && !requestsSave ? 'manual' : approval }
+    pending.current = { id, grant: grant.current?.id, mode: authorized ? approval : 'manual' }
     const source: ChapterEditRequest = { mode: 'rewrite', path: primary, main: props.main, source: file.content,
       instruction: '', compiler: props.compiler, context: buildChapterContext(props.working, primary, props.main, targets) }
     setPrompt('')
@@ -297,7 +314,16 @@ function Conversation(props: WorkbenchProps & {
           {compileRequest && !streaming && <Button size="sm" variant="outline" disabled={props.disabled || !props.main}
             onClick={props.onCompile}>Approve preview compile</Button>}
           {proposal && run && runId && !streaming && <Proposal proposal={proposal} run={run} state={props.checkpoints[runId]} project={props.working}
-            disabled={props.disabled || mutating} onAction={action => void mutate(runId, action)} />}
+            disabled={props.disabled || mutating} onAction={action => mutate(runId, action)} active={props.active}
+            input={input} baseline={baseline?.input === input ? baseline : undefined} verification={props.verifications[runId]}
+            onVerification={report => props.onVerification(runId, report)} onLocate={props.onLocate}
+            onUseDiagnostics={report => {
+              const locations = report.diagnostics.slice(0, 12).map(issue => `${issue.path}:${issue.line} · ${issue.message.slice(0, 240)}`)
+              const notes = ['Help fix this proposal using the following diagnostics from its temporary LaTeX snapshot.',
+                report.message, ...locations].join('\n')
+              setPrompt(previous => [previous, notes].filter(Boolean).join('\n\n').slice(0, 12_000))
+              composer.current?.focus()
+            }} />}
         </article>
       })}
       {streaming && <p role="status" className="text-xs text-slate-600">{status === 'submitted' ? 'Sending request…' : 'Assistant is responding…'}</p>}
@@ -306,7 +332,7 @@ function Conversation(props: WorkbenchProps & {
         && <Button size="sm" variant="outline" disabled={props.disabled} onClick={() => submit(chatText(lastPrompt))}>Retry request</Button>}
     </div>
     <form className="shrink-0 space-y-1 border-t bg-white p-2" onSubmit={event => { event.preventDefault(); submit(prompt) }}>
-      <Textarea aria-label="Message Writing AI" className="min-h-8 max-h-24 resize-y px-2 py-1 text-sm" value={prompt} maxLength={12_000}
+      <Textarea ref={composer} aria-label="Message Writing AI" className="min-h-8 max-h-24 resize-y px-2 py-1 text-sm" value={prompt} maxLength={12_000}
         placeholder={workflow === 'diagnostics' ? 'What is causing these compiler diagnostics?' : 'Ask or request an edit…'}
         onChange={event => setPrompt(event.target.value)} onKeyDown={event => {
           if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); submit(prompt) }
@@ -335,7 +361,6 @@ function Conversation(props: WorkbenchProps & {
           }}>
           <option value="manual">Review first</option>
           <option value="draft" disabled={!targets.length}>Auto draft</option>
-          <option value="save" disabled={!targets.length}>Auto draft and save</option>
         </select>
         {workflow === 'diagnostics' && <Button type="button" size="sm" variant="outline" disabled={props.disabled || streaming} onClick={props.onCompile}>Compile PDF</Button>}
         {streaming ? <Button className="ml-auto" type="button" size="sm" variant="outline" onClick={() => {
@@ -344,11 +369,10 @@ function Conversation(props: WorkbenchProps & {
           void stop()
         }}>Stop</Button> : <Button className="ml-auto" size="sm" type="submit" disabled={!prompt.trim() || props.disabled || mutating}>Send</Button>}
       </div>
-      {approval === 'save' && granted && props.active && <p className="text-xs text-slate-600">Start a request with “Apply and save” to authorize saving that turn.</p>}
     </form>
     <Dialog open={consent !== null} onOpenChange={open => { if (!open) setConsent(null) }}>
       <DialogContent>
-        <DialogTitle>{consent === 'save' ? 'Allow automatic draft and save?' : 'Allow automatic local drafts?'}</DialogTitle>
+        <DialogTitle>Allow automatic local drafts?</DialogTitle>
         <DialogDescription>Applies to these files in this conversation until you change scope, switch conversations, leave Writing, or reload.</DialogDescription>
         <ul className="max-h-48 list-inside list-disc overflow-auto break-all text-sm">{targets.map(path => <li key={path}>{path}</li>)}</ul>
         <div className="flex justify-end gap-2">
@@ -385,14 +409,73 @@ function ChatMessageText({ text }: { text: string }) {
   </div>
 }
 
-function Proposal({ proposal, run, state, disabled, onAction, project }: {
+function Proposal({ proposal, run, state, disabled, onAction, project, input, verification, baseline, active, onVerification, onLocate, onUseDiagnostics }: {
   proposal: NonNullable<ReturnType<typeof editProposal>>; run: ChatRun; state?: ChatCheckpoint['state']
-  disabled: boolean; onAction: (action: ChatAction) => void; project: ProjectFileSystem
+  disabled: boolean; onAction: (action: ChatAction) => Promise<void>; project: ProjectFileSystem
+  input: Pick<Parameters<typeof validateChatProposal>[0], 'project' | 'working' | 'drafts' | 'main'>
+  verification?: ChatVerification; baseline?: { raw: string; working: string }; active: boolean
+  onUseDiagnostics: (report: ChatVerification) => void
+  onVerification: (report: ChatVerification) => Promise<void>
+  onLocate: (path: string, line: number) => void
 }) {
-  const [checked, setChecked] = useState(() => new Set(proposal.edits.map((_, index) => index)))
+  const [checked, setChecked] = useState(() => new Set(verification?.currentSelection ?? verification?.selected ?? proposal.edits.map((_, index) => index)))
+  const request = useRef<AbortController>(null)
+  const current = useRef({ input, active })
+  const [checking, setChecking] = useState(false)
+  const [validationError, setValidationError] = useState('')
+  useEffect(() => {
+    current.current = { input, active }
+    if (!active) request.current?.abort()
+  }, [input, active])
+  useEffect(() => () => request.current?.abort(), [])
+
+  function select(next: Set<number>) {
+    request.current?.abort()
+    setChecked(next)
+    if (verification) {
+      const currentSelection = proposal.edits.flatMap((_, index) => next.has(index) ? [index] : [])
+      void onVerification({ ...verification, currentSelection }).catch(() => setValidationError('Could not save the selected changes locally.'))
+    }
+  }
   const [preview, setPreview] = useState('')
   const base = useMemo(() => new Map(Object.entries(run.sources).map(([path, source]) => [path, source.draft?.text ?? source.saved])), [run])
-  const changes = proposal.edits.filter((_, index) => checked.has(index))
+  const selected = proposal.edits.flatMap((_, index) => checked.has(index) ? [index] : [])
+  const changes = selected.map(index => proposal.edits[index])
+  const applied = state === 'draft' || state === 'saved'
+  const fingerprint = applied ? baseline?.working : baseline?.raw
+  const verified = applied ? verification?.compiledBaseline : verification?.baseline
+  const stale = verification && (verification.main !== input.main
+    || verification.selected.join(',') !== selected.join(',') || (fingerprint !== undefined && verified !== fingerprint))
+  const pendingBaseline = verification && !stale && baseline === undefined
+
+  async function verify(save: boolean) {
+    if (request.current || !input.main || !changes.length) return
+    const controller = new AbortController()
+    request.current = controller
+    const { signal } = controller
+    setValidationError('')
+    setChecking(true)
+    try {
+      const report = await validateChatProposal({ ...input, run, edits: changes, selected, signal })
+      if (signal.aborted) return
+      await onVerification(report)
+      if (save && report.status === 'passed' && !signal.aborted && current.current.active) {
+        const latest = current.current.input
+        if (latest.main !== report.main || await verificationBaseline(latest.project, latest.drafts) !== report.baseline) {
+          throw new Error('The verification is out of date. Verify the selected changes again.')
+        }
+        if (current.current.input !== latest) throw new Error('The source changed during verification. Verify the selected changes again.')
+        if (!signal.aborted && current.current.active) {
+          await onAction({ kind: 'apply-save', run, edits: changes, signal })
+        }
+      }
+    } catch (cause) {
+      if (!signal.aborted) setValidationError(cause instanceof Error ? cause.message : 'Could not verify the selected changes.')
+    } finally {
+      request.current = null
+      setChecking(false)
+    }
+  }
   let after = new Map<string, string>()
   let valid = true
   try { after = applyProjectEdits(base, changes) } catch { valid = false }
@@ -409,8 +492,8 @@ function Proposal({ proposal, run, state, disabled, onAction, project }: {
       {(state === 'draft' || state === 'saved') && <Button size="sm" variant="ghost" disabled={disabled} onClick={() => onAction({ kind: 'undo' })}>Undo AI changes</Button>}
     </div> : <>
       <div className="flex gap-1">
-        <Button size="sm" variant="ghost" onClick={() => setChecked(new Set(proposal.edits.map((_, index) => index)))}>Select all</Button>
-        <Button size="sm" variant="ghost" onClick={() => setChecked(new Set())}>Clear selection</Button>
+        <Button size="sm" variant="ghost" onClick={() => select(new Set(proposal.edits.map((_, index) => index)))}>Select all</Button>
+        <Button size="sm" variant="ghost" onClick={() => select(new Set())}>Clear selection</Button>
       </div>
       {paths.map(path => <div key={path} className="rounded border px-2 py-1">
         <div className="flex flex-wrap items-center justify-between gap-1">
@@ -418,20 +501,48 @@ function Proposal({ proposal, run, state, disabled, onAction, project }: {
           <Button size="sm" variant="ghost" disabled={!after.has(path)} onClick={() => setPreview(path)}>View diff</Button>
         </div>
         {proposal.edits.map((edit, index) => edit.path === path && <label className="flex items-start gap-2 py-1 text-xs" key={index}>
-          <Checkbox checked={checked.has(index)} onCheckedChange={value => setChecked(current => {
-            const next = new Set(current)
+          <Checkbox checked={checked.has(index)} onCheckedChange={value => {
+            const next = new Set(checked)
             if (value === true) next.add(index)
             else next.delete(index)
-            return next
-          })} /><span className="min-w-0 truncate">{edit.before.trim().slice(0, 100)}</span>
+            select(next)
+          }} /><span className="min-w-0 truncate">{edit.before.trim().slice(0, 100)}</span>
         </label>)}
       </div>)}
       {unknown.size > 0 && <p role="status" className="break-words text-xs text-amber-800">New unknown citations: {[...unknown].join(', ')}</p>}
       <div className="flex flex-wrap gap-1">
-        <Button size="sm" disabled={disabled || !valid || !checked.size} onClick={() => onAction({ kind: 'apply', run, edits: changes })}>Apply to drafts</Button>
-        <Button size="sm" variant="ghost" disabled={disabled} onClick={() => onAction({ kind: 'reject' })}>Reject proposal</Button>
+        <Button size="sm" variant="outline" disabled={disabled || checking || !valid || !checked.size || !input.main}
+          onClick={() => void verify(false)}>Verify selected changes</Button>
+        <Button size="sm" disabled={disabled || checking || !valid || !checked.size || !input.main}
+          onClick={() => void verify(true)}>Save if verification passes</Button>
+        <Button size="sm" variant="outline" disabled={disabled || checking || !valid || !checked.size}
+          onClick={() => void onAction({ kind: 'apply', run, edits: changes })}>Apply to drafts</Button>
+        <Button size="sm" variant="ghost" disabled={disabled || checking} onClick={() => void onAction({ kind: 'reject' })}>Reject proposal</Button>
       </div>
     </>}
+    {checking && <div className="flex flex-wrap items-center gap-1">
+      <p className="text-xs" role="status">Compiling the temporary snapshot…</p>
+      <Button size="sm" variant="ghost" onClick={() => request.current?.abort()}>Cancel verification</Button>
+    </div>}
+    {validationError && <p className="text-xs text-red-800" role="alert">{validationError}</p>}
+    {verification && <section aria-label="Patch verification" className="space-y-1 rounded border p-2 text-xs">
+      <p className={stale || pendingBaseline ? 'text-amber-800' : verification.status === 'failed' ? 'text-red-800' : 'text-emerald-800'} role="status">
+        {stale ? 'Verification is out of date.' : pendingBaseline ? 'Checking verification freshness…'
+          : verification.status === 'passed' ? 'Verification passed.' : 'Verification failed.'} {!stale && !pendingBaseline && verification.message}
+      </p>
+      <p className="break-all">Temporary snapshot · {verification.main} · {verification.selected.length} selected {verification.selected.length === 1 ? 'change' : 'changes'}</p>
+      {verification.diagnostics.map((issue, index) => <div key={index} className="break-words py-1">
+        <p>{issue.severity === 'error' ? 'Error' : 'Warning'} · {issue.message}</p>
+        {issue.sourceLine && !stale && !pendingBaseline
+          ? <button type="button" onClick={() => onLocate(issue.path, applied ? issue.line : issue.sourceLine!)}
+            className="break-all text-left text-indigo-700 underline" title="Open the corresponding line in the current source">
+            {issue.path}:{issue.line}
+          </button> : <p className="break-all text-slate-600">{issue.path}:{issue.line}</p>}
+      </div>)}
+      {verification.status === 'failed' && !stale && !pendingBaseline && <Button size="sm" variant="ghost"
+        onClick={() => onUseDiagnostics(verification)}>Use diagnostics in chat</Button>}
+      {verification.log && <details><summary>Compiler log</summary><pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all">{verification.log}</pre></details>}
+    </section>}
     <Dialog open={Boolean(previewText !== undefined)} onOpenChange={open => { if (!open) setPreview('') }}>
       <DialogContent className="w-[calc(100vw-2rem)] max-w-none sm:max-w-4xl">
         <DialogTitle className="break-all">{preview}</DialogTitle>

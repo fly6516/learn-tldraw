@@ -1,3 +1,4 @@
+import { verificationBaseline, verificationPatch, type ChatVerification } from './writing-chat-validation'
 import { chatActionPaths, nextChatCheckpoint, type ChatAction } from './writing-chat-actions'
 import type { ChatCheckpoint, ChatHistory, ChatSource } from './writing-chat'
 import { updateFileContent } from './file-system'
@@ -427,6 +428,27 @@ export async function readChatCheckpoints(database: IDBDatabase, key: WritingKey
     return checkpoints
 }
 
+export async function readChatVerifications(database: IDBDatabase, key: WritingKey) {
+    const transaction = database.transaction(storeName)
+    const range = IDBKeyRange.bound(['ai-verify', ...key], ['ai-verify', ...key, []], false, true)
+    const verifications: Record<string, ChatVerification> = Object.create(null)
+    const request = transaction.objectStore(storeName).openCursor(range)
+    request.onsuccess = () => {
+        const cursor = request.result
+        if (!cursor) return
+        verifications[(cursor.key as [string, ...WritingKey, string])[3]] = cursor.value
+        cursor.continue()
+    }
+    await complete(transaction)
+    return verifications
+}
+
+export async function writeChatVerification(database: IDBDatabase, key: WritingKey, run: string, result: ChatVerification) {
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    transaction.objectStore(storeName).put(result, ['ai-verify', ...key, run])
+    await complete(transaction)
+}
+
 export async function commitChatAction(database: IDBDatabase, key: WritingKey, runId: string, action: ChatAction) {
     const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
     const store = transaction.objectStore(storeName)
@@ -466,7 +488,38 @@ export async function commitChatAction(database: IDBDatabase, key: WritingKey, r
             result = { project, checkpoint, changed: true }
         }
         const last = requests.at(-1)
-        if (last) last.request.onsuccess = () => mutate(original)
+        if (action.kind === 'apply-save' && !previous) {
+            const drafts = store.getAll(draftRange(key))
+            const keys = store.getAllKeys(draftRange(key))
+            const report = store.get(['ai-verify', ...key, runId])
+            report.onsuccess = () => {
+                const verified = report.result as ChatVerification | undefined
+                if (verified?.status !== 'passed' || action.signal.aborted
+                    || verified.currentSelection && verified.currentSelection.join(',') !== verified.selected.join(',')) {
+                    failure = new Error('This turn needs a passing verification before saving.')
+                    return
+                }
+                const currentDrafts = Object.fromEntries(keys.result.map((key, index) =>
+                    [(key as [string, ...WritingKey, string])[3], drafts.result[index]]))
+                let outcome: { current: boolean } | undefined
+                void Promise.all([verificationBaseline(original, currentDrafts), verificationPatch(action.edits)])
+                    .then(([baseline, patch]) => { outcome = { current: baseline === verified.baseline && patch === verified.patch } })
+                    .catch(() => { outcome = { current: false } })
+                // Keep this transaction open during hashing so another tab cannot change the verified inputs before the write.
+                function validate() {
+                    if (action.kind !== 'apply-save' || action.signal.aborted) {
+                        failure = new Error('Save authorization was cancelled.')
+                    } else if (!outcome) {
+                        store.getKey(entry).onsuccess = validate
+                    } else if (!outcome.current) {
+                        failure = new Error('The verification is out of date. Verify the selected changes again.')
+                    } else {
+                        mutate(original!)
+                    }
+                }
+                validate()
+            }
+        } else if (last) last.request.onsuccess = () => mutate(original)
         else mutate(original)
     }
     await complete(transaction)
