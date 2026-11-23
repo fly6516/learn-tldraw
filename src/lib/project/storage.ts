@@ -1,3 +1,4 @@
+import type { BackupHistorySelection, PortableProjectHistory } from './backup-history'
 import type { SourceMove } from './writing-ai-evidence'
 import { verificationBaseline, verificationPatch, type ChatVerification } from './writing-chat-validation'
 import { chatActionPaths, nextChatCheckpoint, type ChatAction } from './writing-chat-actions'
@@ -331,7 +332,86 @@ export async function clearWritingState(database: IDBDatabase, key: WritingKey) 
     await complete(transaction)
 }
 
-export async function restoreProjectBackup(database: IDBDatabase, current: WritingKey, project: ProjectFileSystem, writing?: PortableWritingState) {
+function historyRange(bucket: string, key: WritingKey) {
+    const prefix = [bucket, ...key]
+    return IDBKeyRange.bound(prefix, [...prefix, []], true, true)
+}
+
+export async function readBackupHistory(database: IDBDatabase, key: WritingKey, selection: BackupHistorySelection): Promise<PortableProjectHistory> {
+    const transaction = database.transaction(storeName)
+    const store = transaction.objectStore(storeName)
+    const readRecord = <T>(bucket: string) => {
+        const range = historyRange(bucket, key)
+        const keys = store.getAllKeys(range)
+        const values = store.getAll(range)
+        return () => Object.fromEntries(keys.result.map((entry, index) => [(entry as [string, ...WritingKey, string])[3], values.result[index] as T]))
+    }
+    const publication = selection.publication ? {
+        submissions: store.getAll(historyRange('submission-info', key)),
+        files: readRecord<Pick<SubmissionVersion, 'pdf' | 'zip'>>('submission-files'),
+        rounds: store.getAll(historyRange('revision-round', key)),
+    } : undefined
+    const snapshots = selection.snapshots ? { list: store.get(snapshotList(key)), projects: readRecord<ProjectFileSystem>('snapshot') } : undefined
+    const ai = selection.ai ? {
+        history: store.get(['ai-history', ...key]), moves: store.get(['source-moves', ...key]),
+        tasks: readRecord<ChatTaskStep[]>('ai-task'), checkpoints: readRecord<ChatCheckpoint>('ai-change'),
+        verifications: readRecord<ChatVerification>('ai-verify'),
+    } : undefined
+    await complete(transaction)
+
+    const backup: PortableProjectHistory = {}
+    if (publication) {
+        const files = publication.files()
+        const submissions = (publication.submissions.result as SubmissionVersionInfo[]).map(info => {
+            const pair = files[info.id]
+            if (!(pair?.pdf instanceof Blob) || !(pair?.zip instanceof Blob)) throw new Error(`Archived PDF or ZIP is unavailable for ${info.name}.`)
+            return { ...info, ...pair }
+        })
+        backup.publication = { submissions, rounds: publication.rounds.result as RevisionRound[] }
+    }
+    if (snapshots) {
+        const projects = snapshots.projects()
+        backup.snapshots = ((snapshots.list.result ?? []) as ProjectSnapshotInfo[]).map(info => {
+            if (!projects[info.id]) throw new Error(`The snapshot ${info.name} is unavailable.`)
+            return { ...info, project: projects[info.id] }
+        })
+    }
+    if (ai) backup.ai = { history: ai.history.result, moves: ai.moves.result ?? [], tasks: ai.tasks(),
+        checkpoints: ai.checkpoints(), verifications: ai.verifications() }
+    return backup
+}
+
+function restoreBackupHistory(store: IDBObjectStore, key: WritingKey, history: PortableProjectHistory) {
+    if (history.publication) {
+        for (const bucket of ['submission-files', 'submission-info', 'revision-round']) store.delete(historyRange(bucket, key))
+        for (const { pdf, zip, ...info } of history.publication.submissions) {
+            store.put({ pdf, zip }, ['submission-files', ...key, info.id])
+            store.put(info, ['submission-info', ...key, info.id])
+        }
+        for (const round of history.publication.rounds) store.put(round, ['revision-round', ...key, round.id])
+    }
+    if (history.snapshots) {
+        store.delete(historyRange('snapshot', key))
+        const list = history.snapshots.map(({ project, ...info }) => {
+            store.put(project, snapshotEntry(key, info.id))
+            return info
+        })
+        store.put(list, snapshotList(key))
+    }
+    if (history.ai) {
+        const { ai } = history
+        if (ai.history) store.put(ai.history, ['ai-history', ...key])
+        else store.delete(['ai-history', ...key])
+        store.put(ai.moves, ['source-moves', ...key])
+        for (const [bucket, records] of [['ai-task', ai.tasks], ['ai-change', ai.checkpoints], ['ai-verify', ai.verifications]] as const) {
+            store.delete(historyRange(bucket, key))
+            for (const [run, value] of Object.entries(records)) store.put(value, [bucket, ...key, run])
+        }
+    }
+}
+
+export async function restoreProjectBackup(database: IDBDatabase, current: WritingKey, project: ProjectFileSystem,
+    writing?: PortableWritingState, history?: PortableProjectHistory) {
     const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
     const store = transaction.objectStore(storeName)
     const saved = store.get(current[0])
@@ -344,6 +424,7 @@ export async function restoreProjectBackup(database: IDBDatabase, current: Writi
             store.delete(['view', ...key])
         }
         store.put(project, current[0])
+        if (history) restoreBackupHistory(store, destination, history)
         if (writing) {
             for (const [path, draft] of Object.entries(writing.drafts)) store.put(draft, ['draft', ...destination, path])
             if (writing.view) store.put(writing.view, ['view', ...destination])

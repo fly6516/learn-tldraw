@@ -54,5 +54,5 @@ jobs:
       - run: tectonic --version
       - run: bun run test
       - run: bun run build
-      - run: bunx playwright install --with-deps chromium
+      - run: bunx playwright install --with-deps chromium firefox
       - run: bun run test:e2e

@@ -16,7 +16,7 @@ fetch its TeX bundle. Set `TECTONIC_ONLY_CACHED=1` for an already populated cach
 
 ```sh
 LATEX_COMPILE_ENABLED=1 bun run test
-bunx playwright install chromium
+bunx playwright install chromium firefox
 bun run test:e2e
 ```
 

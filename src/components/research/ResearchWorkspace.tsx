@@ -39,7 +39,7 @@ import { materialKind } from '@/lib/project/canvas-card-kinds'
 import type { BibliographyEntry, ReferenceLocation } from '@/lib/project/references'
 import { anchorLatexBlock, findSourceLinkIssues, repairSourceLink, type CanvasSourceCatalog } from '@/lib/project/canvas-source-links'
 import { SourceLinksDialog } from './SourceLinksDialog'
-import { restoreProjectBackup } from '@/lib/project/storage'
+import { readBackupHistory, restoreProjectBackup } from '@/lib/project/storage'
 import type { PortableWritingState } from '@/lib/project/writing-drafts'
 import type { WritingReviewActions } from '@/components/project/WritingReviewPanel'
 import { bindReviewTarget, resolveReviewTarget, reviewItems, reviewResource } from '@/lib/project/review-links'
@@ -682,16 +682,18 @@ function Workspace({ sample, initialProject, notice }: WorkspaceProps) {
           switchView('write')
           return true
         }} />
-      {backupOpen && <ProjectBackupDialog canvas={canvas} project={fileSystem} writing={backupOpen.writing} onRestore={async (project, incoming) => {
+      {backupOpen && <ProjectBackupDialog canvas={canvas} project={fileSystem} writing={backupOpen.writing}
+        readHistory={storage && storageKey ? selection => readBackupHistory(storage, [storageKey, fileSystem.metadata.createdAt], selection) : undefined}
+        onRestore={async (project, incoming, history) => {
         if (!storage || !storageKey) {
-          if (incoming) throw new Error('Local storage is required to restore the drafts in this backup.')
+          if (incoming || history) throw new Error('Local storage is required to restore drafts or project history.')
           if (await writing.current?.prepareReplacement() === false) return false
           resetProjectViews()
           setFileSystem(project)
           return true
         }
         if (!await writing.current?.confirmBackupReplacement()) return false
-        await restoreProjectBackup(storage, [storageKey, fileSystem.metadata.createdAt], project, incoming)
+        await restoreProjectBackup(storage, [storageKey, fileSystem.metadata.createdAt], project, incoming, history)
         resetProjectViews()
         acceptStoredProject(project)
         return true

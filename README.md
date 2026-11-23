@@ -27,6 +27,17 @@ to carry those edits and the Writing cursor separately from the saved source. A 
 with a different baseline opens in the normal Writing comparison flow. Version 2 backups are
 still supported. Backups carrying drafts use version 3.
 
+Select the history categories you want to transfer. **Include submissions and revision rounds**
+keeps the exact archived PDF and source ZIP for each version, their reviewer comments and replies,
+and the links between revisions and submissions. **Include project snapshots** keeps saved
+snapshots. **Include AI conversations and task history** also includes manuscript excerpts
+used as evidence and the source move history. Automatic approvals are session-only.
+
+Backups with history use format version 4. Versions 2 and 3 remain supported. Import validates
+history and archive checksums before replacing the project. Included history categories replace
+existing records for the imported project identity. A category you leave unchecked stays outside
+the exported file.
+
 ## Edit and compile an existing LaTeX project
 
 Install [Tectonic](https://tectonic-typesetting.github.io/book/latest/installation/) and put it on

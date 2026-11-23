@@ -44,6 +44,10 @@ const nodeSchema = z.object({
     }).optional(),
   }),
 })
+export const sectionAnchorSchema = nodeSchema.shape.data.shape.sourceAnchor.unwrap()
+export const figureAnchorSchema = nodeSchema.shape.data.shape.figureAnchor.unwrap()
+export const selectionAnchorSchema = nodeSchema.shape.data.shape.selectionAnchor.unwrap()
+
 const edgeSchema = z.object({ id: z.string().min(1), source: z.string(), target: z.string() })
 const pageSchema = z.object({
   id: z.string().min(1), name: z.string().trim().min(1), nodes: z.array(nodeSchema),

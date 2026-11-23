@@ -74,3 +74,45 @@ test('keeps portable drafts separate and reports changed or missing baselines on
   expect(restored.conflicts).toEqual(['preamble.tex', 'missing.tex'])
   expect(applyWritingDrafts(restored.project, restored.writing.drafts)).toBe(restored.project)
 })
+
+test('restores exact submission archives, linked rounds, snapshots and optional AI history', async () => {
+  const project = createProjectFileSystem(template)
+  const now = project.metadata.createdAt
+  const pdf = new Blob(['%PDF-1.4\narchived'], { type: 'application/pdf' })
+  const zip = new Blob([Uint8Array.of(80, 75, 3, 4, 170)], { type: 'application/zip' })
+  const version = { id: 'v1', name: 'Submission v1', createdAt: now, main: 'main.tex', paths: ['main.tex'], excluded: [],
+    drafts: [], issues: [], warnings: false, diagnostics: [], pdf, zip }
+  const round = { id: 'round', name: 'Review', createdAt: now, submissionId: 'v1', revisedSubmissionId: 'v2', comments: [
+    { id: 'comment', kind: 'comment', target: { type: 'file', path: 'main.tex' }, reviewer: 'Reviewer', text: 'Clarify the methods.',
+      response: { kind: 'changed', text: 'The methods were clarified.', paths: ['main.tex'] } },
+  ] }
+  const history = { publication: { submissions: [version, { ...version, id: 'v2', name: 'Submission v2' }], rounds: [round] },
+    snapshots: [{ id: 'snapshot', name: 'Initial', createdAt: now, project }],
+    ai: { history: { selected: 'chat', conversations: [{ id: 'chat', title: 'Review', messages: [
+      { id: 'user-msg', role: 'user', parts: [{ type: 'text', text: 'Review this.' }], metadata: { run: 'run' } },
+    ], runs: { run: { sources: {}, pathRevision: 0 } } }] }, moves: [{ from: 'old.tex', to: 'main.tex' }],
+    tasks: { run: [{ kind: 'saved', at: Date.now() }] }, checkpoints: {}, verifications: {} },
+  }
+  const exported = await encodeProjectBackup(canvas, project, undefined, history)
+  const restored = (await decodeProjectBackup(exported)).history
+  expect(restored.publication.rounds).toEqual([round])
+  expect(await restored.publication.submissions[0].pdf.text()).toBe(await pdf.text())
+  expect(await restored.publication.submissions[0].zip.arrayBuffer()).toEqual(await zip.arrayBuffer())
+  expect(restored.snapshots[0].project.files).toEqual(project.files)
+  expect(restored.snapshots[0].project.canvas).toBeUndefined()
+  expect(restored.ai).toEqual(history.ai)
+
+  const publicationOnly = await decodeProjectBackup(await encodeProjectBackup(canvas, project, undefined, { publication: history.publication }))
+  expect(publicationOnly.history.snapshots).toBeUndefined()
+  expect(publicationOnly.history.ai).toBeUndefined()
+
+  const archive = await JSZip.loadAsync(await exported.arrayBuffer())
+  const manifest = JSON.parse(await archive.file('project.json').async('text'))
+  archive.file('history/submissions/0.pdf', '%PDF-1.4\nchanged!')
+  await expect(decodeProjectBackup(await archive.generateAsync({ type: 'blob' }))).rejects.toThrow('checksum')
+  archive.remove('history/submissions/0.pdf')
+  await expect(decodeProjectBackup(await archive.generateAsync({ type: 'blob' }))).rejects.toThrow('Missing project history')
+  manifest.history.publication.rounds[0].submissionId = 'missing'
+  archive.file('project.json', JSON.stringify(manifest))
+  await expect(decodeProjectBackup(await archive.generateAsync({ type: 'blob' }))).rejects.toThrow('invalid')
+})

@@ -5,6 +5,8 @@ import type { ProjectDirectory, ProjectFile, ProjectFileSystem } from './types'
 import { isProjectPath } from './source-archive'
 import { draftConflicts, type PortableWritingState } from './writing-drafts'
 
+import { backupHistorySchema, decodeBackupHistory, encodeBackupHistory, maxHistoryBytes, type PortableProjectHistory } from './backup-history'
+
 const format = 'research-canvas'
 export const projectBackupExtension = '.research-canvas'
 const manifestName = 'project.json'
@@ -67,9 +69,10 @@ const savedManifest = z.object({
 const manifestSchema = z.discriminatedUnion('version', [
   savedManifest.extend({ version: z.literal(2) }),
   savedManifest.extend({ version: z.literal(3), writing: writingSchema }),
+  savedManifest.extend({ version: z.literal(4), writing: writingSchema.optional(), history: backupHistorySchema }),
 ])
 
-export async function encodeProjectBackup(canvas: ResearchCanvas, project: ProjectFileSystem, writing?: PortableWritingState): Promise<Blob> {
+export async function encodeProjectBackup(canvas: ResearchCanvas, project: ProjectFileSystem, writing?: PortableWritingState, history?: PortableProjectHistory): Promise<Blob> {
   const archive = new JSZip()
   const files = await Promise.all([...project.files.values()].map(async (entry, index) => {
     if (entry.type === 'directory') return { type: entry.type, path: entry.path, name: entry.name }
@@ -79,27 +82,35 @@ export async function encodeProjectBackup(canvas: ResearchCanvas, project: Proje
     archive.file(attachment.entry, await blob.arrayBuffer())
     return { ...file, attachment }
   }))
+  const contents = writing && writingSchema.parse(writing)
+  const portableHistory = history && await encodeBackupHistory(archive, history, snapshot =>
+    encodeProjectBackup(snapshot.project.canvas ?? canvas, snapshot.project))
   archive.file(manifestName, JSON.stringify({
     format,
-    ...(writing ? { version: 3, writing: writingSchema.parse(writing) } : { version: 2 }),
+    ...(portableHistory ? { version: 4, writing: contents, history: portableHistory } : contents ? { version: 3, writing: contents } : { version: 2 }),
     canvas,
     project: { template: project.template, metadata: project.metadata, files },
   }))
   return archive.generateAsync({ type: 'blob', compression: 'DEFLATE' })
 }
 
-export async function decodeProjectBackup(file: Blob) {
+export async function decodeProjectBackup(file: Blob, options: { snapshot?: boolean } = {}): Promise<{
+  canvas: ResearchCanvas; project: ProjectFileSystem; writing?: PortableWritingState
+  history?: PortableProjectHistory; conflicts: string[]
+}> {
+  if (file.size > maxHistoryBytes) throw new Error('This project backup exceeds the size limit.')
   const archive = await JSZip.loadAsync(await file.arrayBuffer(), { checkCRC32: true })
   const manifestFile = archive.file(manifestName)
   if (!manifestFile) throw new Error('This file is not a Research Canvas backup.')
   const data: unknown = JSON.parse(await manifestFile.async('text'))
   const header = z.object({ format: z.literal(format), version: z.number() }).safeParse(data)
-  if (header.success && header.data.version !== 2 && header.data.version !== 3) {
-    throw new Error('The project backup uses an unsupported version. This workspace supports versions 2 and 3.')
+  if (header.success && ![2, 3, 4].includes(header.data.version)) {
+    throw new Error('The project backup uses an unsupported version. This workspace supports versions 2, 3 and 4.')
   }
   const manifest = manifestSchema.safeParse(data)
   if (!manifest.success) throw new Error('The project backup is invalid.')
 
+  if (options.snapshot && manifest.data.version !== 2) throw new Error('Invalid nested snapshot backup.')
   const { canvas, project } = manifest.data
   const files: ProjectFileSystem['files'] = new Map()
   for (const { attachment, ...file } of project.files) {
@@ -123,6 +134,10 @@ export async function decodeProjectBackup(file: Blob) {
   }
 
   const restored = { ...project, files, canvas } satisfies ProjectFileSystem
-  const writing = manifest.data.version === 3 ? manifest.data.writing : undefined
-  return { canvas, project: restored, writing, conflicts: writing ? draftConflicts(restored, writing.drafts) : [] }
+  const writing = manifest.data.version === 2 ? undefined : manifest.data.writing
+  const history = manifest.data.version === 4 ? await decodeBackupHistory(archive, manifest.data.history, async (blob, hasCanvas) => {
+    const { project } = await decodeProjectBackup(blob, { snapshot: true })
+    return hasCanvas ? project : { ...project, canvas: undefined }
+  }) : undefined
+  return { canvas, project: restored, writing, history, conflicts: writing ? draftConflicts(restored, writing.drafts) : [] }
 }
