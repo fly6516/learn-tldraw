@@ -14,6 +14,10 @@ The default unit tests and production build need no model credentials. Install T
 its executable on PATH to run the compiler and browser regressions. On first use, Tectonic may
 fetch its TeX bundle. Set `TECTONIC_ONLY_CACHED=1` for an already populated cache.
 
+Open **Workbench setup** in the project library or Writing to check browser storage,
+the local compiler, and model configuration. The compiler check runs a built-in document
+using cached resources. Use the sample's normal **Compile PDF** action to warm the cache.
+
 ```sh
 LATEX_COMPILE_ENABLED=1 bun run test
 bunx playwright install chromium firefox

@@ -19,7 +19,7 @@ export default defineConfig({
   webServer: {
     command: `bun run start --hostname 127.0.0.1 --port ${port}`,
     url: server + (livePath ?? (keylessSample ? '/research' : '/research-test')),
-    env: { RESEARCH_TEST_MODE: livePath || keylessSample ? '0' : '1', LATEX_COMPILE_ENABLED: '1', NEXT_TELEMETRY_DISABLED: '1',
+    env: { RESEARCH_TEST_MODE: livePath || keylessSample ? '0' : '1', LATEX_COMPILE_ENABLED: process.env.RESEARCH_SETUP_COMPILE ?? '1', NEXT_TELEMETRY_DISABLED: '1',
       ...(livePath ? {} : { DEEPSEEK_API_KEY: '', OPENAI_API_KEY: '' }) },
     timeout: 60_000,
   },

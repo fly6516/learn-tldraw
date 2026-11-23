@@ -6,6 +6,7 @@ import dynamic from 'next/dynamic'
 import type { editor, IPosition } from 'monaco-editor'
 import { BookOpen, ChevronRight, CircleAlert, Download, Ellipsis, FileCode2, FileText, Folder, Link2, ListChecks, LocateFixed, PanelLeft, Play, Save, Sparkles, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { WorkbenchSetup } from './WorkbenchSetup'
 import { RightToolPanel, useRightToolPanelWide } from '@/components/ui/right-tool-panel'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
@@ -952,6 +953,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         <Button size="sm" className="bg-indigo-700 text-white hover:bg-indigo-800" onClick={() => void compile()} disabled={!main || locked}>
           <Play /> {busy ? 'Compiling…' : 'Compile PDF'}
         </Button>
+        <WorkbenchSetup storage={journal.loadError || journal.failed.size ? 'unavailable' : journal.ready && storage ? 'ready' : 'checking'} />
         <Button ref={aiTrigger} size="sm" variant={aiOpen ? 'secondary' : 'outline'} aria-expanded={aiOpen} aria-controls="writing-ai"
           aria-label="Writing AI" title="Writing AI" className="shrink-0 px-2 sm:px-3" onClick={toggleChapterAi}>
           <Sparkles /><span className="hidden sm:inline">Writing AI</span>

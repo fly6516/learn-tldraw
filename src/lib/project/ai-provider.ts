@@ -9,12 +9,15 @@ export function isLocalAiRequest(request: Request) {
   return /^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(host) && request.headers.get('origin') === `http://${host}`
 }
 
-export function configuredAi(): { model: LanguageModel; providerOptions: Parameters<typeof generateText>[0]['providerOptions'] } | undefined {
-  const deepSeekKey = process.env.DEEPSEEK_API_KEY
-  const openAIKey = process.env.OPENAI_API_KEY
-  const openAIModel = process.env.OPENAI_MODEL
-  if (deepSeekKey) return { model: createDeepSeek({ apiKey: deepSeekKey, fetch: providerFetch })(process.env.DEEPSEEK_MODEL || 'deepseek-flash'),
-    providerOptions: { deepseek: { thinking: { type: 'disabled' } } } }
-  if (openAIKey && openAIModel) return { model: createOpenAI({ apiKey: openAIKey, baseURL: process.env.OPENAI_BASE_URL, fetch: providerFetch }).responses(openAIModel),
-    providerOptions: { openai: { store: false } } }
+export function aiProviderStatus(env = process.env) {
+  if (env.DEEPSEEK_API_KEY?.trim()) return { provider: 'DeepSeek' as const, model: env.DEEPSEEK_MODEL || 'deepseek-flash' }
+  if (env.OPENAI_API_KEY?.trim() && env.OPENAI_MODEL?.trim()) return { provider: 'OpenAI-compatible' as const, model: env.OPENAI_MODEL }
+}
+
+export function configuredAi(): { model: LanguageModel; providerOptions: Parameters<typeof generateText>[0]['providerOptions']; recipient: string } | undefined {
+  const configured = aiProviderStatus()
+  if (configured?.provider === 'DeepSeek') return { model: createDeepSeek({ apiKey: process.env.DEEPSEEK_API_KEY, fetch: providerFetch })(configured.model),
+    recipient: `DeepSeek · ${configured.model}`, providerOptions: { deepseek: { thinking: { type: 'disabled' } } } }
+  if (configured) return { model: createOpenAI({ apiKey: process.env.OPENAI_API_KEY, baseURL: process.env.OPENAI_BASE_URL, fetch: providerFetch }).responses(configured.model),
+    recipient: `${configured.provider} · ${configured.model}`, providerOptions: { openai: { store: false } } }
 }

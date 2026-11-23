@@ -16,6 +16,7 @@ import { importSourceArchive } from '@/lib/project/source-archive'
 import type { ProjectFileSystem } from '@/lib/project/types'
 import type { PortableWritingState } from '@/lib/project/writing-drafts'
 import { ResearchWorkspace } from './ResearchWorkspace'
+import { WorkbenchSetup } from '@/components/project/WorkbenchSetup'
 
 const sections = [['active', 'Projects'], ['archived', 'Archived'], ['trash', 'Trash']] as const
 
@@ -25,6 +26,7 @@ export function ProjectLibrary() {
   const requested = params?.get('project')
   const oldWritingLink = !requested && params?.get('view') === 'write'
   const [database, setDatabase] = useState<IDBDatabase>()
+  const [storageUnavailable, setStorageUnavailable] = useState(false)
   const [catalog, setCatalog] = useState<LibraryProject[]>()
   const [section, setSection] = useState<LibraryProjectState>('active')
   const [busy, setBusy] = useState(false)
@@ -40,7 +42,7 @@ export function ProjectLibrary() {
       connection = opened
       if (active) setDatabase(opened)
       else opened.close()
-    }).catch(() => { if (active) setError('Local project storage could not be opened.') })
+    }).catch(() => { if (active) { setStorageUnavailable(true); setError('Local project storage could not be opened.') } })
     return () => { active = false; connection?.close() }
   }, [])
 
@@ -105,6 +107,7 @@ export function ProjectLibrary() {
         <h1 className="mt-1 text-3xl font-semibold tracking-tight">Research projects</h1>
       </div>
       <div className="flex flex-wrap gap-2">
+        <WorkbenchSetup storage={storageUnavailable ? 'unavailable' : database ? 'ready' : 'checking'} />
         <Button variant="outline" disabled={!catalog || busy} onClick={() => fileInput.current?.click()}><FileUp /> Import project</Button>
         <Button variant="outline" disabled={!catalog || busy} onClick={() => void run(async () => {
           const { testPaperZip, testPaperName } = await import('@/lib/project/test-paper')
