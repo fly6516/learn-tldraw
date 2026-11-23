@@ -40,10 +40,10 @@ import { materialKind } from '@/lib/project/canvas-card-kinds'
 import type { BibliographyEntry, ReferenceLocation } from '@/lib/project/references'
 import { anchorLatexBlock, findSourceLinkIssues, repairSourceLink, type CanvasSourceCatalog } from '@/lib/project/canvas-source-links'
 import { SourceLinksDialog } from './SourceLinksDialog'
-import { readBackupHistory, readProject, restoreProjectBackup } from '@/lib/project/storage'
+import { readBackupHistory, readProject, readRecoveryBaseline, recordProjectBackup, restoreProjectBackup } from '@/lib/project/storage'
 import type { PortableProjectHistory } from '@/lib/project/backup-history'
 import type { LibraryView } from '@/lib/project/project-library'
-import type { PortableWritingState } from '@/lib/project/writing-drafts'
+import { sameDraft, type PortableWritingState } from '@/lib/project/writing-drafts'
 import type { WritingReviewActions } from '@/components/project/WritingReviewPanel'
 import { bindReviewTarget, resolveReviewTarget, reviewItems, reviewResource } from '@/lib/project/review-links'
 import { sourceOffsetAtPosition, type SourceLocation } from '@/lib/project/latex-source'
@@ -60,7 +60,7 @@ const noBlocks: LatexBlock[] = []
 
 function Workspace({ sample, initialProject, notice, projectListHref, onViewChange, onImportCopy }: WorkspaceProps) {
   const router = useRouter()
-  const { fileSystem, initializeProject, setFileSystem, storage, storageKey, acceptStoredProject, flushProject, projectConflict, hasUnstoredProject } = useProjectFileSystem()
+  const { fileSystem, initializeProject, setFileSystem, storage, storageKey, acceptStoredProject, flushProject, projectConflict, storageError, retryStorage, hasUnstoredProject } = useProjectFileSystem()
   const reloadingSavedProject = useRef(false)
   const view = useSearchParams()?.get('view') === 'write' ? 'write' : 'canvas'
   useEffect(() => { onViewChange?.(view) }, [onViewChange, view])
@@ -214,7 +214,7 @@ function Workspace({ sample, initialProject, notice, projectListHref, onViewChan
 
   async function leaveForList(href: string) {
     if (await writing.current?.prepareProjectSwitch() === false) return
-    if (projectConflict && hasUnstoredProject()) {
+    if ((projectConflict || storageError) && hasUnstoredProject()) {
       setBackupOpen({ writing: writing.current?.getDraftBackup(), recovery: true })
       return
     }
@@ -222,13 +222,13 @@ function Workspace({ sample, initialProject, notice, projectListHref, onViewChan
   }
 
   useEffect(() => {
-    if (!projectConflict) return
+    if (!projectConflict && !storageError) return
     const warn = (event: BeforeUnloadEvent) => {
       if (!reloadingSavedProject.current && hasUnstoredProject()) { event.preventDefault(); event.returnValue = '' }
     }
     window.addEventListener('beforeunload', warn)
     return () => window.removeEventListener('beforeunload', warn)
-  }, [projectConflict, hasUnstoredProject])
+  }, [projectConflict, storageError, hasUnstoredProject])
 
   function switchView(next: 'canvas' | 'write') {
     const url = new URL(window.location.href)
@@ -559,6 +559,11 @@ function Workspace({ sample, initialProject, notice, projectListHref, onViewChan
         <div ref={setWritingActions} className={view === 'write' ? 'order-4 col-span-2 flex min-w-0 flex-1 items-center justify-end gap-2' : 'hidden'} />
       </header>
       {notice}
+      {storageError && <div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-amber-50 px-3 py-1.5 text-sm text-amber-950">
+        <span>Project storage is unavailable. Back up the files and Canvas held in this tab.</span>
+        <Button size="sm" variant="outline" onClick={() => setBackupOpen({ writing: writing.current?.getDraftBackup(), recovery: true })}>Back up this tab</Button>
+        {storage && <Button size="sm" variant="ghost" onClick={() => void retryStorage()}>Retry project save</Button>}
+      </div>}
       {projectConflict && storage && storageKey && <ProjectConflictNotice project={{ ...fileSystem, canvas }}
         readSaved={() => readProject(storage, storageKey)} onBackup={() => setBackupOpen({ writing: writing.current?.getDraftBackup(), recovery: true })}
         onReload={async () => {
@@ -662,6 +667,7 @@ function Workspace({ sample, initialProject, notice, projectListHref, onViewChan
       <div className={view === 'write' ? 'flex min-h-0 min-w-0 flex-1 flex-col' : 'hidden'}>
         <SourceProjectWorkspace key={sourceVersion} ref={writing} project={fileSystem} actions={writingActions}
           active={view === 'write'} generateSource={fileSystem.metadata.sourceMode === 'archive' ? undefined : generateSource}
+          onRecoveryBackup={() => setBackupOpen({ writing: writing.current?.getDraftBackup(), recovery: true })}
           onOpenCanvas={() => switchView('canvas')} outlineCanvas={outlineCanvas} onArchiveOutline={setArchiveOutline}
           referenceCanvasAction={referenceCanvasAction} review={review} />
       </div>
@@ -769,6 +775,15 @@ function Workspace({ sample, initialProject, notice, projectListHref, onViewChan
         }} />
       {backupOpen && <ProjectBackupDialog canvas={canvas} project={fileSystem} writing={backupOpen.writing} recovery={backupOpen.recovery}
         readHistory={storage && storageKey ? selection => readBackupHistory(storage, [storageKey, fileSystem.metadata.createdAt], selection) : undefined}
+        onExport={storage && storageKey ? receipt => recordProjectBackup(storage, storageKey, receipt) : undefined}
+        readBaseline={storage && storageKey ? async () => {
+          if (hasUnstoredProject() || !backupOpen.writing) return
+          const saved = await readRecoveryBaseline(storage, storageKey)
+          const drafts = backupOpen.writing.drafts
+          if (saved.version === (fileSystem.storageRevision ?? fileSystem.metadata.updatedAt)
+            && Object.keys(drafts).length === Object.keys(saved.drafts).length
+            && Object.entries(drafts).every(([path, draft]) => sameDraft(draft, saved.drafts[path]))) return saved.baseline
+        } : undefined}
         onImportCopy={onImportCopy ? async (project, incoming, history) => {
           if (await writing.current?.prepareProjectSwitch() === false) return false
           await onImportCopy(project, incoming?.view ? 'write' : 'canvas', incoming, history)

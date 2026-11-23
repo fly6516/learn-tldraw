@@ -98,6 +98,7 @@ test('checks the final ZIP for missing and changed claim evidence and archives t
     const restored = await browser.newPage({ baseURL })
     await restored.goto('/research')
     await restored.getByLabel('Choose project ZIP or backup').setInputFiles(backup)
+    await restored.getByRole('button', { name: 'Import as new project' }).click()
     await restored.getByRole('button', { name: 'Writing', exact: true }).click()
     await restored.getByRole('button', { name: 'Prepare submission', exact: true }).click()
     await restored.getByText(/^Evidence exception ·/).click()

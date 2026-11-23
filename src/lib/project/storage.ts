@@ -1,4 +1,4 @@
-import { legacyProjectId, legacyStorageKey, libraryStorageKey, type LibraryProject, type LibraryProjectState, type LibraryView } from './project-library'
+import { legacyProjectId, legacyStorageKey, libraryStorageKey, type LibraryProject, type LibraryProjectState, type LibraryView, type RecoveryReceipt } from './project-library'
 import type { BackupHistorySelection, PortableProjectHistory } from './backup-history'
 import type { SourceMove } from './writing-ai-evidence'
 import { verificationBaseline, verificationPatch, type ChatVerification, type ManuscriptBuild } from './writing-chat-validation'
@@ -57,7 +57,7 @@ function draftRange(key: WritingKey) {
 function readDraftRecords(store: IDBObjectStore, key: WritingKey) {
     const keys = store.getAllKeys(draftRange(key))
     const values = store.getAll(draftRange(key))
-    return { values, match: (expected: WritingDrafts) => keys.result.length === Object.keys(expected).length && keys.result.every((entry, index) =>
+    return { keys, values, match: (expected: WritingDrafts) => keys.result.length === Object.keys(expected).length && keys.result.every((entry, index) =>
         sameDraft(values.result[index], expected[(entry as [string, ...WritingKey, string])[3]])) }
 }
 
@@ -502,6 +502,39 @@ function storeImportedProject(store: IDBObjectStore, key: WritingKey, project: P
 type LibraryEntry = Omit<LibraryProject, 'name'>
 const libraryRange = () => IDBKeyRange.bound(['project-library'], ['project-library', []], true, true)
 const libraryEntry = (id: string) => ['project-library', id]
+
+export async function readRecoveryBaseline(database: IDBDatabase, workspace: string) {
+    const transaction = database.transaction(storeName)
+    const store = transaction.objectStore(storeName)
+    const request = store.get(workspace)
+    let readState: (() => { version: string; drafts: WritingDrafts; history: unknown }) | undefined
+    request.onsuccess = () => {
+        const project = request.result as ProjectFileSystem | undefined
+        if (!project) return
+        const key: WritingKey = [workspace, project.metadata.createdAt]
+        const drafts = readDraftRecords(store, key)
+        const submissions = store.getAll(historyRange('submission-info', key))
+        const rounds = store.getAll(historyRange('revision-round', key))
+        const snapshots = store.get(snapshotList(key))
+        readState = () => ({
+            version: project.storageRevision ?? project.metadata.updatedAt,
+            drafts: Object.fromEntries(drafts.keys.result.map((entry, index) => [(entry as [string, ...WritingKey, string])[3], drafts.values.result[index]])),
+            history: [submissions.result, rounds.result, snapshots.result],
+        })
+    }
+    const receipt = store.get(['recovery-receipt', workspace])
+    await complete(transaction)
+    const state = readState?.()
+    const digest = state && await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(state)))
+    const baseline = digest ? Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('') : undefined
+    return { baseline, version: state?.version, drafts: state?.drafts ?? {}, receipt: receipt.result as RecoveryReceipt | undefined }
+}
+
+export async function recordProjectBackup(database: IDBDatabase, workspace: string, receipt: RecoveryReceipt) {
+    const transaction = database.transaction(storeName, 'readwrite')
+    transaction.objectStore(storeName).put(receipt, ['recovery-receipt', workspace])
+    await complete(transaction)
+}
 
 export async function listLibraryProjects(database: IDBDatabase): Promise<LibraryProject[]> {
     const transaction = database.transaction(storeName, 'readwrite')

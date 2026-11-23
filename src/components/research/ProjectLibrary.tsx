@@ -10,12 +10,13 @@ import { Input } from '@/components/ui/input'
 import { decodeProjectBackup, projectBackupExtension } from '@/lib/project/backup'
 import type { PortableProjectHistory } from '@/lib/project/backup-history'
 import { createDefaultProject } from '@/lib/project/file-system'
-import { libraryProjectUrl, libraryStorageKey, type LibraryProject, type LibraryProjectState, type LibraryView } from '@/lib/project/project-library'
-import { addLibraryProject, listLibraryProjects, openProjectStorage, updateLibraryProject } from '@/lib/project/storage'
+import { libraryProjectUrl, libraryStorageKey, type LibraryProject, type LibraryProjectState, type LibraryView, type RecoveryStatus } from '@/lib/project/project-library'
+import { addLibraryProject, listLibraryProjects, openProjectStorage, readRecoveryBaseline, updateLibraryProject } from '@/lib/project/storage'
 import { importSourceArchive } from '@/lib/project/source-archive'
 import type { ProjectFileSystem } from '@/lib/project/types'
 import type { PortableWritingState } from '@/lib/project/writing-drafts'
 import { ResearchWorkspace } from './ResearchWorkspace'
+import { BackupContents } from './BackupContents'
 import { WorkbenchSetup } from '@/components/project/WorkbenchSetup'
 
 const sections = [['active', 'Projects'], ['archived', 'Archived'], ['trash', 'Trash']] as const
@@ -28,6 +29,8 @@ export function ProjectLibrary() {
   const [database, setDatabase] = useState<IDBDatabase>()
   const [storageUnavailable, setStorageUnavailable] = useState(false)
   const [catalog, setCatalog] = useState<LibraryProject[]>()
+  const [recovery, setRecovery] = useState<Record<string, RecoveryStatus | undefined>>({})
+  const [backup, setBackup] = useState<Awaited<ReturnType<typeof decodeProjectBackup>>>()
   const [section, setSection] = useState<LibraryProjectState>('active')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
@@ -54,6 +57,23 @@ export function ProjectLibrary() {
     }).catch(() => { if (active) setError('The project list could not be loaded.') })
     return () => { active = false }
   }, [database, requested])
+
+  useEffect(() => {
+    if (!database || !catalog || requested) return
+    let active = true
+    const check = async () => {
+      const entries = await Promise.all(catalog.map(async project => {
+        try {
+          const { baseline, receipt } = await readRecoveryBaseline(database, libraryStorageKey(project.id))
+          return [project.id, { receipt, changed: !!receipt && (!receipt.baseline || baseline !== receipt.baseline) }] as const
+        } catch { return [project.id, undefined] as const }
+      }))
+      if (active) setRecovery(Object.fromEntries(entries))
+    }
+    void check()
+    window.addEventListener('focus', check)
+    return () => { active = false; window.removeEventListener('focus', check) }
+  }, [database, catalog, requested])
 
   useEffect(() => {
     const recent = catalog?.find(project => project.state === 'active')
@@ -86,8 +106,7 @@ export function ProjectLibrary() {
   async function importFile(file: File) {
     await run(async () => {
       if (file.name.toLowerCase().endsWith(projectBackupExtension)) {
-        const backup = await decodeProjectBackup(file)
-        await openCopy(backup.project, backup.writing?.view ? 'write' : 'canvas', backup.writing, backup.history)
+        setBackup(await decodeProjectBackup(file))
       } else {
         await openCopy(await importSourceArchive(file), 'write')
       }
@@ -136,13 +155,22 @@ export function ProjectLibrary() {
       {section === 'active' ? 'Create a project or import a LaTeX ZIP or Research Canvas backup.' : section === 'archived' ? 'No archived projects.' : 'Trash is empty.'}
     </p>}
     <ul className="grid gap-3 sm:grid-cols-2">
-      {projects.map(project => <li key={project.id} className="min-w-0 space-y-3 rounded-lg border bg-card p-4">
+      {projects.map(project => {
+        const status = recovery[project.id]
+        return <li key={project.id} className="min-w-0 space-y-3 rounded-lg border bg-card p-4">
         <div className="flex items-start gap-2">
           <FolderOpen className="mt-0.5 size-5 shrink-0 text-indigo-600" />
           <div className="min-w-0">
             <h2 className="break-words font-semibold">{project.name}</h2>
             {section === 'active' && recent?.id === project.id && <p className="text-xs text-muted-foreground">Most recent</p>}
           </div>
+        </div>
+        <div className="space-y-0.5 text-xs text-muted-foreground">
+          <p>{status ? 'Saved on this browser' : 'Local save status unavailable'}</p>
+          {status?.receipt ? <>
+            <p>Last export {new Date(status.receipt.exportedAt).toLocaleString()} · {status.receipt.scope}</p>
+            <p className={status.changed ? 'text-amber-800' : undefined}>{status.changed ? 'Current project needs a complete recovery backup' : 'Complete recovery backup matches the saved project'}</p>
+          </> : status && <p>No backup export recorded for this browser</p>}
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           {section === 'active' && <Button size="sm" asChild><Link href={libraryProjectUrl(project.id, project.view)}
@@ -159,8 +187,23 @@ export function ProjectLibrary() {
             </Button>,
           )}
         </div>
-      </li>)}
+      </li>})}
     </ul>
+    {backup && <Dialog open onOpenChange={open => { if (!open && !busy) setBackup(undefined) }}>
+      <DialogContent>
+        <DialogTitle>Preview project backup</DialogTitle>
+        <DialogDescription>Restore this backup as a separate project in this browser.</DialogDescription>
+        <BackupContents backup={backup} />
+        {error && <p role="alert" className="text-sm text-red-900">{error}</p>}
+        <DialogFooter>
+          <Button variant="outline" disabled={busy} onClick={() => setBackup(undefined)}>Cancel</Button>
+          <Button disabled={busy} onClick={() => void run(async () => {
+            await openCopy(backup.project, backup.writing?.view ? 'write' : 'canvas', backup.writing, backup.history)
+            setBackup(undefined)
+          })}>Import as new project</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>}
     <Dialog open={Boolean(nameDialog)} onOpenChange={open => { if (!open && !busy) setNameDialog(undefined) }}>
       <DialogContent>
         <DialogTitle>{nameDialog?.id ? 'Rename project' : 'New project'}</DialogTitle>

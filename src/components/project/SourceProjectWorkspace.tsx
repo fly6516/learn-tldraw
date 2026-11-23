@@ -164,7 +164,7 @@ function editorSourcePath(model: editor.ITextModel | null) {
   return path.slice(path.indexOf('/', 1) + 1)
 }
 
-export function SourceProjectWorkspace({ project, ref, active, actions, generateSource, onOpenCanvas, outlineCanvas, onArchiveOutline, referenceCanvasAction, review }: {
+export function SourceProjectWorkspace({ project, ref, active, actions, generateSource, onOpenCanvas, onRecoveryBackup, outlineCanvas, onArchiveOutline, referenceCanvasAction, review }: {
   project: ProjectFileSystem
   ref: Ref<SourceWorkspaceHandle>
   active: boolean
@@ -172,6 +172,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   generateSource?: GenerateSource
   onOpenCanvas: () => void
   outlineCanvas: OutlineCanvasActions
+  onRecoveryBackup: () => void
   onArchiveOutline: (outline: CanvasSourceCatalog | undefined) => void
   referenceCanvasAction: (entry: BibliographyEntry) => { label: string; run: () => void } | undefined
   review: WritingReviewActions
@@ -617,7 +618,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   }
 
   function captureWritingState(): PortableWritingState | undefined {
-    if (!journal.ready || journal.loadError) return
+    if (!journal.ready || (journal.loadError && !dirty)) return
     const instance = editorRef.current
     const position = instance?.getPosition()
     const view = position && editorSourcePath(instance?.getModel() ?? null) === selected ? { path: selected, ...position } : restoredView
@@ -983,6 +984,11 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
           setResumeManuscriptReview(undefined)
           setAiOpen(true)
           resumeManuscriptReview()
+      {(journal.failed.size > 0 || (dirty && journal.loadError)) && <div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-amber-50 px-3 py-1.5 text-sm text-amber-950">
+        <span>Drafts could not be written to this browser. The editor still holds your changes.</span>
+        <Button size="sm" variant="outline" onClick={onRecoveryBackup}>Back up working drafts</Button>
+        {journal.failed.size > 0 && <Button size="sm" variant="ghost" disabled={!!journal.pending} onClick={() => void journal.retryFailed()}>Retry draft save</Button>}
+      </div>}
         }}>Back to manuscript review</Button>
       </div>}
       <div className="flex shrink-0 items-center gap-2 border-b bg-white px-2 py-1.5 lg:hidden">

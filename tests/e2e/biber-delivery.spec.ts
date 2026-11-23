@@ -122,6 +122,7 @@ test('revokes draft access and restores the exact Biber PDF across browsers befo
     const restored = await other.newPage({ baseURL, viewport: { width: 1440, height: 900 } })
     await restored.goto('/research')
     await restored.getByLabel('Choose project ZIP or backup').setInputFiles(backupPath)
+    await restored.getByRole('button', { name: 'Import as new project' }).click()
     await expect(restored.getByRole('heading', { name: 'River Gauge Study', level: 1 })).toBeVisible()
     await restored.getByRole('button', { name: 'Writing', exact: true }).click()
     await restored.getByRole('button', { name: 'Writing AI', exact: true }).click()

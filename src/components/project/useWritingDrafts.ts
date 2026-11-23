@@ -89,6 +89,10 @@ export function useWritingDrafts(storage: IDBDatabase | null, workspace: string 
     forget(paths.filter((_, index) => results[index]))
   }
 
+  async function retryFailed() {
+    await Promise.all([...failed].map(path => persist(path, drafts[path])))
+  }
+
   async function storedDrafts() {
     await Promise.all(queued.current.values())
     return { ...stored.current }
@@ -115,5 +119,5 @@ export function useWritingDrafts(storage: IDBDatabase | null, workspace: string 
     setDrafts(merge)
   }
 
-  return { key, drafts, restoredView, ready, loadError, pending, failed, change, discard, storedDrafts, forget, recordView, acceptWritingState, acceptDraftBatch }
+  return { key, drafts, restoredView, ready, loadError, pending, failed, change, discard, retryFailed, storedDrafts, forget, recordView, acceptWritingState, acceptDraftBatch }
 }

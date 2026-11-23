@@ -122,6 +122,7 @@ test('migrates the existing project and keeps imported copies, drafts and histor
   async function importCopy() {
     await backToProjects(page)
     await page.getByLabel('Choose project ZIP or backup').setInputFiles(backupPath)
+    await page.getByRole('button', { name: 'Import as new project' }).click()
     await expect(page).toHaveURL(/project=[a-f0-9-]+.*view=write/)
     await expect(page.getByRole('heading', { name: 'Existing study' })).toBeVisible()
     return page.url()

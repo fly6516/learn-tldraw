@@ -3,6 +3,8 @@ export const legacyProjectId = 'legacy'
 
 export type LibraryProjectState = 'active' | 'archived' | 'trash'
 export type LibraryView = 'canvas' | 'write'
+export type RecoveryReceipt = { exportedAt: string; scope: string; baseline?: string }
+export type RecoveryStatus = { receipt?: RecoveryReceipt; changed: boolean }
 
 export type LibraryProject = {
   id: string

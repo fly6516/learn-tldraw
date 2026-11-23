@@ -39,6 +39,8 @@ interface ProjectFileSystemContextValue {
   acceptStoredProject: (project: ProjectFileSystem, previous?: ProjectFileSystem) => void
   flushProject: (project: ProjectFileSystem) => Promise<ProjectFileSystem>
   projectConflict: boolean
+  storageError: boolean
+  retryStorage: () => Promise<boolean>
   hasUnstoredProject: () => boolean
 }
 
@@ -79,6 +81,7 @@ export function ProjectFileSystemProvider({ children, storageKey }: { children: 
     setPersisting(true)
     try {
       const saved = await operation
+      setStorageError(false)
       lastStored.current = saved
       channel.current?.postMessage(saved.storageRevision)
       setFileSystem(current => !current || current.storageRevision !== value.storageRevision ? current
@@ -124,9 +127,9 @@ export function ProjectFileSystemProvider({ children, storageKey }: { children: 
   }, [storageKey])
 
   useEffect(() => {
-    if (!storageKey || !storage || !fileSystem || fileSystem === lastStored.current || projectConflict || persisting) return
+    if (!storageKey || !storage || !fileSystem || fileSystem === lastStored.current || projectConflict || persisting || storageError) return
     void flushProject(fileSystem).catch(() => {})
-  }, [storage, storageKey, fileSystem, flushProject, projectConflict, persisting])
+  }, [storage, storageKey, fileSystem, flushProject, projectConflict, persisting, storageError])
 
   useEffect(() => {
     if (!storage || !storageKey) return
@@ -151,6 +154,12 @@ export function ProjectFileSystemProvider({ children, storageKey }: { children: 
       window.removeEventListener('focus', check)
     }
   }, [storage, storageKey])
+
+  async function retryStorage() {
+    if (!storage || !fileSystem || projectConflict) return false
+    try { await flushProject(fileSystem); setStorageError(false); return true }
+    catch { return false }
+  }
 
   const fileTree = fileSystem ? getFileTree(fileSystem) : []
 
@@ -241,14 +250,11 @@ export function ProjectFileSystemProvider({ children, storageKey }: { children: 
         acceptStoredProject,
         flushProject,
         projectConflict,
+        storageError,
+        retryStorage,
         hasUnstoredProject,
       }}
     >
-      {storageError && (
-        <p role="alert" className="fixed bottom-4 right-4 z-[1000] rounded bg-red-900 p-3 text-white">
-          Project files could not be saved or restored in this browser. Export a LaTeX ZIP to keep a copy.
-        </p>
-      )}
       {children}
     </ProjectFileSystemContext.Provider>
   )

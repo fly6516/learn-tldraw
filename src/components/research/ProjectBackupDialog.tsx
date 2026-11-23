@@ -9,9 +9,11 @@ import {
   decodeProjectBackup, encodeProjectBackup, projectBackupExtension,
 } from '@/lib/project/backup'
 import type { BackupHistorySelection, PortableProjectHistory } from '@/lib/project/backup-history'
+import type { RecoveryReceipt } from '@/lib/project/project-library'
 import type { ResearchCanvas } from '@/lib/project/research-graph'
 import type { ProjectFileSystem } from '@/lib/project/types'
 import type { PortableWritingState } from '@/lib/project/writing-drafts'
+import { BackupContents } from './BackupContents'
 
 interface ProjectBackupDialogProps {
   canvas: ResearchCanvas
@@ -19,21 +21,23 @@ interface ProjectBackupDialogProps {
   writing?: PortableWritingState
   recovery?: boolean
   readHistory?: (selection: BackupHistorySelection) => Promise<PortableProjectHistory>
+  readBaseline?: () => Promise<string | undefined>
+  onExport?: (receipt: RecoveryReceipt) => Promise<void>
   onRestore: (project: ProjectFileSystem, writing?: PortableWritingState, history?: PortableProjectHistory) => Promise<boolean>
   onImportCopy?: (project: ProjectFileSystem, writing?: PortableWritingState, history?: PortableProjectHistory) => Promise<boolean>
   onClose: () => void
 }
 
-export function ProjectBackupDialog({ canvas, project, writing, recovery = false, readHistory, onRestore, onImportCopy, onClose }: ProjectBackupDialogProps) {
+export function ProjectBackupDialog({ canvas, project, writing, recovery = false, readHistory, readBaseline, onExport, onRestore, onImportCopy, onClose }: ProjectBackupDialogProps) {
   const [pending, setPending] = useState<Awaited<ReturnType<typeof decodeProjectBackup>>>()
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [includeDrafts, setIncludeDrafts] = useState(recovery)
-  const [historyOptions, setHistoryOptions] = useState<BackupHistorySelection>({ publication: false, snapshots: false, ai: false })
+  const [historyOptions, setHistoryOptions] = useState<BackupHistorySelection>({ publication: recovery && !!readHistory, snapshots: recovery && !!readHistory, ai: false })
   const fileInput = useRef<HTMLInputElement>(null)
   const draftCount = Object.keys(writing?.drafts ?? {}).length
-  const importDraftCount = Object.keys(pending?.writing?.drafts ?? {}).length
+  const complete = Boolean(writing && includeDrafts && historyOptions.publication && historyOptions.snapshots)
 
   async function prepareRestore(file: File) {
     setBusy(true)
@@ -50,13 +54,16 @@ export function ProjectBackupDialog({ canvas, project, writing, recovery = false
     }
   }
 
-  async function downloadBackup() {
+  async function downloadBackup(workingOnly = false) {
     setBusy(true)
     setError('')
     setMessage('')
     try {
-      const history = Object.values(historyOptions).some(Boolean) ? await readHistory?.(historyOptions) : undefined
-      const backup = await encodeProjectBackup(canvas, project, includeDrafts && writing ? writing : undefined, history)
+      const baseline = complete && !workingOnly ? await readBaseline?.().catch(() => undefined) : undefined
+      const history = !workingOnly && Object.values(historyOptions).some(Boolean) ? await readHistory?.(historyOptions) : undefined
+      const draftsIncluded = (workingOnly || includeDrafts) && writing
+      const backup = await encodeProjectBackup(canvas, project, draftsIncluded || undefined, history)
+      await decodeProjectBackup(backup)
       const url = URL.createObjectURL(backup)
       const link = document.createElement('a')
       link.href = url
@@ -66,7 +73,14 @@ export function ProjectBackupDialog({ canvas, project, writing, recovery = false
       link.click()
       link.remove()
       setTimeout(() => URL.revokeObjectURL(url), 1000)
-      setMessage('Backup downloaded.')
+      setMessage('Backup validated and sent to the browser for download.')
+      if (onExport) {
+        const scope = ['files and Canvas', draftsIncluded && 'local drafts', history?.publication && 'submissions and revisions',
+          history?.snapshots && 'snapshots', history?.ai && 'AI history'].filter(Boolean).join(', ')
+        const current = baseline && await readBaseline?.().catch(() => undefined)
+        try { await onExport({ exportedAt: new Date().toISOString(), scope, baseline: current === baseline ? baseline : undefined }) }
+        catch { setMessage('Backup validated and sent for download. The export could not be recorded in local storage.') }
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not export project backup.')
     } finally {
@@ -113,10 +127,15 @@ export function ProjectBackupDialog({ canvas, project, writing, recovery = false
         />
         <div className="space-y-1 rounded border p-2 text-sm">
           <p>Every backup includes saved project files and the Canvas.</p>
-          {draftCount > 0 ? <label className="flex items-center gap-2">
+          {writing && readHistory && <Button variant={complete ? 'secondary' : 'outline'} size="sm" aria-pressed={complete}
+            disabled={busy} onClick={() => {
+              setIncludeDrafts(true)
+              setHistoryOptions(current => ({ ...current, publication: true, snapshots: true }))
+            }}>Complete recovery backup</Button>}
+          {writing ? <label className="flex items-center gap-2">
             <input type="checkbox" checked={includeDrafts} disabled={busy} onChange={event => setIncludeDrafts(event.target.checked)} />
             Include {draftCount} local {draftCount === 1 ? 'draft' : 'drafts'}
-          </label> : <p className="text-muted-foreground">{writing ? 'There are no local drafts.' : 'Local drafts are unavailable for export.'}</p>}
+          </label> : <p className="text-muted-foreground">Local drafts are unavailable for export.</p>}
           {includeDrafts && draftCount > 0 && <p className="text-xs text-muted-foreground">The backup keeps drafts separate from the saved files.</p>}
           {readHistory && <fieldset disabled={busy} className="space-y-1 border-t pt-2">
             <legend className="text-xs font-semibold">Optional project history</legend>
@@ -137,26 +156,18 @@ export function ProjectBackupDialog({ canvas, project, writing, recovery = false
         </div>
         {pending && (
           <div className="space-y-1 text-sm">
-            <p>Restore <strong>{pending.project.metadata.projectName}</strong>? {onImportCopy
+            <BackupContents backup={pending} />
+            <p>{onImportCopy
               ? 'Import into the project list or explicitly replace the current project.'
               : 'This replaces the current Canvas, saved files, local drafts, and the included history categories.'}</p>
-            <p>{importDraftCount > 0 ? `The backup contains ${importDraftCount} local ${importDraftCount === 1 ? 'draft' : 'drafts'}.` : 'The backup contains no local drafts.'}</p>
-            {pending.history && <ul className="list-inside list-disc">
-              {pending.history.publication && <li>{pending.history.publication.submissions.length} submission versions, {pending.history.publication.rounds.length} revision rounds</li>}
-              {pending.history.snapshots && <li>{pending.history.snapshots.length} project snapshots</li>}
-              {pending.history.ai && <li>{pending.history.ai.history?.conversations.length ?? 0} AI conversations with task history</li>}
-              {!!Object.keys(pending.history.ai?.builds ?? {}).length && <li>{Object.keys(pending.history.ai?.builds ?? {}).length} verified manuscript PDFs</li>}
-            </ul>}
-            {pending.conflicts.length > 0 && <p className="text-amber-800">
-              {pending.conflicts.length} {pending.conflicts.length === 1 ? 'draft differs' : 'drafts differ'} from their saved baseline. Compare in Writing after restoring.
-            </p>}
           </div>
         )}
         {busy && <p role="status">Processing project backup…</p>}
         {message && <p role="status">{message}</p>}
         {error && <p role="alert" className="text-destructive">{error}</p>}
         <DialogFooter>
-          <Button variant="outline" onClick={downloadBackup} disabled={busy}>Download Backup</Button>
+          {recovery && <Button variant="outline" onClick={() => void downloadBackup(true)} disabled={busy}>Download working copy only</Button>}
+          <Button variant="outline" onClick={() => void downloadBackup()} disabled={busy}>Download Backup</Button>
           {pending ? (
             <>
               <Button variant="outline" onClick={() => setPending(undefined)} disabled={busy}>Cancel Restore</Button>
