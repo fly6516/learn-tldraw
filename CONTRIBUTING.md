@@ -59,6 +59,7 @@ local copy of the same fixture, set `RESEARCH_LIVE_TEST_ZIP` to the ZIP path or
 the model in a source request. **Read exclusions** accepts project-relative paths and
 folder paths ending in `/`. With exclusions enabled, previous chat text and compiler
 reports stay local. A task planned under different exclusions needs a new plan.
+Restoring a project snapshot keeps the current read exclusions.
 `tests/e2e/ai-read-scope.spec.ts` checks the actual request body and the saved receipt.
 
 `tests/e2e/submission-evidence.spec.ts` checks saved manuscript claims against the selected

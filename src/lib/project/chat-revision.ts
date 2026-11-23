@@ -26,7 +26,7 @@ async function revisionArchives(database: IDBDatabase, key: WritingKey, roundNam
   return { round, original, revised, project: second, files: await compareRevisionFiles(first, second) }
 }
 
-export async function prepareChatReply(database: IDBDatabase, key: WritingKey, request: ReplyChatRequest, excluded = (_path: string) => false) {
+export async function prepareChatReply(database: IDBDatabase, key: WritingKey, request: ReplyChatRequest, excluded?: (path: string) => boolean) {
   const { round, original, revised, project, files } = await revisionArchives(database, key, request.round, request.revised)
   const comment = round.comments[request.comment - 1]
   if (!comment) throw new Error('No reviewer comment has that number in this round.')
@@ -43,9 +43,9 @@ export async function prepareChatReply(database: IDBDatabase, key: WritingKey, r
     }
   }
   const intendedPaths = new Set([...(comment.response?.paths ?? []), ...(target ? [target] : [])])
-  if ([...intendedPaths].some(excluded)) throw new Error('The selected reviewer comment uses a project path excluded from AI reading.')
+  if (excluded && [...intendedPaths].some(excluded)) throw new Error('The selected reviewer comment uses a project path excluded from AI reading.')
   const paths = files.filter(file => file.status !== 'Unchanged' && /\.(tex|bib|cls|sty)$/i.test(file.path)
-    && !excluded(file.path) && (!intendedPaths.size || intendedPaths.has(file.path))).map(file => file.path)
+    && !excluded?.(file.path) && (!intendedPaths.size || intendedPaths.has(file.path))).map(file => file.path)
   if (paths.length > 6) throw new Error('The comment matches more than six changed source files. Narrow the evidence in Revision rounds.')
   const changes = await archiveReplyEvidence(files, paths)
   const authorNote = request.authorNote ?? (comment.response?.kind === 'retained' ? comment.response.text.slice(0, 1500) : '')

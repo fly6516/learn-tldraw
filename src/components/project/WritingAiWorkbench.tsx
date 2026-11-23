@@ -508,6 +508,10 @@ function Conversation(props: WorkbenchProps & {
 
   async function startReply(request: ReplyChatRequest, text: string) {
     if (streaming || props.disabled || !props.active || replyInProgress.current) return
+    if (readScope.restricted && !props.sourceMoves) {
+      setError('The source move history is unavailable. Reopen the project before sharing archived excerpts.')
+      return
+    }
     const controller = new AbortController()
     if (localOperation.current) return
     localOperation.current = controller
@@ -664,6 +668,10 @@ function Conversation(props: WorkbenchProps & {
     if (reviewRequest) {
       void runLocalCommand('review', '')
       return
+    }
+    if (readScope.restricted && !props.sourceMoves) {
+      setError('The source move history is unavailable. Reopen the project before sharing source context.')
+      return false
     }
     if (readScope.restricted && (repair || workflow === 'diagnostics')) {
       setError('Compiler reports are withheld by the project read exclusions. Switch to Auto to discuss a diagnostic you choose to share.')

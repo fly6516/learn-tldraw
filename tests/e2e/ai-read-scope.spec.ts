@@ -46,6 +46,10 @@ test('previews actual model context and leaves excluded bytes out of requests af
     expect(body.scope).not.toContain('sections/results.tex')
     expect(body.attachments.csv).toHaveLength(0)
     expect(body.attachments.entries.some((item: { path: string }) => item.path.startsWith('data/'))).toBe(false)
+    const mismatch = await page.request.post('/api/latex/chat', {
+      headers: { origin: new URL(page.url()).origin }, data: { ...body, expectedRecipient: 'Different model' },
+    })
+    expect(mismatch.status()).toBe(409)
     const response = page.getByRole('article', { name: 'Assistant' }).last()
     await expect(response).toContainText('Fixture response')
     await response.getByText('Model context sent', { exact: true }).click()
@@ -59,4 +63,30 @@ test('previews actual model context and leaves excluded bytes out of requests af
   await expect(page.getByRole('button', { name: 'Read exclusions · 2' })).toBeVisible()
   await expect(page.getByRole('article', { name: 'Assistant' }).last().getByText('Model context sent', { exact: true })).toBeVisible()
   await check()
+})
+
+test('keeps current AI read exclusions when restoring an older project snapshot', async ({ page }) => {
+  await page.goto('/research')
+  await page.getByRole('button', { name: 'Try a writing sample' }).click()
+  const snapshots = page.getByRole('dialog', { name: 'Project snapshots', exact: false })
+  const showSnapshots = async () => {
+    await page.getByRole('button', { name: 'Project menu' }).click()
+    await page.getByRole('menuitem', { name: 'Project Snapshots' }).click()
+  }
+  await expect(page.getByRole('heading', { name: 'Practice Paper' })).toBeVisible()
+  await showSnapshots()
+  await snapshots.getByRole('textbox', { name: 'Snapshot name' }).fill('Before exclusions')
+  await snapshots.getByRole('button', { name: 'Create snapshot' }).click()
+  await expect(snapshots.getByRole('button', { name: 'Review restore Before exclusions' })).toBeVisible()
+  await snapshots.getByRole('button', { name: 'Close', exact: true }).click()
+  await page.getByRole('button', { name: 'Read exclusions', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Excluded project paths' }).fill('data/')
+  await page.getByRole('button', { name: 'Save read exclusions' }).click()
+  await expect(page.getByRole('button', { name: 'Read exclusions · 1' })).toBeVisible()
+  await showSnapshots()
+  await snapshots.getByRole('button', { name: 'Review restore Before exclusions' }).click()
+  await snapshots.getByRole('button', { name: 'Restore snapshot' }).click()
+  await expect(snapshots.getByText(/Project restored/)).toBeVisible()
+  await snapshots.getByRole('button', { name: 'Close', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Read exclusions · 1' })).toBeVisible()
 })

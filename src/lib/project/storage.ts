@@ -241,8 +241,8 @@ export async function restoreProjectSnapshot(database: IDBDatabase, key: Writing
         storeSnapshot(store, key, list.result ?? [], {
             ...checkpoint, project: { ...previous, canvas: previous.canvas ?? checkpoint.project.canvas },
         })
-        restored = project
-        store.put(project, key[0])
+        restored = { ...project, metadata: { ...project.metadata, aiReadExclusions: previous.metadata.aiReadExclusions } }
+        store.put(restored, key[0])
     }
     await complete(transaction)
     if (!restored) throw new Error(error)
