@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 import { readFile } from 'node:fs/promises'
 import { morningWalkZip } from '../fixtures/morning-walk'
+import { approveContext, approveContextIfRequested } from '../fixtures/model-context'
 
 const zipPath = process.env.RESEARCH_LIVE_TEST_ZIP
 const seededPath = process.env.RESEARCH_LIVE_TEST_PATH
@@ -23,6 +24,7 @@ async function openAi(page: Page) {
 async function send(page: Page, text: string) {
   await page.getByRole('textbox', { name: 'Message Writing AI' }).fill(text)
   await page.getByRole('button', { name: 'Send', exact: true }).click()
+  if (!text.startsWith('/') && !/^Review the manuscript task\./i.test(text)) await approveContextIfRequested(page)
 }
 
 async function submitVersion(page: Page, version: string) {
@@ -107,6 +109,7 @@ test('real model moves Morning Walk Study from writing through submission and re
     await send(page, `Draft a reviewer reply to comment ${index + 1} in Route review using archived Submission v2.`)
     await expect(requests).toHaveCount(index + 1, { timeout: 65_000 })
     await requests.last().click()
+    await approveContext(page)
     const reply = page.getByRole('region', { name: 'Reviewer reply proposal' }).nth(index)
     await expect(reply.getByText(`Archived evidence · ${source}`)).toBeVisible({ timeout: 65_000 })
     await reply.getByRole('button', { name: /Confirm .*save reply/ }).click()
@@ -141,6 +144,12 @@ test('real model reads Morning Walk Study evidence and applies a multi-batch man
   const task = page.getByRole('region', { name: 'Manuscript task' })
   await expect(task.getByRole('status')).toContainText('0 of 4 files applied', { timeout: 65_000 })
   await task.getByRole('button', { name: 'Continue task' }).click()
+  const taskStatus = page.locator('[aria-label="Manuscript task"] [role="status"]')
+  for (let applied = 0; applied < files.length;) {
+    await approveContext(page)
+    await expect.poll(async () => Number((await taskStatus.textContent())?.[0]), { timeout: 65_000 }).toBeGreaterThan(applied)
+    applied = Number((await taskStatus.textContent())?.[0])
+  }
   await expect(task.getByRole('status')).toContainText('4 of 4 files applied', { timeout: 120_000 })
   await expect(task.getByText(/^Batches · [2-4]$/)).toBeVisible()
   await task.getByRole('button', { name: 'Undo latest batch' }).click()
@@ -153,6 +162,7 @@ test('real model reads Morning Walk Study evidence and applies a multi-batch man
   await task.getByRole('button', { name: 'Continue task' }).click()
   const proposals = page.getByRole('region', { name: 'Source change proposal' })
   for (let applied = retained; applied < files.length;) {
+    await approveContext(page)
     await proposals.last().getByRole('button', { name: 'Apply to drafts' }).click({ timeout: 65_000 })
     await expect.poll(async () => Number((await task.getByRole('status').innerText())[0])).toBeGreaterThan(applied)
     applied = Number((await task.getByRole('status').innerText())[0])
@@ -165,6 +175,7 @@ test('real model reads Morning Walk Study evidence and applies a multi-batch man
   await expect(review.getByRole('status')).toContainText(/Manuscript verification (passed|failed)\./)
   if (await repair.isVisible()) {
     await repair.click()
+    await approveContext(page)
     await proposals.last().getByRole('button', { name: 'Apply to drafts' }).click({ timeout: 65_000 })
     await send(page, 'Review the manuscript task.')
     await review.getByRole('button', { name: 'Verify manuscript' }).click()
@@ -201,6 +212,7 @@ test('real model carries one Morning Walk Study request from CSV evidence to an 
   // The final batch opens the modal, which hides the task card from the accessibility tree.
   const appliedFiles = async () => Number((await page.locator('section[aria-label="Manuscript task"] [role="status"]').textContent())?.[0])
   for (let applied = 0; applied < 2;) {
+    await approveContext(page)
     await proposals.last().getByRole('button', { name: 'Apply to drafts' }).click({ timeout: 65_000 })
     await expect.poll(appliedFiles).toBeGreaterThan(applied)
     applied = await appliedFiles()

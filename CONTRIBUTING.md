@@ -62,6 +62,12 @@ reports stay local. A task planned under different exclusions needs a new plan.
 Restoring a project snapshot keeps the current read exclusions.
 `tests/e2e/ai-read-scope.spec.ts` checks the actual request body and the saved receipt.
 
+Writing requests, manuscript batches, and reviewer replies share the same context review.
+The conversation can reuse an approval for the same model, file scope, and diagnostics.
+**Review context** asks for confirmation again on demand. Switching conversations or leaving
+Writing ends this approval. The **Model context sent** receipt records which approval was used.
+`tests/e2e/model-context-approval.spec.ts` exercises this gate using the local test model.
+
 `tests/e2e/submission-evidence.spec.ts` checks saved manuscript claims against the selected
 manifest and the final ZIP. It excludes a supporting CSV, checks source navigation, and
 confirms that the project archive retains the author's exception after a reload.

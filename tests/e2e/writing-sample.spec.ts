@@ -2,6 +2,7 @@ import { expect, test, type Page } from '@playwright/test'
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { writingExerciseClaim, writingExerciseCommand } from '../../src/lib/project/writing-sample'
+import { approveContext } from '../fixtures/model-context'
 
 async function finishSample(page: Page, mode: 'Use example edits' | 'Use configured model') {
   await page.goto('/research')
@@ -10,6 +11,7 @@ async function finishSample(page: Page, mode: 'Use example edits' | 'Use configu
   const guide = page.getByRole('region', { name: 'Writing sample' })
   const modelRequest = page.waitForRequest(request => request.url().endsWith('/api/latex/chat'))
   await guide.getByRole('button', { name: mode }).click()
+  if (mode === 'Use configured model') await approveContext(page)
   expect(Boolean((await modelRequest).postDataJSON().writingExample)).toBe(mode === 'Use example edits')
   const task = page.getByRole('region', { name: 'Manuscript task' })
   await expect(task.getByRole('status')).toContainText('0 of 2 files applied', { timeout: 65_000 })
@@ -25,6 +27,7 @@ async function finishSample(page: Page, mode: 'Use example edits' | 'Use configu
   const appliedFiles = async () => Number((await progress.textContent())?.[0])
   const proposals = page.getByRole('region', { name: 'Source change proposal' })
   for (let applied = 0; applied < 2;) {
+    if (mode === 'Use configured model') await approveContext(page)
     await proposals.last().getByRole('button', { name: 'Apply to drafts' }).click({ timeout: 65_000 })
     await expect.poll(appliedFiles).toBeGreaterThan(applied)
     applied = await appliedFiles()

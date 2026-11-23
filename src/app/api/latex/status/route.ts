@@ -43,8 +43,10 @@ export async function POST(request: Request) {
   if (!isLocalAiRequest(request)) return Response.json({ error: 'Setup checks are available from the local workbench only.' }, { status: 403 })
   if (new URL(request.url).searchParams.get('check') === 'model') {
     const model = aiProviderStatus()
-    const recipient = process.env.RESEARCH_TEST_MODE === '1' ? 'Local test model' : model ? `${model.provider} · ${model.model}` : null
-    return Response.json({ recipient: recipient?.slice(0, 300) ?? null }, { headers: { 'Cache-Control': 'no-store' } })
+    const simulated = process.env.RESEARCH_TEST_MODE === '1'
+    const recipient = simulated ? 'Local test model' : model ? `${model.provider} · ${model.model}` : null
+    return Response.json({ recipient: recipient?.slice(0, 300) ?? null, localOnly: simulated },
+      { headers: { 'Cache-Control': 'no-store' } })
   }
   pending ??= checkCompiler().finally(() => { pending = undefined })
   const status: WorkbenchStatus = { compiler: await pending, cachedOnly: process.env.TECTONIC_ONLY_CACHED === '1', model: aiProviderStatus() ?? null }

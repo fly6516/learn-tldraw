@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { Textarea } from '@/components/ui/textarea'
@@ -14,6 +14,8 @@ export function AiContextDetails({ receipt, recipient, historyCount }: {
 }) {
   return <div className="space-y-2 break-words text-xs">
     <p><strong>Model:</strong> {recipient ?? 'Awaiting model information'}</p>
+    {receipt.confirmation && <p>{({ approved: 'Context confirmed for this request.', reused: 'Existing context approval reused.',
+      local: 'Processed by the local example or test model.' })[receipt.confirmation]}</p>}
     <p>Includes the current prompt{receipt.taskNotes && ', the current manuscript task notes'}{receipt.reviewerComment && ', the selected reviewer comment and author note'}.</p>
     <p>{historyCount !== undefined ? `${historyCount} earlier chat messages sent.`
       : receipt.restricted ? 'Earlier chat messages withheld.' : 'Up to 23 earlier messages may be included.'} {receipt.diagnostics ? 'Compiler diagnostics or logs included.' : 'No compiler diagnostics included.'}</p>
@@ -25,24 +27,17 @@ export function AiContextDetails({ receipt, recipient, historyCount }: {
   </div>
 }
 
-export function AiContextPreview({ receipt, onSend, onClose }: { receipt: AiContextReceipt; onSend: (recipient: string) => void; onClose: () => void }) {
-  const [recipient, setRecipient] = useState<string>()
-  useEffect(() => {
-    const controller = new AbortController()
-    void fetch('/api/latex/status?check=model', { method: 'POST', signal: controller.signal })
-      .then(async response => { if (!response.ok) throw new Error(); setRecipient((await response.json()).recipient ?? 'No model configured') })
-      .catch(() => { if (!controller.signal.aborted) setRecipient('Model status unavailable') })
-    return () => controller.abort()
-  }, [])
+export function AiContextPreview({ receipt, recipient, purpose, onSend, onClose }: {
+  receipt: AiContextReceipt; recipient: string; purpose: string; onSend: () => void; onClose: () => void
+}) {
   return <Dialog open onOpenChange={open => { if (!open) onClose() }}>
     <DialogContent className="max-h-[90dvh] overflow-auto">
       <DialogTitle>Review model context</DialogTitle>
-      <DialogDescription>These files and excerpts are available to tools during this request. Editing permissions are set separately.</DialogDescription>
+      <DialogDescription className="break-words">{purpose}. These files and excerpts are available to tools during this request. Editing permissions are set separately.</DialogDescription>
       <AiContextDetails receipt={receipt} recipient={recipient} />
       <div className="flex justify-end gap-2">
         <Button variant="outline" onClick={onClose}>Cancel</Button>
-        <Button disabled={!recipient || recipient === 'No model configured' || recipient === 'Model status unavailable'}
-          onClick={() => { if (recipient) onSend(recipient) }}>Send reviewed request</Button>
+        <Button onClick={onSend}>Send reviewed request</Button>
       </div>
     </DialogContent>
   </Dialog>

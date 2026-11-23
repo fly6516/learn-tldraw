@@ -9,6 +9,7 @@ export const aiContextReceiptSchema = z.object({
   files: z.array(z.object({ path, kind: z.enum(['saved', 'draft', 'csv', 'csv_draft', 'attachment', 'archive']),
     partial: z.boolean().optional() })).max(400),
   diagnostics: z.boolean(), taskNotes: z.boolean(), reviewerComment: z.boolean().optional(), restricted: z.boolean(),
+  confirmation: z.enum(['approved', 'reused', 'local']).optional(),
 })
 export type AiContextReceipt = z.infer<typeof aiContextReceiptSchema>
 

@@ -34,6 +34,8 @@ import { writingExerciseCommand, writingExerciseData, writingExercisePrompt, wri
 import { writingClaimsSchema, type ClaimReview } from '@/lib/project/writing-claims'
 import { aiReadScope, restrictAiProject, type AiContextReceipt } from '@/lib/project/ai-read-scope'
 import { AiContextDetails, AiContextPreview, AiReadExclusionsDialog } from './AiContextDisclosure'
+import { aiContextApprovalKey } from '@/lib/project/ai-context-approval'
+import { useAiContextApproval } from './useAiContextApproval'
 
 const Diff = dynamic(() => import('./MonacoSourceEditor').then(module => module.WritingDraftComparison), { ssr: false })
 type DraftAccess = 'all' | string[]
@@ -260,7 +262,7 @@ function Conversation(props: WorkbenchProps & {
   const [mutating, setMutating] = useState(false)
   const [stopped, setStopped] = useState(false)
   const [exclusionsOpen, setExclusionsOpen] = useState(false)
-  const [contextPreview, setContextPreview] = useState<{ receipt: AiContextReceipt; send: (recipient?: string) => void }>()
+  const contextApproval = useAiContextApproval(props.active, setError)
   const [manuscript, setManuscript] = useState(props.conversation.manuscript)
   const manuscriptRef = useRef(props.conversation.manuscript)
   const [reviewManuscript, setReviewManuscript] = useState(false)
@@ -507,7 +509,7 @@ function Conversation(props: WorkbenchProps & {
   }
 
   async function startReply(request: ReplyChatRequest, text: string) {
-    if (streaming || props.disabled || !props.active || replyInProgress.current) return
+    if (streaming || props.disabled || !props.active || replyInProgress.current || contextApproval.pending()) return
     if (readScope.restricted && !props.sourceMoves) {
       setError('The source move history is unavailable. Reopen the project before sharing archived excerpts.')
       return
@@ -522,17 +524,27 @@ function Conversation(props: WorkbenchProps & {
       const { reply, revision } = await prepareChatReply(props.storage, props.projectKey, request, readScope.denies)
       if (controller.signal.aborted) return
       const id = crypto.randomUUID()
-      runs.current = { ...runs.current, [id]: { sources: {}, reply, context: {
+      const receipt: AiContextReceipt = {
         files: revision.changes.map(change => ({ path: change.path, kind: 'archive', partial: true })),
         diagnostics: false, taskNotes: false, reviewerComment: true, restricted: true,
-      } } }
-      setRunSnapshots(runs.current)
-      pending.current = null
-      clearError()
-      setStopped(false)
-      setPrompt('')
-      atBottom.current = true
-      await sendMessage({ text, metadata: { run: id } }, { body: { run: id, workflow: 'revision', scope: [], revision, latestMessageOnly: true } })
+      }
+      const exclusions = props.project.metadata.aiReadExclusions
+      const purpose = 'Draft a reviewer reply from the selected archives'
+      contextApproval.start({ receipt, purpose, fingerprint: aiContextApprovalKey(receipt, purpose, null, revision),
+        valid: () => latest.current.active && !latest.current.disabled && exclusions === latest.current.project.metadata.aiReadExclusions,
+        send: (expectedRecipient, confirmation) => {
+          runs.current = { ...runs.current, [id]: { sources: {}, reply, context: { ...receipt, confirmation } } }
+          setRunSnapshots(runs.current)
+          pending.current = null
+          clearError()
+          setStopped(false)
+          setPrompt('')
+          atBottom.current = true
+          void sendMessage({ text, metadata: { run: id } }, {
+            body: { run: id, workflow: 'revision', scope: [], revision, latestMessageOnly: true, expectedRecipient },
+          })
+        },
+      })
     } catch (cause) {
       if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Could not read the archived reply evidence.')
     } finally {
@@ -647,7 +659,7 @@ function Conversation(props: WorkbenchProps & {
     reverify?: boolean; manuscriptTask?: boolean },
     approvedScope?: string[], taskMode?: 'plan' | 'batch' | 'evidence', evidence?: ReviewedClaim, example = false, preview = false) {
     const text = value.trim()
-    if (!text || streaming || props.disabled || mutating || !props.active) return false
+    if (!text || streaming || props.disabled || mutating || !props.active || contextApproval.pending()) return false
     setError('')
     atBottom.current = true
     const command = /^\/([a-z]+)(?:\s+([\s\S]*))?$/i.exec(text)
@@ -776,16 +788,11 @@ function Conversation(props: WorkbenchProps & {
       diagnostics: Boolean(source.compiler.diagnostics.length || source.compiler.log || feedback),
       taskNotes: Boolean(taskContext && taskContext.mode !== 'plan'), restricted: readScope.restricted,
     }
-    const send = (expectedRecipient?: string) => {
-      setContextPreview(undefined)
-      if (latest.current.working !== props.working || latest.current.disabled || !latest.current.active) {
-        setError('The project changed. Review the current model context before sending again.')
-        return
-      }
+    const send = (expectedRecipient: string, confirmation: NonNullable<AiContextReceipt['confirmation']>) => {
       pending.current = { id, grant: repair?.manuscriptTask ? undefined : grant.current?.id, manuscriptId, claimId: evidence?.id,
         example: writingExample || undefined, readRules: rules }
       runs.current = { ...runs.current, [id]: { main: props.project.metadata.mainFile, pathRevision: props.sourceMoves?.length, sources, revisionOf,
-        context: contextReceipt, manuscriptId, replacesBatch: repair && !repair.manuscriptTask && manuscriptId && !props.checkpoints[repair.id] ? repair.id : undefined,
+        context: { ...contextReceipt, confirmation }, manuscriptId, replacesBatch: repair && !repair.manuscriptTask && manuscriptId && !props.checkpoints[repair.id] ? repair.id : undefined,
         verifyRepair: repair?.reverify } }
       setRunSnapshots(runs.current)
       setPrompt('')
@@ -796,14 +803,23 @@ function Conversation(props: WorkbenchProps & {
           latestMessageOnly: readScope.restricted || undefined, expectedRecipient },
       })
     }
-    if (preview) setContextPreview({ receipt: contextReceipt, send })
-    else send()
-    return true
+    const purpose = taskMode === 'batch' ? `Continue the manuscript batch · ${editPaths.join(', ')}` : taskMode === 'plan' ? 'Plan the manuscript task'
+      : taskMode === 'evidence' ? 'Verify the selected claim' : repair ? 'Repair the selected manuscript changes' : 'Send the writing request'
+    const diagnosticContext = [source.compiler, feedback, failedProposal]
+    const compilerKey = JSON.stringify(source.compiler)
+    return contextApproval.start({ receipt: contextReceipt, purpose,
+      fingerprint: aiContextApprovalKey(contextReceipt, purpose, diagnosticContext, [rules, taskMode === 'batch' ? editPaths : undefined]),
+      valid: () => latest.current.project.files === props.project.files && latest.current.drafts === props.drafts
+        && latest.current.main === props.main && latest.current.project.metadata.aiReadExclusions === rules
+        && !latest.current.disabled && latest.current.active && (readScope.restricted || JSON.stringify(latest.current.compiler) === compilerKey)
+        && (!resultId || readScope.restricted || latest.current.verifications[resultId] === props.verifications[resultId]),
+      send, cancel: () => { if (taskMode === 'batch') setRunningManuscript(false) },
+    }, { force: preview, example: writingExample })
   }
 
   const runNextBatch = useEffectEvent(() => {
     const task = manuscriptRef.current
-    if (!task || !props.active || props.disabled || streaming || mutating || pending.current) return
+    if (!task || !props.active || props.disabled || streaming || mutating || pending.current || contextApproval.pending()) return
     if (task.delivery && task.questions.length) { setRunningManuscript(false); return }
     const progress = manuscriptProgress(task, props.checkpoints, props.tasks)
     if (progress.pending) return
@@ -829,6 +845,7 @@ function Conversation(props: WorkbenchProps & {
 
   function pauseManuscript() {
     setRunningManuscript(false)
+    contextApproval.cancel()
     if (pending.current?.manuscriptId) { pending.current = null; void stop() }
     if (repairBuild) localOperation.current?.abort()
   }
@@ -1135,6 +1152,7 @@ function Conversation(props: WorkbenchProps & {
         </article>
       })}
       {streaming && <p role="status" className="text-xs text-slate-600">{status === 'submitted' ? 'Sending request…' : 'Assistant is responding…'}</p>}
+      {contextApproval.busy && !contextApproval.preview && <p role="status" className="text-xs text-slate-600">Checking the model context…</p>}
       {repairBuild && <p role="status" className="text-xs text-slate-600">Verifying the repaired proposal…</p>}
       {mutating && !streaming && localOperation.current && <Button size="sm" variant="ghost"
         onClick={() => localOperation.current?.abort()}>Cancel local operation</Button>}
@@ -1185,12 +1203,12 @@ function Conversation(props: WorkbenchProps & {
           setStopped(true)
           setRunningManuscript(false)
           void stop()
-        }}>Stop</Button> : <Button className="ml-auto" size="sm" type="submit" disabled={!prompt.trim() || props.disabled || mutating}>Send</Button>}
-        <Button size="sm" variant="ghost" type="button" disabled={!prompt.trim() || props.disabled || streaming || mutating}
+        }}>Stop</Button> : <Button className="ml-auto" size="sm" type="submit" disabled={!prompt.trim() || props.disabled || mutating || contextApproval.busy}>Send</Button>}
+        <Button size="sm" variant="ghost" type="button" disabled={!prompt.trim() || props.disabled || streaming || mutating || contextApproval.busy}
           onClick={() => submit(prompt, undefined, undefined, undefined, undefined, false, true)}>Review context</Button>
-        <Button size="sm" variant={readScope.restricted ? 'outline' : 'ghost'} type="button" disabled={props.disabled || streaming || mutating || runningManuscript}
+        <Button size="sm" variant={readScope.restricted ? 'outline' : 'ghost'} type="button" disabled={props.disabled || streaming || mutating || runningManuscript || contextApproval.busy}
           onClick={() => setExclusionsOpen(true)}>Read exclusions{readScope.restricted && ` · ${props.project.metadata.aiReadExclusions?.length}`}</Button>
-        {!manuscript && !streaming && <Button size="sm" variant="outline" type="button" disabled={!prompt.trim() || props.disabled || mutating}
+        {!manuscript && !streaming && <Button size="sm" variant="outline" type="button" disabled={!prompt.trim() || props.disabled || mutating || contextApproval.busy}
           onClick={() => submit(prompt, undefined, undefined, 'plan')}>Plan writing task</Button>}
       </div>
       {permission && <div className="flex items-center justify-between gap-2 rounded border border-indigo-200 px-2 text-xs">
@@ -1202,9 +1220,10 @@ function Conversation(props: WorkbenchProps & {
         }}>Revoke access</Button>
       </div>}
     </form>
-    {contextPreview && <AiContextPreview receipt={contextPreview.receipt} onSend={contextPreview.send} onClose={() => setContextPreview(undefined)} />}
+    {contextApproval.preview && <AiContextPreview receipt={contextApproval.preview.request.receipt} purpose={contextApproval.preview.request.purpose}
+      recipient={contextApproval.preview.recipient} onSend={contextApproval.confirm} onClose={contextApproval.cancel} />}
     {exclusionsOpen && <AiReadExclusionsDialog rules={props.project.metadata.aiReadExclusions ?? []} onClose={() => setExclusionsOpen(false)}
-      onSave={rules => { revokePermission(); props.onReadExclusions(rules); setExclusionsOpen(false) }} />}
+      onSave={rules => { revokePermission(); contextApproval.revoke(); props.onReadExclusions(rules); setExclusionsOpen(false) }} />}
     <Dialog open={Boolean(undoBatches)} onOpenChange={open => { if (!open && !mutating) setUndoBatches(undefined) }}>
       <DialogContent>
         <DialogTitle>Undo {undoBatches?.length === 1 ? 'this batch' : 'task batches'}?</DialogTitle>
