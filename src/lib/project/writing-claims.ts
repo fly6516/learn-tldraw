@@ -5,6 +5,7 @@ import { captureEvidenceQuote, locateEvidence, type SourceMove } from './writing
 import type { ProjectFileSystem } from './types'
 import { readCsvRange } from './ai-attachments'
 import { assessCsvCalculation, csvCalculationSchema, type CsvCalculation } from './csv-calculation'
+import { lineNumber } from './latex-source'
 
 const path = z.string().min(1).max(500)
 const location = z.object({ path, line: z.number().int().positive() })
@@ -34,6 +35,18 @@ export type WritingClaims = z.infer<typeof writingClaimsSchema>
 export type ClaimReference = z.infer<typeof evidence>
 export type ClaimReview = z.infer<typeof claimReviewSchema>
 
+export function claimSourceLine(claim: Pick<WritingClaims[number], 'path' | 'kind' | 'quote'>, project: ProjectFileSystem) {
+  const file = project.files.get(claim.path)
+  const source = file && 'content' in file ? file.content : undefined
+  if (!source) return
+  if (claim.kind === 'citation') {
+    const matches = findCitations(claim.path, source).filter(item => item.key === claim.quote)
+    return matches.length === 1 ? matches[0].line : undefined
+  }
+  const start = source.indexOf(claim.quote)
+  return start >= 0 && start === source.lastIndexOf(claim.quote) ? lineNumber(source, start) : undefined
+}
+
 const numbers = (text: string) => [...text.matchAll(/(?:^|[^\p{L}\p{N}_])([+-]?\d+(?:[.,]\d+)*(?:\\?%)?)(?![\p{L}\p{N}_])/gu)].map(match => match[1])
 const observation = /\b(?:measured|observed|increased|decreased|outperformed|statistically significant|significantly|correlat\w*|associated with)\b|显著|实测|观测到|相关性|提高了|下降了/i
 
@@ -51,7 +64,7 @@ export function claimEvidenceFor(quote: string, references: { path: string; line
 }
 
 export function assessClaim(claim: WritingClaims[number], project: ProjectFileSystem, moves: readonly SourceMove[],
-  revision: number | undefined, review?: ClaimReview) {
+  revision: number | undefined, review?: ClaimReview, reviewedPath = claim.path) {
   const file = project.files.get(claim.path)
   const source = file && 'content' in file ? file.content : undefined
   const present = Boolean(source && (claim.kind === 'citation'
@@ -73,7 +86,7 @@ export function assessClaim(claim: WritingClaims[number], project: ProjectFileSy
     return { location: actual === reference.text ? location : undefined, text: actual }
   })
   const calculated = claim.calculations?.map(item => assessCsvCalculation(item, project, moves, revision)) ?? []
-  const fingerprint = JSON.stringify([claim.path, claim.quote, present, refs.map(item => item.text),
+  const fingerprint = JSON.stringify([reviewedPath, claim.quote, present, refs.map(item => item.text),
     ...(calculated.length ? [calculated.map(item => item.inputs.map(input => input.value ?? null))] : [])])
   const confirmed = present && review?.decision === 'confirmed' && review.fingerprint === fingerprint
   const excluded = !present && review?.decision === 'excluded'

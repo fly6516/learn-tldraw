@@ -212,6 +212,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const [panel, setPanel] = useState<'problems' | 'references' | 'cross-references' | 'review' | null>(null)
   const [aiOpen, setAiOpen] = useState(Boolean(project.metadata.writingSample))
   const [returnToAi, setReturnToAi] = useState(false)
+  const [resumeManuscriptReview, setResumeManuscriptReview] = useState<(() => void)>()
   const evidenceTrigger = useRef<HTMLElement | null>(null)
   const [sourceMoves, setSourceMoves] = useState<SourceMove[]>()
   const writingKey = journal.key
@@ -516,6 +517,13 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       setReturnToAi(true)
       setAiOpen(false)
     }
+    openFile(path, line, undefined, true)
+  }
+
+  function locateReviewSource(path: string, line: number, onReturn: () => void) {
+    setReturnToAi(false)
+    setResumeManuscriptReview(() => onReturn)
+    if (aiLayout === 'floating') setAiOpen(false)
     openFile(path, line, undefined, true)
   }
 
@@ -961,6 +969,13 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       {returnToAi && !aiOpen && <div className="flex shrink-0 items-center border-b bg-white px-2 py-1">
         <Button type="button" size="sm" variant="outline" onClick={resumeAi}>Back to Writing AI</Button>
       </div>}
+      {resumeManuscriptReview && <div className="flex shrink-0 items-center border-b bg-white px-2 py-1">
+        <Button type="button" size="sm" variant="outline" onClick={() => {
+          setResumeManuscriptReview(undefined)
+          setAiOpen(true)
+          resumeManuscriptReview()
+        }}>Back to manuscript review</Button>
+      </div>}
       <div className="flex shrink-0 items-center gap-2 border-b bg-white px-2 py-1.5 lg:hidden">
         <Button ref={fileToggle} size="sm" variant="outline" aria-expanded={mobileFiles} aria-controls="writing-files"
           onClick={() => { if (!aiDocked && !wideTools) setAiOpen(false); setMobileFiles(open => !open) }}><PanelLeft /> Files</Button>
@@ -1083,6 +1098,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
             project={project} working={workingProject} saved={savedProject} drafts={drafts} selected={selected} main={main} active={active} sourceMoves={sourceMoves}
             disabled={locked || Boolean(conflicts.length)} compiler={aiCompiler} selection={aiSelection} onRevision={() => setRevision({})}
             onAction={applyChatAction} onUndoBatches={undoManuscriptBatches} onSaveManuscript={saveManuscript} onLocate={locateAiEvidence}
+            onLocateReview={locateReviewSource} onOpenReview={() => setResumeManuscriptReview(undefined)}
             onCompile={signal => compile(undefined, signal)} onBuildSubmission={(selection, signal) => compile(selection, signal)}
             onExternalSubmission={(include, excluded) => {
               resetSubmissionBuild()

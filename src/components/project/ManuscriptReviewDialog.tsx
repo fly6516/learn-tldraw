@@ -14,17 +14,20 @@ import { externalManuscriptVerification, validateManuscript, type ChatVerificati
 import { sameDraft, type WritingDrafts, type WritingKey } from '@/lib/project/writing-drafts'
 import type { ManuscriptTask } from '@/lib/project/manuscript-task'
 import type { SourceMove } from '@/lib/project/writing-ai-evidence'
-import { assessClaim } from '@/lib/project/writing-claims'
+import { assessClaim, claimSourceLine } from '@/lib/project/writing-claims'
 import { ClaimEvidence, type ReviewedClaim } from './ClaimEvidence'
 import { ChatExternalBuild } from './ChatExternalBuild'
 
 const Diff = dynamic(() => import('./MonacoSourceEditor').then(module => module.WritingDraftComparison), { ssr: false })
 const text = (source: ChatSource) => source.draft?.text ?? source.saved
+const compilerItem = (issue: ChatVerification['diagnostics'][number], index: number) =>
+  `compile:${issue.path}:${issue.line}:${index}:${issue.message.slice(0, 100)}`
 
 export function ManuscriptReviewDialog(props: {
   storage: IDBDatabase; projectKey: WritingKey; runs: string[]; project: ProjectFileSystem; working: ProjectFileSystem; drafts: WritingDrafts
   baseline?: string; report?: ChatVerification; disabled: boolean; generatedEntry: boolean
   autoVerify?: boolean; taskBatches: ManuscriptTask['batches']; sourceMoves: readonly SourceMove[]; claimReviews: ManuscriptTask['claimReviews']
+  open: boolean; cursor?: ManuscriptTask['reviewCursor']; onCursor: (value: NonNullable<ManuscriptTask['reviewCursor']>) => void
   onVerify: (report: ChatVerification, build?: ManuscriptBuild) => Promise<void>; onSave: (report: ChatVerification) => Promise<void>
   onLocate: (path: string, line: number) => void; onRepair: (paths: string[], report: ChatVerification) => void; onClose: () => void
   onClaimDecision: (claim: ReviewedClaim, decision: 'confirmed' | 'requested' | 'excluded') => Promise<void>
@@ -33,11 +36,11 @@ export function ManuscriptReviewDialog(props: {
   const [batches, setBatches] = useState<ChatCheckpoint[]>()
   const [choices, setChoices] = useState<string[]>()
   const [accepted, setAccepted] = useState<Record<string, ChatSource>>({})
-  const [selectedFile, setSelectedFile] = useState<string>()
   const [operation, setOperation] = useState<'verify' | 'save' | 'claim'>()
   const [error, setError] = useState('')
   const controller = useRef<AbortController | null>(null)
   const automaticAttempt = useRef(false)
+  const reviewBody = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     let mounted = true
@@ -76,7 +79,7 @@ export function ManuscriptReviewDialog(props: {
   const failed = current && report?.status === 'failed'
   const repairFiles = [...new Set(failed ? report.diagnostics.filter(issue => issue.severity === 'error'
     && issue.sourceLine && paths.includes(issue.path)).map(issue => issue.path) : [])].slice(0, 6)
-  const displayed = files.find(file => file.path === selectedFile) ?? files[0]
+  const displayed = files.find(file => file.path === props.cursor?.path) ?? files[0]
   const busy = props.disabled || Boolean(operation)
   const claims = useMemo(() => {
     const found = new Map<string, ReviewedClaim>()
@@ -94,7 +97,49 @@ export function ManuscriptReviewDialog(props: {
     }
     return [...found.values()]
   }, [props.claimReviews, props.sourceMoves, props.taskBatches, runs, working])
-  const needsClaimReview = props.autoVerify && claims.some(item => paths.includes(item.claim.path) && item.assessment.needsReview)
+  const needsClaimReview = claims.some(item => paths.includes(item.claim.path) && item.assessment.needsReview)
+  const queue = [
+    ...claims.filter(item => item.assessment.needsReview).map(({ id, claim, review, assessment }) => ({ id, path: claim.path,
+      category: review?.decision === 'confirmed' ? 'Evidence or wording changed' : 'Claim needs review', message: claim.quote,
+      line: assessment.present ? claimSourceLine(claim, working) : undefined, blocking: paths.includes(claim.path) })),
+    ...files.filter(file => file.conflict && file.hasChangesToSave && !acceptedPaths.includes(file.path)).map(file => ({
+      id: `draft:${file.path}`, path: file.path, category: 'Author draft conflict', message: 'Compare the current draft with the task version.',
+      line: undefined, blocking: false,
+    })),
+    ...(failed ? report.diagnostics.flatMap((issue, index) => issue.severity === 'error' ? [{
+      id: compilerItem(issue, index), path: issue.path, category: 'Compile error', message: issue.message, line: issue.sourceLine, blocking: true,
+    }] : []) : []),
+  ]
+  const currentIndex = queue.findIndex(item => item.id === props.cursor?.item)
+  const currentItem = queue[currentIndex]
+  const saveHint = !paths.length ? 'Select files to verify and save.'
+    : needsClaimReview ? 'Resolve the flagged claims in selected files before saving.'
+      : failed ? 'Fix the compiler errors and verify again.'
+        : !current || report?.status !== 'passed' ? 'Verify the selected files before saving.' : 'The selected files are ready to save.'
+
+  useEffect(() => {
+    const selected = props.cursor?.item
+    if (!props.open || !selected) return
+    const frame = requestAnimationFrame(() => {
+      const target = Array.from(reviewBody.current?.querySelectorAll<HTMLElement>('[data-review-claim]') ?? [])
+        .find(element => element.dataset.reviewClaim === selected) ?? Array.from(reviewBody.current?.querySelectorAll<HTMLElement>('[data-review-item]') ?? [])
+        .find(element => element.dataset.reviewItem === selected)
+      target?.focus({ preventScroll: true })
+      target?.scrollIntoView({ block: 'nearest' })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [batches, props.cursor?.item, props.open])
+
+  function locate(path: string, line: number, claimId?: string) {
+    const claim = claims.find(item => item.id === claimId)
+    if (claim) props.onCursor({ path: claim.claim.path, item: claim.id })
+    props.onLocate(path, line)
+  }
+
+  function selectItem(item: typeof queue[number]) {
+    const path = item.path && project.files.has(item.path) ? item.path : displayed?.path
+    if (path) props.onCursor({ path, item: item.id })
+  }
 
   async function decide(id: string, decision: 'confirmed' | 'requested' | 'excluded') {
     const claim = claims.find(item => item.id === id)
@@ -122,13 +167,13 @@ export function ManuscriptReviewDialog(props: {
   }
 
   const autoVerify = useEffectEvent(() => {
-    if (props.autoVerify && !automaticAttempt.current && batches && props.baseline && !busy && candidate
+    if (props.open && props.autoVerify && !automaticAttempt.current && batches && props.baseline && !busy && candidate
       && !requiresExternal && paths.length === files.filter(file => file.hasChangesToSave).length && !current) {
       automaticAttempt.current = true
       void verify()
     }
   })
-  useEffect(() => { autoVerify() }, [batches, busy, candidate, current, props.baseline, props.autoVerify])
+  useEffect(() => { autoVerify() }, [batches, busy, candidate, current, props.baseline, props.autoVerify, props.open])
 
   async function save() {
     if (busy || !current || report?.status !== 'passed' || needsClaimReview) return
@@ -139,11 +184,30 @@ export function ManuscriptReviewDialog(props: {
     finally { setOperation(undefined) }
   }
 
-  return <Dialog open onOpenChange={open => { if (!open && operation !== 'save') props.onClose() }}>
+  return <Dialog open={props.open} onOpenChange={open => { if (!open && operation !== 'save') props.onClose() }}>
     <DialogContent className="grid max-h-[90dvh] w-[calc(100%-1.5rem)] max-w-5xl grid-rows-[auto_auto_minmax(0,1fr)_auto] gap-3 p-4 sm:max-w-5xl sm:p-6">
       <DialogTitle>Review manuscript task</DialogTitle>
       <DialogDescription>Verify and save selected task files together. Unselected files use saved project source in the compile.</DialogDescription>
-      <div className="min-h-0 space-y-3 overflow-auto pr-1">
+      <div ref={reviewBody} className="min-h-0 space-y-3 overflow-auto pr-1">
+        {batches && <section aria-label="Manuscript review queue" className="space-y-2 rounded border bg-slate-50 p-2 text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="font-semibold">Review queue · {queue.length} pending</h3>
+          </div>
+          {queue.length > 0 && <ul className="max-h-36 space-y-1 overflow-auto" aria-label="Pending review items">
+            {queue.map(item => <li key={item.id} className="min-w-0">
+              <button type="button" data-review-item={item.id} aria-pressed={item.id === props.cursor?.item}
+                className="w-full break-words rounded px-1 py-0.5 text-left hover:bg-indigo-50 aria-pressed:bg-indigo-100"
+                onClick={() => selectItem(item)}>
+                <span className="font-medium">{item.category}</span> · {item.path || 'Compiler log'} · {item.message}
+                {item.blocking && <span className="font-medium text-amber-900"> · Blocks save</span>}
+              </button>
+            </li>)}
+          </ul>}
+          {currentItem?.line && <Button size="sm" variant="outline" onClick={() => locate(currentItem.path, currentItem.line!)}>
+            Open source for selected item
+          </Button>}
+          <p>{saveHint}</p>
+        </section>}
         {files.length > 0 && <div className="grid gap-3 md:grid-cols-[minmax(10rem,1fr)_minmax(0,2fr)]">
           <ul aria-label="Task files for review" className="max-h-48 min-w-0 space-y-1 overflow-auto md:max-h-80">
             {files.map(file => <li key={file.path} className="rounded border p-2">
@@ -152,7 +216,7 @@ export function ManuscriptReviewDialog(props: {
                   onCheckedChange={checked => setChoices(checked ? [...paths, file.path] : paths.filter(path => path !== file.path))} />
                 <button type="button" aria-pressed={displayed?.path === file.path}
                   className="min-w-0 break-all rounded text-left font-mono text-xs underline hover:text-indigo-700"
-                  onClick={() => setSelectedFile(file.path)}>{file.path}</button>
+                  onClick={() => props.onCursor({ path: file.path })}>{file.path}</button>
               </div>
               {file.conflict && <p className="text-xs text-amber-800">Author or project changes need review.</p>}
               {claims.some(item => item.claim.path === file.path && item.assessment.needsReview)
@@ -176,7 +240,7 @@ export function ManuscriptReviewDialog(props: {
                 originalLabel="Working source before task" modifiedLabel="Last task draft" />
             </details>
             <ClaimEvidence claims={claims.filter(item => item.claim.path === displayed.path)} project={working}
-              moves={props.sourceMoves} onLocate={props.onLocate} disabled={busy}
+              moves={props.sourceMoves} onLocate={locate} disabled={busy} selected={props.cursor?.item}
               onDecision={(id, decision) => void decide(id, decision)} />
             {displayed.conflict && <section aria-label="Author changes conflict" className="space-y-2 rounded border border-amber-300 p-2 text-xs">
               <p>Compare the last task version with the current version. Keep this file excluded or approve the current draft for this save.</p>
@@ -210,7 +274,10 @@ export function ManuscriptReviewDialog(props: {
           {report.diagnostics.length > 0 && <ul className="space-y-1">
             {report.diagnostics.map((issue, index) => <li key={index} className="break-all text-xs">
               {current && issue.sourceLine
-                ? <button type="button" className="text-left underline" onClick={() => props.onLocate(issue.path, issue.sourceLine!)}>{issue.path}:{issue.line}</button>
+                ? <button type="button" className="text-left underline" onClick={() => {
+                  props.onCursor({ path: issue.path, item: compilerItem(issue, index) })
+                  locate(issue.path, issue.sourceLine!)
+                }}>{issue.path}:{issue.line}</button>
                 : <span>{issue.path}:{issue.line}</span>}
               {' · '}{issue.severity} · {issue.message}
             </li>)}
@@ -220,10 +287,12 @@ export function ManuscriptReviewDialog(props: {
           {report.log && <details className="text-xs"><summary>Compiler log</summary><pre className="max-h-40 overflow-auto whitespace-pre-wrap">{report.log}</pre></details>}
         </section>}
         {error && <p role="alert" className="text-sm text-red-800">{error}</p>}
-        {needsClaimReview && <p className="text-xs text-amber-900">Resolve the flagged claims in selected files before saving.</p>}
       </div>
       <div className="flex flex-wrap items-center justify-end gap-2">
         <span className="mr-auto text-xs text-slate-600">{paths.length} files selected</span>
+        {queue.length > 0 && <Button size="sm" variant="ghost" onClick={() => selectItem(queue[(currentIndex + 1) % queue.length])}>
+          Next review item
+        </Button>}
         {!requiresExternal && <Button size="sm" variant="outline" disabled={busy || !candidate} onClick={() => void verify()}>
           {operation === 'verify' ? 'Verifying…' : 'Verify manuscript'}
         </Button>}

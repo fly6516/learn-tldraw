@@ -42,6 +42,8 @@ type WorkbenchProps = {
   storage: IDBDatabase; projectKey: WritingKey; project: ProjectFileSystem; working: ProjectFileSystem; saved: ProjectFileSystem
   drafts: WritingDrafts; sourceMoves?: SourceMove[]; selected: string; main?: string; active: boolean; disabled: boolean
   compiler: ChapterEditRequest['compiler']; onLocate: (path: string, line: number) => void
+  onLocateReview: (path: string, line: number, onReturn: () => void) => void
+  onOpenReview: () => void
   selection: () => { path: string; start: number; end: number } | undefined
   onAction: (run: string, action: ChatAction) => Promise<ChatCheckpoint['state']>
   onUndoBatches: (runs: readonly string[]) => Promise<string[]>
@@ -257,6 +259,7 @@ function Conversation(props: WorkbenchProps & {
   const [manuscript, setManuscript] = useState(props.conversation.manuscript)
   const manuscriptRef = useRef(props.conversation.manuscript)
   const [reviewManuscript, setReviewManuscript] = useState(false)
+  const [reviewInSource, setReviewInSource] = useState(false)
   const [undoSave, setUndoSave] = useState(false)
   const taskProgress = useMemo(() => manuscript && manuscriptProgress(manuscript, props.checkpoints, props.tasks),
     [manuscript, props.checkpoints, props.tasks])
@@ -314,7 +317,7 @@ function Conversation(props: WorkbenchProps & {
         if (evidence) {
           updateManuscript({ ...projectTask, claimReviews: { ...projectTask.claimReviews,
             [task.claimId]: { decision: 'requested', evidence, revision: run.pathRevision ?? 0 } } })
-          setReviewManuscript(true)
+          openReview()
         } else setError('No fresh evidence was linked. The claim still needs review.')
       }
       if (runId && projectTask && run?.manuscriptId === projectTask.id && task?.id === runId && !task.claimId) {
@@ -346,6 +349,12 @@ function Conversation(props: WorkbenchProps & {
     manuscriptRef.current = value
     setManuscript(value)
     latest.current.onManuscript(value)
+  }
+
+  function openReview() {
+    props.onOpenReview()
+    setReviewInSource(false)
+    setReviewManuscript(true)
   }
 
   async function reviewClaim(item: ReviewedClaim, decision: 'confirmed' | 'requested' | 'excluded') {
@@ -564,7 +573,7 @@ function Conversation(props: WorkbenchProps & {
         if (!taskProgress?.active.length || taskProgress.pending || runningManuscript || manuscript?.delivery && taskProgress.remaining.length
           || !manuscript || props.checkpoints[manuscript.id] === 'saved') {
           setError('Apply or resolve the task batches before opening manuscript review.')
-        } else setReviewManuscript(true)
+        } else openReview()
         return
       case 'reply': {
         const [number, round, revised] = argument.split('|').map(value => value.trim())
@@ -731,7 +740,7 @@ function Conversation(props: WorkbenchProps & {
     if (progress.pending) return
     if (!progress.remaining.length) {
       setRunningManuscript(false)
-      if (task.delivery && props.checkpoints[task.id] !== 'saved') setReviewManuscript(true)
+      if (task.delivery && props.checkpoints[task.id] !== 'saved') openReview()
       return
     }
     if (task.batches.length >= 120 || progress.remaining.some(path => !files.includes(path))) {
@@ -840,10 +849,12 @@ function Conversation(props: WorkbenchProps & {
         running={runningManuscript} busy={streaming || mutating || props.disabled || !props.active}
         onRun={() => setRunningManuscript(true)} onPause={pauseManuscript}
         onNotes={(field, notes) => updateManuscript({ ...manuscriptRef.current!, [field]: notes })}
-        onReview={() => setReviewManuscript(true)}
+        onReview={openReview}
         onUndoSave={() => { setUndoError(''); setUndoSave(true) }}
         onUndo={ids => { setUndoBatches(ids); setUndoError('') }} />}
     {manuscript && taskProgress && reviewManuscript && props.active && <ManuscriptReviewDialog
+      open={!reviewInSource} cursor={manuscript.reviewCursor}
+      onCursor={reviewCursor => updateManuscript({ ...manuscriptRef.current!, reviewCursor })}
       storage={props.storage} projectKey={props.projectKey} runs={taskProgress.active} project={props.project}
       working={props.working} drafts={props.drafts} baseline={baseline?.input === input ? baseline.raw : undefined}
       report={props.verifications[manuscript.id]} disabled={props.disabled || streaming || mutating}
@@ -853,7 +864,10 @@ function Conversation(props: WorkbenchProps & {
       onVerify={(report, build) => props.onVerification(manuscript.id, report, true, build)}
       onSave={report => props.onSaveManuscript(manuscript.id, taskProgress.active, report)}
       onClose={() => setReviewManuscript(false)}
-      onLocate={(path, line) => { setReviewManuscript(false); props.onLocate(path, line) }}
+      onLocate={(path, line) => {
+        setReviewInSource(true)
+        props.onLocateReview(path, line, openReview)
+      }}
       onRepair={(paths, report) => {
         if (submit('Repair the errors in the manuscript verification report. Edit only the affected files and keep the existing manuscript changes.', {
           id: manuscript.id, report, manuscriptTask: true,

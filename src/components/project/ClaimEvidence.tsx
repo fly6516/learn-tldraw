@@ -8,10 +8,11 @@ import { CalculationEvidence } from './CalculationEvidence'
 export type ReviewedClaim = { id: string; claim: WritingClaims[number]; revision?: number; review?: ClaimReview
   assessment: ReturnType<typeof assessClaim> }
 
-export function ClaimEvidence({ claims, project, moves, onLocate, disabled, onDecision }: {
+export function ClaimEvidence({ claims, project, moves, onLocate, disabled, onDecision, selected }: {
   claims: { claim: WritingClaims[number]; revision?: number; assessment?: ReviewedClaim['assessment']; id?: string; review?: ClaimReview }[]
   project: ProjectFileSystem
-  moves: readonly SourceMove[]; onLocate: (path: string, line: number) => void
+  moves: readonly SourceMove[]; onLocate: (path: string, line: number, claimId?: string) => void
+  selected?: string
   disabled?: boolean
   onDecision?: (id: string, decision: 'confirmed' | 'requested' | 'excluded') => void
 }) {
@@ -22,7 +23,8 @@ export function ClaimEvidence({ claims, project, moves, onLocate, disabled, onDe
       {claims.map(({ claim, revision, assessment, review, id }, index) => {
         const locations = assessment?.locations ?? claim.references.map(reference => locateEvidence(project, reference, moves, revision))
         const hasEvidence = locations.some(Boolean)
-        return <li className="space-y-1 border-t pt-1.5" key={id ?? index} aria-label={claim.quote}>
+        return <li className={`space-y-1 border-t pt-1.5 ${id && id === selected ? 'rounded bg-indigo-50 ring-1 ring-indigo-400' : ''}`}
+          key={id ?? index} aria-label={claim.quote} tabIndex={-1} data-review-claim={id}>
           <p className="break-all font-mono text-slate-600">{claim.path}</p>
           <blockquote className="break-words">{claim.kind === 'citation' && 'Citation · '}{claim.quote}</blockquote>
           {assessment?.confirmed && <p className="font-medium text-emerald-800">Confirmed</p>}
@@ -38,13 +40,13 @@ export function ClaimEvidence({ claims, project, moves, onLocate, disabled, onDe
             const label = reference.kind === 'data' ? 'CSV' : reference.kind === 'table' ? 'Table source' : 'Bibliography'
             return <div key={index} className="break-words">
               {match ? <button type="button" className="break-all text-left text-indigo-800 underline"
-                onClick={() => onLocate(match.path, match.line)}>{label} · {match.path}:{match.line}</button>
+                onClick={() => onLocate(match.path, match.line, id)}>{label} · {match.path}:{match.line}</button>
                 : <span className="text-amber-800">{label} · {reference.path}:{reference.line} needs fresh evidence</span>}
               {match && reference.text && <p className="font-mono text-slate-600">{reference.text}</p>}
             </div>
           })}
           {claim.calculations?.map(calculation => <CalculationEvidence key={calculation.id} calculation={calculation}
-            project={project} moves={moves} revision={revision} onLocate={onLocate} />)}
+            project={project} moves={moves} revision={revision} onLocate={(path, line) => onLocate(path, line, id)} />)}
           {onDecision && id && assessment && !assessment.excluded && <div className="flex flex-wrap gap-1">
             <Button size="sm" variant="outline" disabled={disabled || assessment.confirmed || !assessment.present}
               onClick={() => onDecision(id, 'confirmed')}>Confirm claim</Button>
