@@ -19,10 +19,11 @@ interface ProjectBackupDialogProps {
   writing?: PortableWritingState
   readHistory?: (selection: BackupHistorySelection) => Promise<PortableProjectHistory>
   onRestore: (project: ProjectFileSystem, writing?: PortableWritingState, history?: PortableProjectHistory) => Promise<boolean>
+  onImportCopy?: (project: ProjectFileSystem, writing?: PortableWritingState, history?: PortableProjectHistory) => Promise<boolean>
   onClose: () => void
 }
 
-export function ProjectBackupDialog({ canvas, project, writing, readHistory, onRestore, onClose }: ProjectBackupDialogProps) {
+export function ProjectBackupDialog({ canvas, project, writing, readHistory, onRestore, onImportCopy, onClose }: ProjectBackupDialogProps) {
   const [pending, setPending] = useState<Awaited<ReturnType<typeof decodeProjectBackup>>>()
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
@@ -72,14 +73,15 @@ export function ProjectBackupDialog({ canvas, project, writing, readHistory, onR
     }
   }
 
-  async function restoreProject() {
+  async function restoreProject(asCopy: boolean) {
     if (!pending) return
     setError('')
     setBusy(true)
     try {
-      if (!await onRestore(pending.project, pending.writing, pending.history)) return
+      const restore = asCopy ? onImportCopy : onRestore
+      if (!restore || !await restore(pending.project, pending.writing, pending.history)) return
       setPending(undefined)
-      setMessage('Project restored.')
+      setMessage(asCopy ? 'Project imported.' : 'Project restored.')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not restore the project.')
     } finally {
@@ -131,7 +133,9 @@ export function ProjectBackupDialog({ canvas, project, writing, readHistory, onR
         </div>
         {pending && (
           <div className="space-y-1 text-sm">
-            <p>Restore <strong>{pending.project.metadata.projectName}</strong>? This replaces the current Canvas, saved files, local drafts, and the included history categories.</p>
+            <p>Restore <strong>{pending.project.metadata.projectName}</strong>? {onImportCopy
+              ? 'Import into the project list or explicitly replace the current project.'
+              : 'This replaces the current Canvas, saved files, local drafts, and the included history categories.'}</p>
             <p>{importDraftCount > 0 ? `The backup contains ${importDraftCount} local ${importDraftCount === 1 ? 'draft' : 'drafts'}.` : 'The backup contains no local drafts.'}</p>
             {pending.history && <ul className="list-inside list-disc">
               {pending.history.publication && <li>{pending.history.publication.submissions.length} submission versions, {pending.history.publication.rounds.length} revision rounds</li>}
@@ -156,7 +160,9 @@ export function ProjectBackupDialog({ canvas, project, writing, readHistory, onR
           {pending ? (
             <>
               <Button variant="outline" onClick={() => setPending(undefined)} disabled={busy}>Cancel Restore</Button>
-              <Button variant="destructive" onClick={restoreProject} disabled={busy}>Replace Project</Button>
+              <Button variant={onImportCopy ? 'outline' : 'destructive'} onClick={() => void restoreProject(false)}
+                disabled={busy}>Replace Project</Button>
+              {onImportCopy && <Button onClick={() => void restoreProject(true)} disabled={busy}>Import as new project</Button>}
             </>
           ) : (
             <Button onClick={() => fileInput.current?.click()} disabled={busy}>Choose Backup</Button>

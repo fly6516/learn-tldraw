@@ -2,7 +2,7 @@
 
 import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
-import { useSearchParams } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { ChevronDown, FileCode2, LayoutGrid, Network, PanelLeft, Search, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -40,20 +40,28 @@ import type { BibliographyEntry, ReferenceLocation } from '@/lib/project/referen
 import { anchorLatexBlock, findSourceLinkIssues, repairSourceLink, type CanvasSourceCatalog } from '@/lib/project/canvas-source-links'
 import { SourceLinksDialog } from './SourceLinksDialog'
 import { readBackupHistory, restoreProjectBackup } from '@/lib/project/storage'
+import type { PortableProjectHistory } from '@/lib/project/backup-history'
+import type { LibraryView } from '@/lib/project/project-library'
 import type { PortableWritingState } from '@/lib/project/writing-drafts'
 import type { WritingReviewActions } from '@/components/project/WritingReviewPanel'
 import { bindReviewTarget, resolveReviewTarget, reviewItems, reviewResource } from '@/lib/project/review-links'
 import { sourceOffsetAtPosition, type SourceLocation } from '@/lib/project/latex-source'
 import type { SearchSourceLink } from '@/lib/project/project-search'
 
-type WorkspaceProps = { sample?: ResearchCanvas; initialProject?: () => Promise<ProjectFileSystem>; storageNamespace?: string; notice?: React.ReactNode }
+type WorkspaceProps = {
+  sample?: ResearchCanvas; initialProject?: () => Promise<ProjectFileSystem>; storageNamespace?: string; notice?: React.ReactNode
+  projectListHref?: string; onViewChange?: (view: LibraryView) => void
+  onImportCopy?: (project: ProjectFileSystem, view: LibraryView, writing?: PortableWritingState, history?: PortableProjectHistory) => Promise<void>
+}
 type GraphSnapshot = Pick<ResearchCanvas, 'pages' | 'crossPageEdges' | 'activePageId'>
 const emptyHistory: CanvasHistory<GraphSnapshot> = { undo: [], redo: [] }
 const noBlocks: LatexBlock[] = []
 
-function Workspace({ sample, initialProject, notice }: WorkspaceProps) {
+function Workspace({ sample, initialProject, notice, projectListHref, onViewChange, onImportCopy }: WorkspaceProps) {
+  const router = useRouter()
   const { fileSystem, initializeProject, setFileSystem, storage, storageKey, acceptStoredProject } = useProjectFileSystem()
   const view = useSearchParams()?.get('view') === 'write' ? 'write' : 'canvas'
+  useEffect(() => { onViewChange?.(view) }, [onViewChange, view])
   const [importOpen, setImportOpen] = useState(false)
   const [backupOpen, setBackupOpen] = useState<{ writing?: PortableWritingState }>()
   const [snapshotsOpen, setSnapshotsOpen] = useState(false)
@@ -199,6 +207,11 @@ function Workspace({ sample, initialProject, notice }: WorkspaceProps) {
     if (main.content === source) return
     setFileSystem(current => current === fileSystem ? updateFileContent(fileSystem, 'main.tex', source) : current)
   }, [fileSystem, generated.source, setFileSystem])
+
+  async function leaveForList(href: string) {
+    if (await writing.current?.prepareProjectSwitch() === false) return
+    router.push(href)
+  }
 
   function switchView(next: 'canvas' | 'write') {
     const url = new URL(window.location.href)
@@ -482,8 +495,13 @@ function Workspace({ sample, initialProject, notice }: WorkspaceProps) {
     <main className="flex h-dvh min-h-0 min-w-0 flex-col overflow-hidden bg-background text-foreground">
       <header aria-label="Project" className="z-30 grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 border-b bg-background px-3 py-2 md:flex md:px-4">
         <div className="flex min-w-0 items-center gap-2">
-          <Link href="/" aria-label="Research Canvas home" className="rounded-md bg-indigo-100 p-2 text-indigo-700 hover:bg-indigo-200"
-            onNavigate={event => { if (writing.current?.confirmLeave() === false) event.preventDefault() }}>
+          <Link href={projectListHref ?? "/"} aria-label={projectListHref ? "Back to projects" : "Research Canvas home"} className="rounded-md bg-indigo-100 p-2 text-indigo-700 hover:bg-indigo-200"
+            onNavigate={event => {
+              if (projectListHref) {
+                event.preventDefault()
+                void leaveForList(projectListHref)
+              } else if (writing.current?.confirmLeave() === false) event.preventDefault()
+            }}>
             <Network className="size-4" aria-hidden />
           </Link>
           <h1 className="min-w-0 max-w-56 truncate text-sm font-semibold md:max-w-36 xl:max-w-56" title={fileSystem.metadata.projectName}>{fileSystem.metadata.projectName}</h1>
@@ -676,6 +694,11 @@ function Workspace({ sample, initialProject, notice }: WorkspaceProps) {
       </Dialog>}
       <LatexImportDialog open={importOpen} onOpenChange={setImportOpen} onImportNodes={importNodes}
         onProjectImport={async project => {
+          if (onImportCopy) {
+            if (await writing.current?.prepareProjectSwitch() === false) return false
+            await onImportCopy(project, 'write')
+            return true
+          }
           if (await writing.current?.prepareReplacement() === false) return false
           setSourceVersion(version => version + 1)
           setFileSystem(current => ({ ...project, canvas: current?.canvas }))
@@ -684,6 +707,11 @@ function Workspace({ sample, initialProject, notice }: WorkspaceProps) {
         }} />
       {backupOpen && <ProjectBackupDialog canvas={canvas} project={fileSystem} writing={backupOpen.writing}
         readHistory={storage && storageKey ? selection => readBackupHistory(storage, [storageKey, fileSystem.metadata.createdAt], selection) : undefined}
+        onImportCopy={onImportCopy ? async (project, incoming, history) => {
+          if (await writing.current?.prepareProjectSwitch() === false) return false
+          await onImportCopy(project, incoming?.view ? 'write' : 'canvas', incoming, history)
+          return true
+        } : undefined}
         onRestore={async (project, incoming, history) => {
         if (!storage || !storageKey) {
           if (incoming || history) throw new Error('Local storage is required to restore drafts or project history.')
@@ -709,11 +737,11 @@ function Workspace({ sample, initialProject, notice }: WorkspaceProps) {
   )
 }
 
-export function ResearchWorkspace({ sample, initialProject, storageNamespace, notice }: WorkspaceProps) {
+export function ResearchWorkspace({ storageNamespace, ...workspace }: WorkspaceProps) {
   return (
-    <ProjectFileSystemProvider storageKey={storageNamespace ?? (sample ? 'research-flow-example-v1' : 'research-flow-v2')}>
+    <ProjectFileSystemProvider storageKey={storageNamespace ?? (workspace.sample ? 'research-flow-example-v1' : 'research-flow-v2')}>
       <Suspense fallback={<p role="status">Opening research project…</p>}>
-        <Workspace sample={sample} initialProject={initialProject} notice={notice} />
+        <Workspace {...workspace} />
       </Suspense>
     </ProjectFileSystemProvider>
   )

@@ -1,8 +1,9 @@
+import { legacyProjectId, legacyStorageKey, libraryStorageKey, type LibraryProject, type LibraryProjectState, type LibraryView } from './project-library'
 import type { BackupHistorySelection, PortableProjectHistory } from './backup-history'
 import type { SourceMove } from './writing-ai-evidence'
 import { verificationBaseline, verificationPatch, type ChatVerification } from './writing-chat-validation'
 import { chatActionPaths, nextChatCheckpoint, type ChatAction } from './writing-chat-actions'
-import type { ChatCheckpoint, ChatHistory, ChatSource, ChatTaskStep } from './writing-chat'
+import type { ChatCheckpoint, ChatHistory, ChatReplyTarget, ChatSource, ChatTaskStep } from './writing-chat'
 import { updateFileContent } from './file-system'
 import type { ProjectFileSystem } from './types'
 import type { ProjectSnapshot, ProjectSnapshotInfo } from './snapshots'
@@ -53,12 +54,13 @@ export async function listSubmissionVersions(database: IDBDatabase, key: Writing
     return (request.result as SubmissionVersionInfo[]).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
 }
 
-export async function saveSubmissionVersion(database: IDBDatabase, key: WritingKey, version: SubmissionVersion) {
+export async function saveSubmissionVersion(database: IDBDatabase, key: WritingKey, version: SubmissionVersion, chatRun?: string) {
     const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
     const store = transaction.objectStore(storeName)
     const { pdf, zip, ...info } = version
     store.add({ pdf, zip }, ['submission-files', ...key, version.id])
     store.add(info, ['submission-info', ...key, version.id])
+    if (chatRun) appendTaskStep(store, key, chatRun, { kind: 'archived', at: Date.now(), detail: version.name })
     await complete(transaction)
 }
 
@@ -77,24 +79,28 @@ export async function listRevisionRounds(database: IDBDatabase, key: WritingKey)
     return (request.result as RevisionRound[]).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
 }
 
-export async function createRevisionRound(database: IDBDatabase, key: WritingKey, round: RevisionRound) {
+export async function createRevisionRound(database: IDBDatabase, key: WritingKey, round: RevisionRound, chatRun?: string) {
     const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
     const store = transaction.objectStore(storeName)
     const baseline = store.getKey(['submission-files', ...key, round.submissionId])
     baseline.onsuccess = () => {
-        if (baseline.result) store.add(round, ['revision-round', ...key, round.id])
+        if (baseline.result) {
+            store.add(round, ['revision-round', ...key, round.id])
+            if (chatRun) appendTaskStep(store, key, chatRun, { kind: 'revision-created', at: Date.now(), detail: round.name })
+        }
     }
     await complete(transaction)
     if (!baseline.result) throw new Error('The archived source ZIP is unavailable.')
 }
 
-export async function addRevisionComment(database: IDBDatabase, key: WritingKey, roundId: string, comment: RevisionComment) {
+export async function addRevisionComment(database: IDBDatabase, key: WritingKey, roundId: string, comment: RevisionComment, chatRun?: string) {
     return updateRevisionRound(database, key, roundId, round => {
+        if (round.comments.some(item => item.id === comment.id)) throw new Error('The reviewer comment is already in this round.')
         if (comment.kind === 'canvas' && round.comments.some(item => item.kind === 'canvas' && item.nodeId === comment.nodeId)) {
             throw new Error('This Canvas card is already in the round.')
         }
         return { ...round, comments: [...round.comments, comment] }
-    })
+    }, undefined, chatRun ? { run: chatRun, step: { kind: 'comment-added', at: Date.now() } } : undefined)
 }
 
 export async function saveRevisionResponse(database: IDBDatabase, key: WritingKey, roundId: string, commentId: string, response?: RevisionResponse) {
@@ -102,6 +108,19 @@ export async function saveRevisionResponse(database: IDBDatabase, key: WritingKe
         if (!round.comments.some(item => item.id === commentId)) throw new Error('The reviewer comment is unavailable.')
         return { ...round, comments: round.comments.map(item => item.id === commentId ? { ...item, response } : item) }
     })
+}
+
+export async function confirmChatReply(database: IDBDatabase, key: WritingKey, target: ChatReplyTarget, text: string, chatRun: string) {
+    return updateRevisionRound(database, key, target.round, round => {
+        const comment = round.comments.find(item => item.id === target.comment)
+        if (!comment || comment.text !== target.commentText || JSON.stringify(comment.response) !== JSON.stringify(target.previous)
+            || round.submissionId !== target.originalId || round.revisedSubmissionId !== target.previousRevisedId) {
+            throw new Error('The reviewer comment, response, or archive changed. Request a new draft.')
+        }
+        const response = { kind: target.kind, text, paths: target.paths }
+        return { ...round, revisedSubmissionId: target.revisedId,
+            comments: round.comments.map(item => item.id === comment.id ? { ...item, response } : item) }
+    }, target.revisedId, { run: chatRun, step: { kind: 'reply-saved', at: Date.now(), detail: target.roundName } })
 }
 
 export async function linkRevisedSubmission(database: IDBDatabase, key: WritingKey, roundId: string, submissionId?: string) {
@@ -112,7 +131,7 @@ export async function linkRevisedSubmission(database: IDBDatabase, key: WritingK
 }
 
 async function updateRevisionRound(database: IDBDatabase, key: WritingKey, roundId: string,
-    update: (round: RevisionRound) => RevisionRound, submissionId?: string) {
+    update: (round: RevisionRound) => RevisionRound, submissionId?: string, task?: { run: string; step: ChatTaskStep }) {
     const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
     const store = transaction.objectStore(storeName)
     const entry = ['revision-round', ...key, roundId]
@@ -127,6 +146,7 @@ async function updateRevisionRound(database: IDBDatabase, key: WritingKey, round
             if (version && !version.result) throw new Error('The revised source ZIP is unavailable.')
             updated = update(round)
             store.put(updated, entry)
+            if (task) appendTaskStep(store, key, task.run, task.step)
         } catch (cause) { failure = cause }
     }
     await complete(transaction)
@@ -410,6 +430,86 @@ function restoreBackupHistory(store: IDBObjectStore, key: WritingKey, history: P
     }
 }
 
+function storeImportedProject(store: IDBObjectStore, key: WritingKey, project: ProjectFileSystem,
+    writing?: PortableWritingState, history?: PortableProjectHistory) {
+    store.put(project, key[0])
+    if (history) restoreBackupHistory(store, key, history)
+    if (writing) {
+        for (const [path, draft] of Object.entries(writing.drafts)) store.put(draft, ['draft', ...key, path])
+        if (writing.view) store.put(writing.view, ['view', ...key])
+    }
+}
+
+type LibraryEntry = Omit<LibraryProject, 'name'>
+const libraryRange = () => IDBKeyRange.bound(['project-library'], ['project-library', []], true, true)
+const libraryEntry = (id: string) => ['project-library', id]
+
+export async function listLibraryProjects(database: IDBDatabase): Promise<LibraryProject[]> {
+    const transaction = database.transaction(storeName, 'readwrite')
+    const store = transaction.objectStore(storeName)
+    const legacy = store.get(legacyStorageKey)
+    const entries = store.getAll(libraryRange())
+    const projects: LibraryProject[] = []
+    entries.onsuccess = () => {
+        const catalog = entries.result as LibraryEntry[]
+        if (legacy.result && !catalog.some(item => item.id === legacyProjectId)) {
+            const migrated: LibraryEntry = { id: legacyProjectId, state: 'active', view: 'canvas',
+                lastOpenedAt: legacy.result.metadata.updatedAt }
+            store.add(migrated, libraryEntry(legacyProjectId))
+            catalog.push(migrated)
+        }
+        for (const entry of catalog) {
+            const request = store.get(libraryStorageKey(entry.id))
+            request.onsuccess = () => {
+                const project = request.result as ProjectFileSystem | undefined
+                if (project) projects.push({ ...entry, name: project.metadata.projectName })
+            }
+        }
+    }
+    await complete(transaction)
+    return projects.sort((a, b) => b.lastOpenedAt.localeCompare(a.lastOpenedAt) || a.name.localeCompare(b.name))
+}
+
+export async function addLibraryProject(database: IDBDatabase, project: ProjectFileSystem, view: LibraryView,
+    writing?: PortableWritingState, history?: PortableProjectHistory): Promise<LibraryProject> {
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    const store = transaction.objectStore(storeName)
+    const entry: LibraryEntry = { id: crypto.randomUUID(), state: 'active', view, lastOpenedAt: new Date().toISOString() }
+    store.add(entry, libraryEntry(entry.id))
+    storeImportedProject(store, [libraryStorageKey(entry.id), project.metadata.createdAt], project, writing, history)
+    await complete(transaction)
+    return { ...entry, name: project.metadata.projectName }
+}
+
+export async function updateLibraryProject(database: IDBDatabase, id: string,
+    change: { state: LibraryProjectState } | { name: string } | { view: LibraryView }) {
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    const store = transaction.objectStore(storeName)
+    const entry = libraryEntry(id)
+    const key = libraryStorageKey(id)
+    const existing = store.get(entry)
+    const source = store.get(key)
+    let updated = false
+    source.onsuccess = () => {
+        const record = existing.result as LibraryEntry | undefined
+        const project = source.result as ProjectFileSystem | undefined
+        if (!record || !project) return
+        if ('view' in change) {
+            if (record.state !== 'active') return
+            store.put({ ...record, view: change.view, lastOpenedAt: new Date().toISOString() }, entry)
+        } else if ('state' in change) {
+            store.put({ ...record, state: change.state }, entry)
+        } else {
+            const name = change.name.trim()
+            if (!name) return
+            store.put({ ...project, metadata: { ...project.metadata, projectName: name, updatedAt: new Date().toISOString() } }, key)
+        }
+        updated = true
+    }
+    await complete(transaction)
+    if (!updated) throw new Error('This project is no longer available.')
+}
+
 export async function restoreProjectBackup(database: IDBDatabase, current: WritingKey, project: ProjectFileSystem,
     writing?: PortableWritingState, history?: PortableProjectHistory) {
     const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
@@ -423,12 +523,7 @@ export async function restoreProjectBackup(database: IDBDatabase, current: Writi
             store.delete(draftRange(key))
             store.delete(['view', ...key])
         }
-        store.put(project, current[0])
-        if (history) restoreBackupHistory(store, destination, history)
-        if (writing) {
-            for (const [path, draft] of Object.entries(writing.drafts)) store.put(draft, ['draft', ...destination, path])
-            if (writing.view) store.put(writing.view, ['view', ...destination])
-        }
+        storeImportedProject(store, destination, project, writing, history)
         replaced = true
     }
     await complete(transaction)

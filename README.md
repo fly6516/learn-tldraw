@@ -5,9 +5,15 @@ Open http://localhost:3000 to choose a workspace.
 
 See [Contributing](CONTRIBUTING.md) for CI checks and the key-free test workspace.
 
-- `/research` opens the research project's **Canvas** view. Canvas and project files are saved
-  in the current browser. **Writing** uses `/research?view=write` and is part of the same project.
+- `/research` lists projects stored in the current browser. Create a project, import a LaTeX
+  ZIP or Research Canvas backup, or open an existing project. Project links identify one
+  project and its view. The latest project is marked in the list.
 - `/research-dev` uses the same views with a sample paper.
+
+The project list keeps an existing single project with its original drafts and history. Each
+import creates an independent copy, including repeated imports of the same backup. From an
+open project, use **Back to projects** to switch without losing local drafts. Archive inactive
+projects or move them to Trash. **Restore** returns either to the active list.
 
 Use **Add node** to create a card. **Select** moves nodes and box-selects them, **Pan** moves
 the viewport, and **Connect** links two cards in click order or by dragging from an outgoing
@@ -34,7 +40,7 @@ snapshots. **Include AI conversations and task history** also includes manuscrip
 used as evidence and the source move history. Automatic approvals are session-only.
 
 Backups with history use format version 4. Versions 2 and 3 remain supported. Import validates
-history and archive checksums before replacing the project. Included history categories replace
+history and archive checksums before adding or replacing a project. Included history categories replace
 existing records for the imported project identity. A category you leave unchecked stays outside
 the exported file.
 
@@ -171,17 +177,21 @@ Keep the key on the server and run the workbench on loopback.
 
 Open **Writing AI** from the project bar. Use **Dock panel** to place it beside the editor and
 PDF, then drag the separator to set its width. Use **Float panel** to overlay the right side.
-Switching layouts keeps the conversation and restores the last docked width.
+Switching layouts keeps the conversation and restores the last docked width. Use
+`/layout docked`, `/layout floating`, or `/layout auto` in the composer to set or reset the
+project's local placement preference. These commands work without a model.
 
-The assistant streams its replies and tool activity. The Chapter, Across files and Compiler
-problems workflows guide it through bounded source excerpts, project search, reference lookup,
-and compiler diagnostics. Open **Source evidence** to jump to the file and line. A preview
-compile request uses the regular compiler only after you approve it. Conversations are stored
-per project in this browser. The model receives recent conversation text, project paths, and
-the excerpts returned by its tools.
+The assistant streams its replies and tool activity. **Auto** lets it choose tools from your
+request. For example, ask it to revise two chapters together or compile the current preview.
+Chapter, Across files and Compiler problems are available for focused tasks. Open **Source
+evidence** to jump to the file and line. The preview compiler runs after approval and returns
+its report in the conversation. Follow-up messages carry the latest report when available.
+Conversations are stored per project in this browser. The model receives recent conversation
+text, bounded project sources, and the evidence returned by its tools.
 
-Use **Scope** to select up to six editable LaTeX files. By default, inspect **View diff** and
-select changes before choosing **Apply to drafts**. **Save to project** is a separate action.
+In **Auto**, the assistant can propose changes across up to six available editable LaTeX
+files per turn. **Scope** can narrow the candidate files. Inspect **View diff** and select
+changes before approving verification or applying them to drafts.
 The project checks the saved source and local draft before applying or saving. **Undo AI changes**
 restores the original source and draft for the affected files while protecting later edits.
 
@@ -196,6 +206,24 @@ local drafts can take part in verification and stay local afterward. **Auto draf
 available for the approved files in the current conversation. Refreshing or switching
 conversations clears that approval.
 
+From failed verification, **Use diagnostics in chat** sends the compiler report and the exact
+selected replacements back to the assistant for a new proposal. The new proposal has its own
+approval.
+
+Ask for submission preflight or use `/submission Submission v1`. Review file exclusions
+and the local-draft setting in the chat card before compiling the exact ZIP. The compiled
+PDF and ZIP can be downloaded and explicitly archived from the card. Templates that need
+an external engine can use the handoff in Prepare submission.
+
+Use `/newround Round 1 | Submission v1` to stage a new revision round.
+Use `/comment sections/results.tex | Clarify the results. | Round 1` to attach a reviewer
+comment to a source file in that round. Both cards require confirmation.
+Use `/revisions` to see reviewer comment numbers, then
+`/reply 1 | Round 1 | Submission v2` to draft a reply grounded in the archived ZIP differences.
+Omit the names when a unique round and linked archive are available. Review the reply and
+confirm saving it in chat. Use `/letter` or `/letter Round 1` to preview and download the
+Markdown response letter.
+
 Each proposal has an **AI task record**. Expand **Task activity** to see its approvals,
 verification attempts, saves, and undo actions after reloading. Source evidence follows
 tracked Writing file moves and uniquely identifiable lines. When it cannot be located
@@ -205,7 +233,6 @@ Choose **Reviewer reply** to open Revision rounds. Select a revised submission a
 that support the response before choosing **Draft response with AI**. This workflow reads bounded
 excerpts from the archived ZIPs. **Use AI draft** copies the streamed proposal into the response
 editor for review before saving.
-
 ## References
 
 Open **References** in the LaTeX editor to search project `.bib` entries by key, title,

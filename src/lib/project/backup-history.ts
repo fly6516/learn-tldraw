@@ -7,7 +7,7 @@ import type { ProjectSnapshot } from './snapshots'
 import { isProjectPath } from './source-archive'
 import type { SubmissionVersion } from './submission'
 import type { SourceMove } from './writing-ai-evidence'
-import { chatWorkflowSchema, type ChatCheckpoint, type ChatHistory, type ChatTaskStep, type WritingChatMessage } from './writing-chat'
+import { chatWorkflowSchema, compileFeedbackSchema, revisionSetupSchema, submissionChatSchema, type ChatCheckpoint, type ChatHistory, type ChatTaskStep, type WritingChatMessage } from './writing-chat'
 import type { ChatVerification } from './writing-chat-validation'
 
 export type PortableProjectHistory = {
@@ -40,11 +40,11 @@ const target = z.discriminatedUnion('type', [
   z.object({ type: z.literal('formula'), anchor: figureAnchorSchema }),
   z.object({ type: z.literal('selection'), anchor: selectionAnchorSchema }),
 ])
+const response = z.object({ kind: z.enum(['changed', 'retained']), text, paths: z.array(path) })
 const comment = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('comment'), target }),
   z.object({ kind: z.literal('canvas'), nodeId: id }),
-]).and(z.object({ id, reviewer: text, text,
-  response: z.object({ kind: z.enum(['changed', 'retained']), text, paths: z.array(path) }).optional() }))
+]).and(z.object({ id, reviewer: text, text, response: response.optional() }))
 const round = identity.extend({ submissionId: id, revisedSubmissionId: id.optional(), comments: z.array(comment) })
 const sources = z.record(path, z.object({ saved: text, draft: z.object({ base: text, text }).optional() }))
 const evidence = chapterAnswerSchema.shape.evidence.element.extend({
@@ -55,6 +55,8 @@ const message = z.object({ id, role: z.enum(['user', 'assistant', 'system']),
   parts: z.array(z.object({ type: text, text: text.optional() }).passthrough()
     .refine(part => part.type !== 'text' || typeof part.text === 'string')).max(1000),
   metadata: z.object({ run: id, complete: z.boolean().optional(), workflow: chatWorkflowSchema.optional(),
+    feedback: compileFeedbackSchema.optional(), local: z.boolean().optional(), submission: submissionChatSchema.optional(), letter: text.max(100).optional(),
+    revisionSetup: revisionSetupSchema.optional(),
     selection: z.object({ path, start: positive, end: positive }).optional(), evidence: z.array(evidence).max(40).optional(),
     missing: z.array(text).max(20).optional() }).optional(),
 }).transform(value => value as WritingChatMessage)
@@ -62,10 +64,13 @@ const unique = (values: { id: string }[]) => new Set(values.map(value => value.i
 const ai = z.object({
   history: z.object({ selected: id, conversations: z.array(z.object({
     id, title: text, messages: z.array(message).max(30).refine(unique),
-    runs: z.record(id, z.object({ main: path.optional(), pathRevision: z.number().int().nonnegative().optional(), sources })),
+    runs: z.record(id, z.object({ main: path.optional(), pathRevision: z.number().int().nonnegative().optional(), sources,
+      reply: z.object({ round: id, roundName: text, comment: id, commentText: text, originalId: id, revisedId: id,
+        previousRevisedId: id.optional(), previous: response.optional(), paths: z.array(path), kind: z.enum(['changed', 'retained']) }).optional() })),
   })).max(12) }).refine(value => unique(value.conversations) && value.conversations.some(item => item.id === value.selected)).optional(),
   moves: z.array(z.object({ from: path, to: path })),
-  tasks: z.record(id, z.array(z.object({ kind: z.enum(['verify', 'authorize-save', 'passed', 'failed', 'cancelled', 'blocked', 'draft', 'saved', 'undone', 'rejected']),
+  tasks: z.record(id, z.array(z.object({ kind: z.enum(['verify', 'authorize-save', 'passed', 'failed', 'cancelled', 'blocked', 'draft', 'saved', 'undone', 'rejected',
+    'preview-compile', 'archived', 'reply-saved', 'revision-created', 'comment-added']),
     at: z.number().int().min(0).max(8.64e15), selected: z.number().int().nonnegative().optional(), selection: selection.optional(),
     paths: z.array(path).optional(), detail: text.optional() }))),
   checkpoints: z.record(id, z.object({ state: z.enum(['draft', 'saved', 'undone', 'rejected']),

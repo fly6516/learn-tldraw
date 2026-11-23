@@ -19,6 +19,7 @@ export function createChapterTools(input: ChapterEditRequest) {
   const evidence: (Answer['evidence'][number] & { anchor?: EvidenceQuote })[] = []
   const calls: Answer['tools'] = []
   const observed = new Set<string>()
+  const readFiles = new Set<string>()
   function record(kind: Answer['tools'][number], items: { path: string; line: number; text: string }[]) {
     if (calls.length === 80) return { error: 'Tool call limit reached.' }
     calls.push(kind)
@@ -33,7 +34,7 @@ export function createChapterTools(input: ChapterEditRequest) {
     return { items: output }
   }
 
-  return { calls, evidence, observed, tools: {
+  return { calls, evidence, observed, readFiles, tools: {
     search_source: tool({
       description: 'Find literal text across the allowed .tex and .bib files. Read the relevant lines with read_source after searching.',
       inputSchema: z.object({ query }),
@@ -52,6 +53,7 @@ export function createChapterTools(input: ChapterEditRequest) {
         const lines = source?.source.split(/\r\n|\r|\n/)
         const excerpt = lines?.slice(start, start + args.lineCount) ?? []
         const items = excerpt.map((text, index) => ({ path: args.path, line: args.startLine + index, text }))
+        if (items.length) readFiles.add(args.path)
         return { ...record('read_source', items), truncated: Boolean(source?.truncated || excerpt.some(line => line.length > 500)),
           ...(source ? {} : { unavailable: 'Path not in the allowed project snapshot.' }) }
       },

@@ -9,26 +9,34 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { Textarea } from '@/components/ui/textarea'
 import { applyProjectEdits, buildChapterContext, maxChapterLength, type ChapterEditRequest } from '@/lib/project/ai-edit'
-import { readChatCheckpoints, readChatHistory, readChatTaskSteps, readChatVerifications, recordChatTaskStep, writeChatHistory, writeChatVerification } from '@/lib/project/storage'
-import { chatEditSchema, writingWorkflows, type ChatCheckpoint, type ChatConversation, type ChatHistory, type ChatRun, type ChatTaskStep, type ChatWorkflow, type WritingChatMessage } from '@/lib/project/writing-chat'
+import { confirmChatReply, listRevisionRounds, readChatCheckpoints, readChatHistory, readChatTaskSteps, readChatVerifications, recordChatTaskStep, writeChatHistory, writeChatVerification } from '@/lib/project/storage'
+import { chatEditSchema, replyChatSchema, submissionChatSchema, writingWorkflows, type ChatCheckpoint, type ChatCompileFeedback, type ChatConversation, type ChatHistory, type ChatRevisionSetup, type ChatRun, type ChatTaskStep, type ChatWorkflow, type ReplyChatRequest, type SubmissionChatRequest, type WritingChatMessage } from '@/lib/project/writing-chat'
 import type { ChatAction } from '@/lib/project/writing-chat-actions'
 import { validateChatProposal, verificationBaseline, type ChatVerification } from '@/lib/project/writing-chat-validation'
 import { editableSource, type WritingDrafts, type WritingKey } from '@/lib/project/writing-drafts'
 import type { ProjectFileSystem } from '@/lib/project/types'
 import { locateEvidence, type SourceMove } from '@/lib/project/writing-ai-evidence'
 import { collectBibliography, findNewUnknownCitations } from '@/lib/project/references'
+import { confirmChatRevisionSetup, prepareChatLetter, prepareChatReply, prepareChatRevisionSetup } from '@/lib/project/chat-revision'
+import { revisionDraftSchema } from '@/lib/project/ai-revision'
+import type { SubmissionBuild, SubmissionSelection } from '@/lib/project/submission'
+import { ChatSubmissionCard } from './ChatSubmissionCard'
+import { download, submissionFilename } from './SubmissionDialog'
 
 const Diff = dynamic(() => import('./MonacoSourceEditor').then(module => module.WritingDraftComparison), { ssr: false })
 type Approval = 'manual' | 'draft'
 type SourceWorkflow = Exclude<ChatWorkflow, 'revision'>
 type Checkpoints = Record<string, ChatCheckpoint['state']>
 type WorkbenchProps = {
-  storage: IDBDatabase; projectKey: WritingKey; project: ProjectFileSystem; working: ProjectFileSystem
+  storage: IDBDatabase; projectKey: WritingKey; project: ProjectFileSystem; working: ProjectFileSystem; saved: ProjectFileSystem
   drafts: WritingDrafts; sourceMoves?: SourceMove[]; selected: string; main?: string; active: boolean; disabled: boolean
   compiler: ChapterEditRequest['compiler']; onLocate: (path: string, line: number) => void
   selection: () => { path: string; start: number; end: number } | undefined
   onAction: (run: string, action: ChatAction) => Promise<ChatCheckpoint['state']>
-  onCompile: () => void
+  onCompile: (signal: AbortSignal) => Promise<{ feedback: ChatCompileFeedback } | undefined>
+  onBuildSubmission: (selection: SubmissionSelection, signal: AbortSignal) => Promise<{ feedback: ChatCompileFeedback; submission?: SubmissionBuild } | undefined>
+  onExternalSubmission: (include: boolean, excluded: string[]) => void
+  onLayout: (placement: 'docked' | 'floating' | undefined) => void
   onRevision: () => void
 }
 
@@ -36,6 +44,7 @@ const toolLabels: Record<string, string> = {
   search_source: 'Search source', read_source: 'Read source', query_references: 'Check references',
   compile_diagnostics: 'Read diagnostics', propose_edits: 'Validate edits', request_preview_compile: 'Request preview compile',
   read_archived_changes: 'Read archived ZIP changes', propose_reply: 'Stage reply',
+  prepare_submission: 'Prepare submission checklist', request_reviewer_reply: 'Find archived reply evidence',
 }
 
 function newConversation(): ChatConversation {
@@ -49,7 +58,7 @@ export function chatText(message: UIMessage) {
 export const chatTransport = new DefaultChatTransport<WritingChatMessage>({
   api: '/api/latex/chat',
   prepareSendMessagesRequest: ({ messages, body }) => ({ body: {
-    ...body, messages: messages.filter(message => message.role !== 'system')
+    ...body, messages: messages.filter(message => message.role !== 'system' && !message.metadata?.local)
       .map(message => ({ role: message.role, text: chatText(message).slice(0, 12_000) }))
       .filter(message => message.text.trim()).slice(-24),
   } }),
@@ -79,6 +88,15 @@ function editProposal(message: WritingChatMessage) {
     if (part.type !== 'tool-propose_edits' || !('output' in part)) continue
     const parsed = chatEditSchema.safeParse(part.output)
     if (parsed.success) return parsed.data
+  }
+}
+
+function toolResult<T>(message: WritingChatMessage, type: `tool-${string}`, schema: { safeParse: (value: unknown) => { success: true; data: T } | { success: false } }) {
+  if (!message.metadata?.complete) return
+  for (const part of message.parts) {
+    if (part.type !== type || !('output' in part)) continue
+    const result = schema.safeParse(part.output)
+    if (result.success) return result.data
   }
 }
 
@@ -123,7 +141,7 @@ export function WritingAiWorkbench(props: WorkbenchProps) {
   const conversation = history?.conversations.find(item => item.id === history.selected)
   if (!conversation) return <p className="p-3 text-sm" role="status">{storageError || 'Loading local conversations…'}</p>
   return <Conversation key={conversation.id} {...props} conversation={conversation} checkpoints={checkpoints} storageError={storageError}
-    tasks={tasks} onTaskStep={async (id, step) => {
+    tasks={tasks} onRefreshTasks={refreshTasks} onTaskStep={async (id, step) => {
       await recordChatTaskStep(storage, [workspace, projectId], id, { ...step, at: Date.now() })
       await refreshTasks()
     }}
@@ -145,9 +163,16 @@ export function WritingAiWorkbench(props: WorkbenchProps) {
     onPersist={(messages, runs) => persist(value => ({ ...value, conversations: value.conversations.map(item => {
       if (item.id !== conversation.id) return item
       const retained = messages.slice(-30)
-      const ids = new Set(retained.flatMap(message => message.metadata?.run ? [message.metadata.run] : []))
+      const retainedRuns = retained.flatMap(message => {
+        const id = message.metadata?.run
+        const run = id && runs[id]
+        if (!id || !run || message.role !== 'assistant' || !message.metadata?.complete) return []
+        const paths = new Set(editProposal(message)?.edits.map(edit => edit.path))
+        const sources = Object.fromEntries(Object.entries(run.sources).filter(([path]) => paths.has(path)))
+        return [[id, { ...run, sources }] as const]
+      })
       return { ...item, title: chatText(messages.find(message => message.role === 'user') ?? { role: 'user', id: '', parts: [] }).slice(0, 52) || item.title,
-        messages: retained, runs: Object.fromEntries(Object.entries(runs).filter(([id]) => ids.has(id))) }
+        messages: retained, runs: Object.fromEntries(retainedRuns) }
     }) }))}
     onAction={async (run, action) => {
       try {
@@ -168,10 +193,11 @@ function Conversation(props: WorkbenchProps & {
   conversation: ChatConversation; conversations: ChatConversation[]; storageError: string; checkpoints: Checkpoints
   verifications: Record<string, ChatVerification>; onVerification: (id: string, report: ChatVerification, record?: boolean) => Promise<void>
   tasks: Record<string, ChatTaskStep[]>; onTaskStep: (id: string, step: Omit<ChatTaskStep, 'at'>) => Promise<void>
+  onRefreshTasks: () => Promise<void>
   onSelect: (id: string) => void; onNew: () => void; onDelete: () => void
   onPersist: (messages: WritingChatMessage[], runs: Record<string, ChatRun>) => void
 }) {
-  const [workflow, setWorkflow] = useState<SourceWorkflow>('chapter')
+  const [workflow, setWorkflow] = useState<SourceWorkflow>('auto')
   const [approval, setApproval] = useState<Approval>('manual')
   const [consent, setConsent] = useState<Approval | null>(null)
   const [scope, setScope] = useState<string[]>()
@@ -180,6 +206,9 @@ function Conversation(props: WorkbenchProps & {
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [mutating, setMutating] = useState(false)
   const [stopped, setStopped] = useState(false)
+  const localOperation = useRef<AbortController>(null)
+  const replyInProgress = useRef(false)
+  const [letters, setLetters] = useState<Record<string, Awaited<ReturnType<typeof prepareChatLetter>>>>({})
   const files = [...props.project.files.keys()].filter(path => /\.tex$/i.test(path)
     && (editableSource(props.working, path)?.length ?? Infinity) <= maxChapterLength)
   const targets = scope ? scope.filter(path => files.includes(path)) : files.includes(props.selected) ? [props.selected] : []
@@ -237,6 +266,11 @@ function Conversation(props: WorkbenchProps & {
   }, [input])
   useEffect(() => {
     if (!props.active) grant.current = null
+    return () => {
+      grant.current = null
+      pending.current = null
+      localOperation.current?.abort()
+    }
   }, [props.active])
   useEffect(() => {
     if (atBottom.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight
@@ -260,9 +294,139 @@ function Conversation(props: WorkbenchProps & {
     setScope(checked ? [...targets, path] : targets.filter(item => item !== path))
   }
 
-  function submit(value: string) {
+  useEffect(() => {
+    if (!streaming && messages.length) latest.current.onPersist(messages, runs.current)
+  }, [messages, streaming])
+
+  function localMessage(text: string, request?: { submission?: SubmissionChatRequest; letter?: string; revisionSetup?: ChatRevisionSetup }) {
+    const id = crypto.randomUUID()
+    setMessages(previous => [...previous, { id, role: 'assistant', metadata: { run: id, local: true, complete: true, ...request },
+      parts: [{ type: 'text', text }] }])
+    return id
+  }
+
+  async function startReply(request: ReplyChatRequest, text: string) {
+    if (streaming || props.disabled || !props.active || replyInProgress.current) return
+    const controller = new AbortController()
+    if (localOperation.current) return
+    localOperation.current = controller
+    replyInProgress.current = true
+    setError('')
+    setMutating(true)
+    try {
+      const { reply, revision } = await prepareChatReply(props.storage, props.projectKey, request)
+      if (controller.signal.aborted) return
+      const id = crypto.randomUUID()
+      runs.current = { ...runs.current, [id]: { sources: {}, reply } }
+      setRunSnapshots(runs.current)
+      pending.current = null
+      clearError()
+      setStopped(false)
+      setPrompt('')
+      atBottom.current = true
+      await sendMessage({ text, metadata: { run: id } }, { body: { run: id, workflow: 'revision', scope: [], revision } })
+    } catch (cause) {
+      if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Could not read the archived reply evidence.')
+    } finally {
+      replyInProgress.current = false
+      localOperation.current = null
+      setMutating(false)
+    }
+  }
+
+  function saveFeedback(id: string, feedback: ChatCompileFeedback) {
+    setMessages(previous => previous.map(message => message.id === id && message.metadata
+      ? { ...message, metadata: { ...message.metadata, feedback } } : message))
+  }
+
+  async function compilePreview(message: WritingChatMessage) {
+    if (localOperation.current || !message.metadata || !props.active) return
+    const controller = new AbortController()
+    localOperation.current = controller
+    setMutating(true)
+    setError('')
+    try {
+      await props.onTaskStep(message.metadata.run, { kind: 'preview-compile' })
+      if (controller.signal.aborted) return
+      const result = await props.onCompile(controller.signal)
+      if (controller.signal.aborted) return
+      if (!result) throw new Error('Compile is busy or the current source is unavailable.')
+      saveFeedback(message.id, result.feedback)
+      await props.onTaskStep(message.metadata.run, { kind: result.feedback.status, detail: result.feedback.message })
+    } catch (cause) {
+      if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Could not compile the preview.')
+    } finally {
+      localOperation.current = null
+      setMutating(false)
+    }
+  }
+
+  async function runLocalCommand(command: string, argument: string) {
+    setPrompt('')
+    switch (command) {
+      case 'layout': {
+        const value = { docked: 'docked', same: 'docked', floating: 'floating', overlay: 'floating', auto: undefined } as const
+        if (!Object.hasOwn(value, argument)) { setError('Use /layout docked, /layout floating, or /layout auto.'); return }
+        props.onLayout(value[argument as keyof typeof value])
+        localMessage(argument === 'auto' ? 'Writing AI uses the responsive layout.' : `Writing AI is now ${value[argument as keyof typeof value]}.`)
+        return
+      }
+      case 'submission': {
+        const result = submissionChatSchema.safeParse({ name: argument || undefined })
+        if (!result.success) { setError('Use a submission name of up to 100 characters.'); return }
+        localMessage('Review the submission preflight and ZIP manifest.', { submission: result.data })
+        return
+      }
+      case 'reply': {
+        const [number, round, revised] = argument.split('|').map(value => value.trim())
+        const result = replyChatSchema.safeParse({ comment: Number(number), round: round || undefined, revised: revised || undefined })
+        if (!result.success) { setError('Use /reply <comment number> | <round name> | <revised archive>. The names can be omitted when unambiguous.'); return }
+        await startReply(result.data, `Draft an evidence-based reply to comment ${number}.`)
+        return
+      }
+      case 'letter':
+      case 'revisions':
+      case 'newround':
+      case 'comment': {
+        setMutating(true)
+        try {
+          if (command === 'letter') {
+            const letter = await prepareChatLetter(props.storage, props.projectKey, argument || undefined)
+            const id = localMessage(`Response letter for ${letter.name}.`, { letter: letter.name })
+            setLetters(previous => ({ ...previous, [id]: letter }))
+          } else if (command === 'revisions') {
+            const rounds = await listRevisionRounds(props.storage, props.projectKey)
+            localMessage(rounds.length ? rounds.map(round => [round.name, ...round.comments.map((comment, index) =>
+              `${index + 1}. ${comment.reviewer || 'Reviewer'} · ${comment.text.slice(0, 160)}`)].join('\n')).join('\n\n')
+              : 'There are no revision rounds in this project.')
+          } else {
+            const setup = await prepareChatRevisionSetup(props.storage, props.projectKey, command, argument.split('|').map(value => value.trim()))
+            if (setup.kind === 'comment' && !files.includes(setup.path)) throw new Error('Choose the exact path of an editable LaTeX source.')
+            localMessage(setup.kind === 'round' ? 'Review the new revision round.' : 'Review the new reviewer comment.', { revisionSetup: setup })
+          }
+        } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not load the revision.') }
+        finally { setMutating(false) }
+        return
+      }
+      default: setError('Available commands: /layout, /submission, /newround, /comment, /revisions, /reply, /letter.')
+    }
+  }
+
+  function submit(value: string, repair?: { report: ChatVerification; proposal: NonNullable<ReturnType<typeof editProposal>> }) {
     const text = value.trim()
     if (!text || streaming || props.disabled || mutating) return
+    setError('')
+    atBottom.current = true
+    const command = /^\/([a-z]+)(?:\s+([\s\S]*))?$/i.exec(text)
+    const layout = /^(?:把\s*AI\s*面板切到|AI\s*面板切到)\s*(同层|浮层|上层)[。！]?$/i.exec(text)
+    if (command) {
+      void runLocalCommand(command[1].toLowerCase(), command[2]?.trim() ?? '')
+      return
+    }
+    if (layout) {
+      void runLocalCommand('layout', layout[1] === '同层' ? 'docked' : 'floating')
+      return
+    }
     const current = props.working.files.get(props.selected)
     const currentSource = current && 'content' in current && /\.tex$/i.test(current.path) && current.content
       && current.content.length <= maxChapterLength ? current : undefined
@@ -276,7 +440,13 @@ function Conversation(props: WorkbenchProps & {
     setError('')
     setStopped(false)
     const id = crypto.randomUUID()
-    const sources = Object.fromEntries(targets.flatMap(path => {
+    const context = buildChapterContext(props.working, primary, props.main, [
+      ...targets, ...files.filter(path => text.includes(path) || text.includes(path.split('/').at(-1)!)),
+    ])
+    const completeFiles = new Set([primary, ...context.filter(entry => !entry.truncated).map(entry => entry.path)])
+    const automaticScope = workflow === 'auto' && !scope && !grant.current
+    const editPaths = (automaticScope ? files : targets).filter(path => completeFiles.has(path))
+    const sources = Object.fromEntries(editPaths.flatMap(path => {
       const saved = editableSource(props.project, path)
       return saved === undefined ? [] : [[path, { saved, draft: props.drafts[path] }] as const]
     }))
@@ -285,11 +455,48 @@ function Conversation(props: WorkbenchProps & {
     const authorized = grant.current && targets.length && targets.every(path => grant.current?.paths.includes(path))
     pending.current = { id, grant: grant.current?.id, mode: authorized ? approval : 'manual' }
     const source: ChapterEditRequest = { mode: 'rewrite', path: primary, main: props.main, source: file.content,
-      instruction: '', compiler: props.compiler, context: buildChapterContext(props.working, primary, props.main, targets) }
+      instruction: '', compiler: props.compiler, context }
     setPrompt('')
-    atBottom.current = true
-    const selection = props.selection()
-    void sendMessage({ text, metadata: { run: id, selection } }, { body: { run: id, workflow, scope: targets, source, selection } })
+    const selection = repair ? undefined : props.selection()
+    const resultMessage = [...messages].reverse().find(message => message.role === 'assistant' && message.metadata
+      && (message.metadata.feedback || props.verifications[message.metadata.run]))
+    const resultId = resultMessage?.metadata?.run
+    const report = repair?.report ?? (resultId ? props.verifications[resultId] : undefined)
+    const previousProposal = resultMessage && editProposal(resultMessage)
+    const checkpoint = !repair && resultId ? props.checkpoints[resultId] : undefined
+    const receipt = checkpoint ? ` Source proposal state: ${checkpoint}.` : ' This result is from a temporary snapshot.'
+    const feedback = report ? { status: report.status, message: (report.message + receipt).slice(0, 1000),
+      diagnostics: report.diagnostics.slice(0, 40).map(issue => ({ ...issue, message: issue.message.slice(0, 500) })),
+      log: report.log.slice(-4000) } : resultMessage?.metadata?.feedback
+    const failedProposal = repair?.proposal ?? (previousProposal && report?.status === 'failed' && !checkpoint
+      ? { summary: previousProposal.summary, edits: report.selected.map(index => previousProposal.edits[index]).filter(Boolean) }
+      : undefined)
+    void sendMessage({ text, metadata: { run: id, selection } }, {
+      body: { run: id, workflow, scope: editPaths, source, selection, feedback, previousProposal: failedProposal },
+    })
+  }
+
+  async function saveReply(id: string, reply: NonNullable<ChatRun['reply']>, draft: string) {
+    if (mutating || !props.active) return
+    setError('')
+    setMutating(true)
+    try {
+      await confirmChatReply(props.storage, props.projectKey, reply, draft, id)
+      await props.onRefreshTasks()
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not save the reply.') }
+    finally { setMutating(false) }
+  }
+
+  async function saveRevisionSetup(id: string, setup: ChatRevisionSetup) {
+    if (mutating || !props.active) return
+    setError('')
+    setMutating(true)
+    try {
+      if (setup.kind === 'comment' && !files.includes(setup.path)) throw new Error('The selected source was moved or is no longer editable.')
+      await confirmChatRevisionSetup(props.storage, props.projectKey, id, setup)
+      await props.onRefreshTasks()
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not update the revision round.') }
+    finally { setMutating(false) }
   }
 
   const anyError = error || (streamError ? 'The request failed. Check the model configuration or retry.' : '') || props.storageError
@@ -308,13 +515,24 @@ function Conversation(props: WorkbenchProps & {
       const element = event.currentTarget
       atBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight < 48
     }} aria-label="Conversation messages">
-      {!messages.length && <p className="text-slate-600">Ask about this chapter, compare sections, or investigate compiler problems.</p>}
+      {!messages.length && <p className="text-slate-600">Ask for an edit, a PDF check, submission preflight, or a reviewer reply. Use /layout to switch panel placement.</p>}
       {messages.map(message => {
         const proposal = editProposal(message)
         const runId = message.metadata?.run
         const run = runId ? runSnapshots[runId] : undefined
         const compileRequest = message.metadata?.complete && message.parts.find(part => part.type === 'tool-request_preview_compile'
-          && 'output' in part && part.output && typeof part.output === 'object' && 'requested' in part.output)
+          && 'output' in part && part.output && typeof part.output === 'object' && 'requested' in part.output
+          && part.output.requested === true)
+        const submission = message.metadata?.submission ?? toolResult(message, 'tool-prepare_submission', submissionChatSchema)
+        const replyRequest = toolResult(message, 'tool-request_reviewer_reply', replyChatSchema)
+        const reply = run?.reply && toolResult(message, 'tool-propose_reply', revisionDraftSchema)
+        const steps = runId ? props.tasks[runId] : undefined
+        const archived = steps?.find(step => step.kind === 'archived')?.detail
+        const replySaved = steps?.some(step => step.kind === 'reply-saved')
+        const setup = message.metadata?.revisionSetup
+        const setupSaved = steps?.some(step => step.kind === 'revision-created' || step.kind === 'comment-added')
+        const feedback = message.metadata?.feedback
+        const letter = letters[message.id]
         return <article key={message.id} aria-label={message.role === 'user' ? 'You' : 'Assistant'}
           className={message.role === 'user' ? 'rounded-md bg-indigo-50 px-2 py-1.5' : 'space-y-2'}>
           <p className="mb-1 text-xs font-semibold">{message.role === 'user' ? 'You' : 'Assistant'}</p>
@@ -325,16 +543,62 @@ function Conversation(props: WorkbenchProps & {
           </p>}
           {message.metadata?.missing?.length ? <p className="text-xs text-amber-800">Checks not completed: {message.metadata.missing.map(name => toolLabels[name] ?? name).join(', ')}.</p> : null}
           {!streaming && message.role === 'assistant' && !message.metadata?.complete && <p className="text-xs text-amber-800">This response did not finish. Any edits from it are unavailable.</p>}
-          {compileRequest && !streaming && <Button size="sm" variant="outline" disabled={props.disabled || !props.main}
-            onClick={props.onCompile}>Approve preview compile</Button>}
-          {runId && message.role === 'assistant' && message.metadata?.complete && !streaming && (proposal || message.metadata.evidence?.length) ? (
+          {compileRequest && !streaming && <Button size="sm" variant="outline" disabled={props.disabled || mutating || !props.main}
+            onClick={() => void compilePreview(message)}>Approve preview compile</Button>}
+          {feedback && <details open className="rounded border px-2 py-1 text-xs" aria-label="Chat compiler result">
+            <summary>{feedback.status === 'failed' ? 'Compile failed' : 'Compile passed'} · {feedback.message}</summary>
+            {feedback.diagnostics.map((issue, index) => <p className="break-all" key={index}>
+              {issue.path}:{issue.line} · {issue.message}
+            </p>)}
+            {feedback.log && <details><summary>Compiler log</summary><pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words">{feedback.log}</pre></details>}
+          </details>}
+          {runId && submission && <ChatSubmissionCard runId={runId} request={submission} saved={props.saved} working={props.working}
+            drafts={props.drafts} main={props.main ?? ''} active={props.active} disabled={props.disabled || streaming || mutating}
+            storage={props.storage} projectKey={props.projectKey} archived={archived}
+            onLocate={props.onLocate} onBuild={props.onBuildSubmission} onExternal={props.onExternalSubmission}
+            onResult={feedback => {
+              saveFeedback(message.id, feedback)
+              void props.onTaskStep(runId, { kind: feedback.status, detail: feedback.message }).catch(() => setError('Could not record the submission compile.'))
+            }} onArchive={props.onRefreshTasks} />}
+          {replyRequest && <Button size="sm" variant="outline" disabled={streaming || mutating || props.disabled}
+            onClick={() => void startReply(replyRequest, `Draft an evidence-based reply to comment ${replyRequest.comment}.`)}>
+            Draft reply from archived changes
+          </Button>}
+          {runId && setup && <section className="space-y-1 rounded border border-indigo-200 p-2 text-xs" aria-label="Revision setup">
+            <h3 className="font-semibold">{setup.kind === 'round' ? setup.name : setup.roundName}</h3>
+            {setup.kind === 'round' ? <p>Baseline · {setup.baseline}</p>
+              : <><p className="break-all">{setup.path}</p><blockquote className="whitespace-pre-wrap break-words">{setup.text}</blockquote></>}
+            {setupSaved ? <p role="status">{setup.kind === 'round' ? 'Revision round created.' : 'Reviewer comment added.'}</p>
+              : <Button size="sm" disabled={props.disabled || mutating || streaming}
+                onClick={() => void saveRevisionSetup(runId, setup)}>{setup.kind === 'round' ? 'Confirm revision round' : 'Confirm reviewer comment'}</Button>}
+          </section>}
+          {runId && reply && run?.reply && <section className="space-y-1 rounded border border-indigo-200 p-2 text-xs" aria-label="Reviewer reply proposal">
+            <h3 className="font-semibold">{run.reply.roundName} · Reviewer reply</h3>
+            <blockquote className="whitespace-pre-wrap break-words border-l-2 pl-2">{run.reply.commentText}</blockquote>
+            <p className="whitespace-pre-wrap break-words">{reply.draft}</p>
+            {run.reply.paths.length > 0 && <p className="break-all">Archived evidence · {run.reply.paths.join(', ')}</p>}
+            {replySaved ? <p role="status">Reply saved.</p> : <Button size="sm" disabled={props.disabled || streaming || mutating}
+              onClick={() => void saveReply(runId, run.reply!, reply.draft)}>
+              {run.reply.previous ? 'Confirm replacement reply' : run.reply.previousRevisedId ? 'Confirm and save reply' : 'Confirm archive link and save reply'}
+            </Button>}
+          </section>}
+          {letter && <section className="space-y-1 rounded border p-2" aria-label="Response letter">
+            <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words text-xs">{letter.markdown}</pre>
+            <Button size="sm" onClick={() => download(new Blob([letter.markdown], { type: 'text/markdown;charset=utf-8' }),
+              `${submissionFilename(letter.name)}${letter.unresolved.length ? '-draft' : ''}-response.md`)}>
+              {letter.unresolved.length ? 'Download response draft' : 'Download response letter'}
+            </Button>
+          </section>}
+          {!letter && message.metadata?.letter && <Button size="sm" variant="outline" disabled={mutating || streaming}
+            onClick={() => void runLocalCommand('letter', message.metadata!.letter!)}>Reopen response letter</Button>}
+          {runId && message.role === 'assistant' && message.metadata?.complete && !streaming && (proposal || message.metadata.evidence?.length || steps?.length) ? (
             <section aria-label="AI task record" className="space-y-2 rounded-md border border-indigo-200 bg-white p-2">
               <h3 className="text-xs font-semibold">AI task record</h3>
               {proposal && <p className="text-xs text-slate-600">
                 Proposed {proposal.edits.length} {proposal.edits.length === 1 ? 'change' : 'changes'} across {new Set(proposal.edits.map(edit => edit.path)).size} {new Set(proposal.edits.map(edit => edit.path)).size === 1 ? 'file' : 'files'}.
                 {!props.checkpoints[runId] && ' Awaiting a decision.'}
               </p>}
-              <TaskTimeline steps={props.tasks[runId]} />
+              <TaskTimeline steps={steps} />
               {message.metadata.evidence?.length ? <EvidenceList evidence={message.metadata.evidence} project={props.working}
                 moves={props.sourceMoves} revision={run?.pathRevision} onLocate={props.onLocate}
                 onRefresh={path => {
@@ -345,18 +609,16 @@ function Conversation(props: WorkbenchProps & {
             disabled={props.disabled || mutating} onAction={action => mutate(runId, action)} active={props.active}
             input={input} baseline={baseline?.input === input ? baseline : undefined} verification={props.verifications[runId]}
             onVerification={(report, record) => props.onVerification(runId, report, record)} onLocate={props.onLocate}
-            onUseDiagnostics={report => {
-              const locations = report.diagnostics.slice(0, 12).map(issue => `${issue.path}:${issue.line} · ${issue.message.slice(0, 240)}`)
-              const notes = ['Help fix this proposal using the following diagnostics from its temporary LaTeX snapshot.',
-                report.message, ...locations].join('\n')
-              setPrompt(previous => [previous, notes].filter(Boolean).join('\n\n').slice(0, 12_000))
-              composer.current?.focus()
-            }} onTaskStep={step => props.onTaskStep(runId, step)} />}
+            onUseDiagnostics={report => submit('Repair the selected changes in the previous proposal using the temporary compile diagnostics.',
+              { report, proposal: { summary: proposal.summary, edits: report.selected.map(index => proposal.edits[index]).filter(Boolean) } })}
+            onTaskStep={step => props.onTaskStep(runId, step)} />}
             </section>
           ) : null}
         </article>
       })}
       {streaming && <p role="status" className="text-xs text-slate-600">{status === 'submitted' ? 'Sending request…' : 'Assistant is responding…'}</p>}
+      {mutating && !streaming && localOperation.current && <Button size="sm" variant="ghost"
+        onClick={() => localOperation.current?.abort()}>Cancel local operation</Button>}
       {anyError && <p role="alert" className="text-xs text-red-800">{anyError}</p>}
       {!streaming && (streamError || stopped || messages.at(-1)?.role === 'assistant' && !messages.at(-1)?.metadata?.complete) && lastPrompt
         && <Button size="sm" variant="outline" disabled={props.disabled} onClick={() => submit(chatText(lastPrompt))}>Retry request</Button>}
@@ -370,13 +632,16 @@ function Conversation(props: WorkbenchProps & {
       <div className="flex flex-wrap items-center gap-1">
         <select aria-label="Writing workflow" className="min-w-0 rounded border bg-white p-1 text-xs" value={workflow}
           onChange={event => { if (event.target.value === 'revision') props.onRevision(); else setWorkflow(event.target.value as SourceWorkflow) }} disabled={streaming}>
-          {(['chapter', 'project', 'diagnostics'] as const).map(item => <option key={item} value={item}>{writingWorkflows[item].name}</option>)}
+          {(['auto', 'chapter', 'project', 'diagnostics'] as const).map(item => <option key={item} value={item}>{writingWorkflows[item].name}</option>)}
           <option value="revision">Reviewer reply…</option>
         </select>
         <details className="relative text-xs" title={targets.join(", ")}>
-          <summary className="cursor-pointer rounded border p-1">Scope · {targets.length}</summary>
+          <summary className="cursor-pointer rounded border p-1">Scope · {workflow === 'auto' && !scope && !granted ? 'Automatic' : targets.length}</summary>
           <div className="absolute bottom-full left-0 z-30 mb-1 max-h-36 w-56 max-w-[80vw] overflow-auto rounded border bg-white p-2 shadow">
-            <p className="pb-1 text-slate-600">Files AI may propose editing</p>
+            <p className="pb-1 text-slate-600">Limit proposals to these files. Automatic proposals show the actual files before approval.</p>
+            {scope && <button type="button" className="underline" disabled={streaming} onClick={() => {
+              setScope(undefined); grant.current = null; setGranted(false); setApproval('manual')
+            }}>Reset scope</button>}
             {files.map(path => <label className="flex items-start gap-1 break-all py-1" key={path}>
               <Checkbox checked={targets.includes(path)} disabled={streaming || targets.length >= 6 && !targets.includes(path)}
                 onCheckedChange={value => updateScope(path, value === true)} />{path}
@@ -392,7 +657,8 @@ function Conversation(props: WorkbenchProps & {
           <option value="manual">Review first</option>
           <option value="draft" disabled={!targets.length}>Auto draft</option>
         </select>
-        {workflow === 'diagnostics' && <Button type="button" size="sm" variant="outline" disabled={props.disabled || streaming} onClick={props.onCompile}>Compile PDF</Button>}
+        {workflow === 'diagnostics' && <Button type="button" size="sm" variant="outline" disabled={props.disabled || streaming || mutating}
+          onClick={() => { const id = localMessage('Preview compile requested.'); void compilePreview({ id, role: 'assistant', parts: [], metadata: { run: id } }) }}>Compile PDF</Button>}
         {streaming ? <Button className="ml-auto" type="button" size="sm" variant="outline" onClick={() => {
           pending.current = null
           setStopped(true)
@@ -444,6 +710,8 @@ const taskLabels: Record<ChatTaskStep['kind'], string> = {
   passed: 'Verification passed', failed: 'Verification failed', cancelled: 'Verification cancelled',
   blocked: 'Action blocked', draft: 'Applied to local drafts', saved: 'Saved to project',
   undone: 'Changes undone', rejected: 'Proposal rejected',
+  'preview-compile': 'Preview compile approved', archived: 'Submission archived', 'reply-saved': 'Reviewer reply saved',
+  'revision-created': 'Revision round created', 'comment-added': 'Reviewer comment added',
 }
 
 function TaskTimeline({ steps }: { steps?: ChatTaskStep[] }) {

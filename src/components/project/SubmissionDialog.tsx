@@ -11,13 +11,17 @@ import { listSubmissionVersions, readSubmissionFiles, saveSubmissionVersion } fr
 import { ExternalCompilePanel } from './ExternalCompilePanel'
 import type { CompileCompatibility, ExternalEngine } from '@/lib/project/compile-compatibility'
 
-function download(blob: Blob, name: string) {
+export function download(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
   link.download = name
   link.click()
   setTimeout(() => URL.revokeObjectURL(url), 30_000)
+}
+
+export function submissionFilename(name: string) {
+  return name.replace(/[<>:"/\\|?*\p{Cc}]/gu, '-').replace(/[. ]+$/, '') || 'submission'
 }
 
 type VersionDraft = Omit<SubmissionVersion, 'id' | 'createdAt' | 'name'>
@@ -89,7 +93,7 @@ export function SubmissionDialog({ main, drafts, includeDrafts, onDraftChoice, c
     try {
       const files = await readSubmissionFiles(database, storageKey, version.id)
       if (!files) throw new Error()
-      const name = version.name.replace(/[<>:"/\\|?*\p{Cc}]/gu, '-').replace(/[. ]+$/, '') || 'submission'
+      const name = submissionFilename(version.name)
       download(files[kind], `${name}${kind === 'zip' ? '-source.zip' : '.pdf'}`)
     } catch {
       setArchiveError('Could not retrieve the archived download.')

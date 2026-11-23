@@ -17,6 +17,7 @@ import { exportSourceArchive } from '@/lib/project/source-archive'
 import type { ProjectFile, ProjectFileSystem, ResearchNodeData } from '@/lib/project/types'
 import { WritingAiWorkbench } from './WritingAiWorkbench'
 import type { ChatAction } from '@/lib/project/writing-chat-actions'
+import type { ChatCompileFeedback } from '@/lib/project/writing-chat'
 import type { ChapterEditRequest } from '@/lib/project/ai-edit'
 import { ReferencesPanel } from './ReferencesPanel'
 import { CrossReferencesPanel } from './CrossReferencesPanel'
@@ -38,7 +39,7 @@ import type { FileOperation } from '@/lib/project/file-refactor'
 import { FileOperationDialog, type FileOperationPlan } from './FileOperationDialog'
 import { SubmissionDialog } from './SubmissionDialog'
 import { RevisionRoundsDialog } from './RevisionRoundsDialog'
-import { exportExternalBuild, prepareSubmission, type SubmissionIssue, type SubmissionVersion } from '@/lib/project/submission'
+import { exportExternalBuild, prepareSubmission, type SubmissionIssue, type SubmissionBuild, type SubmissionSelection } from '@/lib/project/submission'
 import type { ExternalEngine } from '@/lib/project/compile-compatibility'
 import { useWritingDrafts } from './useWritingDrafts'
 import { SourceSearchPanel } from './SourceSearchPanel'
@@ -111,9 +112,7 @@ function Files({ nodes, selected, main, onSelect, dirty, sourcePaths, onSetMain,
 
 type GenerateSource = (project: ProjectFileSystem, onNode?: (node: ResearchNodeData, line: number) => void) => string
 type CompileSnapshot = { main: string; files: ProjectFileSystem['files'] }
-type SubmissionSelection = Pick<SubmissionVersion, 'paths' | 'excluded' | 'drafts' | 'issues'> & { target: ProjectFileSystem }
-type CompiledSubmission = Omit<SubmissionVersion, 'id' | 'name' | 'createdAt'>
-type ExternalSubmission = Omit<CompiledSubmission, 'pdf' | 'warnings' | 'diagnostics'> & { checksum: string; downloadUrl: string }
+type ExternalSubmission = Omit<SubmissionBuild, 'pdf' | 'warnings' | 'diagnostics'> & { checksum: string; downloadUrl: string }
 
 function submissionDiagnostics(diagnostics: CompileDiagnostic[], files: ProjectFileSystem['files']): SubmissionIssue[] {
   return diagnostics.map(({ path, line, severity, message }) => {
@@ -131,6 +130,7 @@ export interface SourceWorkspaceHandle {
   locate: (location: SourceLocation) => void
   openGeneratedNode: (node: ResearchNodeData) => void
   confirmLeave: () => boolean
+  prepareProjectSwitch: () => Promise<boolean>
   snapshotRestoreBlock: (paths?: readonly string[]) => string | undefined
   getDraftBackup: () => PortableWritingState | undefined
   confirmBackupReplacement: () => Promise<boolean>
@@ -185,7 +185,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const [revision, setRevision] = useState<{ submissionId?: string }>()
   const [revisionRoundId, setRevisionRoundId] = useState<string>()
   const [includeDrafts, setIncludeDrafts] = useState(false)
-  const [submissionResult, setSubmissionResult] = useState<CompiledSubmission>()
+  const [submissionResult, setSubmissionResult] = useState<SubmissionBuild>()
   const [externalSubmission, setExternalSubmission] = useState<ExternalSubmission>()
   const externalPreparation = useRef(0)
   const [submissionExcluded, setSubmissionExcluded] = useState<ReadonlySet<string>>(new Set())
@@ -221,7 +221,24 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     return () => { active = false }
   }, [storage, writingKey])
   const wideTools = useRightToolPanelWide()
-  const [aiPlacement, setAiPlacement] = useState<'docked' | 'floating'>()
+  const [aiPreference, setAiPreference] = useState<{ key?: string; placement?: 'docked' | 'floating' }>({})
+  const aiPreferenceKey = writingKey && `research-canvas:ai-layout:${JSON.stringify(writingKey)}`
+  const aiPlacement = aiPreference.key === aiPreferenceKey ? aiPreference.placement : undefined
+  useEffect(() => {
+    if (!aiPreferenceKey) return
+    try {
+      const value = localStorage.getItem(aiPreferenceKey)
+      if (value === 'docked' || value === 'floating') setAiPreference({ key: aiPreferenceKey, placement: value })
+    } catch { /* The workspace can still use its responsive default. */ }
+  }, [aiPreferenceKey])
+  function setAiPlacement(placement: 'docked' | 'floating' | undefined) {
+    setAiPreference({ key: aiPreferenceKey, placement })
+    if (!aiPreferenceKey) return
+    try {
+      if (placement) localStorage.setItem(aiPreferenceKey, placement)
+      else localStorage.removeItem(aiPreferenceKey)
+    } catch { /* Keep the setting for this session. */ }
+  }
   const aiLayout = aiPlacement ?? (wideTools ? 'docked' : 'floating')
   const aiDocked = aiOpen && aiLayout === 'docked'
   const writingSplit = useRef<ImperativePanelGroupHandle>(null)
@@ -263,6 +280,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     return source === generated.content ? next : updateFileContent(next, 'main.tex', source)
   }, [generateSource])
   const workingProject = useMemo(() => withGeneratedSource(applyWritingDrafts(project, drafts)), [drafts, project, withGeneratedSource])
+  const savedProject = useMemo(() => withGeneratedSource(project), [project, withGeneratedSource])
   const workingFiles = workingProject.files
   const { headings, blocks, index, crossReferences, labelTitles } = useMemo(() => {
     const source = { files: workingFiles }
@@ -433,6 +451,18 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       if (!paths && dirty) return 'Save or discard the local drafts in Writing before restoring a snapshot.'
     },
     confirmLeave: () => !unprotected || window.confirm('Some drafts have not been saved locally. Leave this page?'),
+    async prepareProjectSwitch() {
+      if (writeInProgress.current || !journal.ready) {
+        setSaveError('Wait for local drafts to finish loading or saving before switching projects.')
+        return false
+      }
+      const persisted = await journal.storedDrafts()
+      if (dirty && (journal.loadError || Object.entries(drafts).some(([path, draft]) => !sameDraft(draft, persisted[path])))) {
+        setSaveError('Some drafts could not be saved on this device. Resolve them before switching projects.')
+        return false
+      }
+      return true
+    },
     getDraftBackup: captureWritingState,
     async confirmBackupReplacement() {
       if (writeInProgress.current || !journal.ready || journal.loadError) {
@@ -684,18 +714,26 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     markSourceChanged()
   }
 
-  async function compile(submissionSelection?: SubmissionSelection) {
+  async function compile(submissionSelection?: SubmissionSelection, chatSignal?: AbortSignal): Promise<{
+    feedback: ChatCompileFeedback; submission?: SubmissionBuild
+  } | undefined> {
     if (!main || locked || compileRequest.current) return
     if (!submissionSelection && conflicts.length) {
-      setComparison(conflicts[0])
+      if (!chatSignal) setComparison(conflicts[0])
       return
     }
     const controller = new AbortController()
+    const signal = chatSignal ? AbortSignal.any([chatSignal, controller.signal]) : controller.signal
     compileRequest.current = controller
     setBusy(true)
     const target = submissionSelection?.target ?? workingProject
     // A saved-only submission may differ from the sources in Monaco.
-    const updatePreview = !submissionSelection || sameSources(target.files, new Map([...workingFiles].filter(([, file]) => file.type !== 'directory')))
+    const updatePreview = !submissionSelection || (!chatSignal
+      && sameSources(target.files, new Map([...workingFiles].filter(([, file]) => file.type !== 'directory'))))
+    const feedback = (status: ChatCompileFeedback['status'], message: string, issues: CompileDiagnostic[] = [], log?: string) => ({
+      status, message: message.slice(0, 1000), diagnostics: issues.slice(0, 40).map(issue => ({ ...issue, message: issue.message.slice(0, 500) })),
+      log: log?.slice(-4000),
+    })
     if (updatePreview) {
       setSyncMessage('')
       setError('')
@@ -706,14 +744,15 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     }
     try {
       const snapshot = { main, files: updatePreview ? workingFiles : target.files }
-      const archive = await exportSourceArchive(target)
+      const packaged = submissionSelection && chatSignal ? await exportExternalBuild(target) : undefined
+      const archive = packaged?.zip ?? await exportSourceArchive(target)
       const response = await fetch(`/api/latex/compile?main=${encodeURIComponent(main)}&sync=1`, {
-        method: 'POST', body: archive, signal: controller.signal,
+        method: 'POST', body: archive, signal,
       })
       if (!response.ok) {
         const failure = await response.json()
-        if (controller.signal.aborted) return
-        if (submissionSelection) {
+        if (signal.aborted) return
+        if (submissionSelection && !chatSignal) {
           setSubmissionError([failure.error, failure.log].filter(Boolean).join('\n'))
           setSubmissionCompilerIssues(submissionDiagnostics(failure.diagnostics ?? [], target.files))
         }
@@ -722,25 +761,30 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
           setLog(failure.log ?? '')
           setDiagnostics(failure.diagnostics ?? [])
           setDiagnosticSnapshot(snapshot)
-          if (!aiDocked && !wideTools) setAiOpen(false)
+          if (!chatSignal && !aiDocked && !wideTools) setAiOpen(false)
           setPanel('problems')
         }
-        return
+        return { feedback: feedback('failed', failure.error ?? 'Compilation failed.', failure.diagnostics, failure.log) }
       }
       const result = await response.formData()
-      if (controller.signal.aborted) return
+      if (signal.aborted) return
       const pdf = result.get('pdf')
       if (!(pdf instanceof Blob)) throw new Error('The compiler did not return a PDF.')
       const map = result.get('sourceMap')
       const report = result.get('report')
       const info = typeof report === 'string' ? JSON.parse(report) as CompileReport : undefined
+      let submission: SubmissionBuild | undefined
       if (submissionSelection) {
         const { paths, excluded, drafts, issues } = submissionSelection
         const diagnostics = submissionDiagnostics(info?.diagnostics ?? [], target.files)
         if (info?.hasWarnings && !diagnostics.length) diagnostics.push({ severity: 'warning', message: 'The compiler reported warnings without a source location. See the compiler output.' })
-        setSubmissionCompilerIssues(diagnostics)
-        setSubmissionResult({ main, paths, excluded, drafts, issues, pdf, zip: archive, warnings: Boolean(info?.hasWarnings), diagnostics })
-        if (info?.hasWarnings) setSubmissionLog(info.log)
+        submission = { main, paths, excluded, drafts, issues, pdf, zip: archive, warnings: Boolean(info?.hasWarnings), diagnostics,
+          sourceChecksum: packaged?.checksum }
+        if (!chatSignal) {
+          setSubmissionCompilerIssues(diagnostics)
+          setSubmissionResult(submission)
+          if (info?.hasWarnings) setSubmissionLog(info.log)
+        }
       }
       if (updatePreview) {
         if (info) {
@@ -756,14 +800,16 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         setLastCompile(snapshot)
         setNarrowView('pdf')
       }
+      return { submission, feedback: feedback('passed', info?.hasWarnings ? 'Compiled with warnings.' : 'Compiled successfully.', info?.diagnostics, info?.log) }
     } catch (cause) {
-      if (controller.signal.aborted) return
+      if (signal.aborted) return
       const message = cause instanceof Error ? cause.message : 'Could not compile the project.'
-      if (submissionSelection) setSubmissionError(message)
+      if (submissionSelection && !chatSignal) setSubmissionError(message)
       if (updatePreview) {
         setError(message)
         setPanel('problems')
       }
+      return { feedback: feedback('failed', message) }
     } finally {
       compileRequest.current = null
       setBusy(false)
@@ -967,9 +1013,16 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
           onClose={() => { setAiOpen(false); aiTrigger.current?.focus() }}
           icon={<Sparkles className="size-4 shrink-0 text-indigo-600" />}>
           {storage && journal.key && <WritingAiWorkbench key={JSON.stringify(journal.key)} storage={storage} projectKey={journal.key}
-            project={project} working={workingProject} drafts={drafts} selected={selected} main={main} active={active} sourceMoves={sourceMoves}
+            project={project} working={workingProject} saved={savedProject} drafts={drafts} selected={selected} main={main} active={active} sourceMoves={sourceMoves}
             disabled={locked || Boolean(conflicts.length)} compiler={aiCompiler} selection={aiSelection} onRevision={() => setRevision({})}
-            onAction={applyChatAction} onLocate={locateAiEvidence} onCompile={() => void compile()} />}
+            onAction={applyChatAction} onLocate={locateAiEvidence}
+            onCompile={signal => compile(undefined, signal)} onBuildSubmission={(selection, signal) => compile(selection, signal)}
+            onExternalSubmission={(include, excluded) => {
+              resetSubmissionBuild()
+              setIncludeDrafts(include)
+              setSubmissionExcluded(new Set(excluded))
+              setSubmissionOpen(true)
+            }} onLayout={setAiPlacement} />}
         </RightToolPanel>
         </ResizablePanel>
       </ResizablePanelGroup>

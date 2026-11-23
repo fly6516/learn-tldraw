@@ -12,6 +12,7 @@ import type {
   ProjectFile,
 } from '@/lib/project/types'
 import {
+  createDefaultProject,
   createProjectFileSystem,
   updateFileContent,
   addFigure,
@@ -22,7 +23,6 @@ import {
   type FileTreeNode,
 } from '@/lib/project/file-system'
 import { openProjectStorage, readProject, writeProject } from '@/lib/project/storage'
-import { TEMPLATE_PRESETS } from '@/lib/project/templates'
 
 interface ProjectFileSystemContextValue {
   fileSystem: ProjectFileSystem | null
@@ -93,19 +93,7 @@ export function ProjectFileSystemProvider({ children, storageKey }: { children: 
 
   const initializeProject = useCallback(
     (template?: LatexTemplate, projectName: string = 'Untitled Project') => {
-      const defaultTemplate = template || {
-        documentClass: TEMPLATE_PRESETS['english-article'].documentClass,
-        documentClassOptions: TEMPLATE_PRESETS['english-article'].documentClassOptions,
-        preamble: TEMPLATE_PRESETS['english-article'].preambleTemplate,
-        packages: TEMPLATE_PRESETS['english-article'].packages.map(name => ({ name })),
-        metadata: {
-          language: 'en',
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        },
-      }
-
-      const fs = createProjectFileSystem(defaultTemplate, projectName)
+      const fs = template ? createProjectFileSystem(template, projectName) : createDefaultProject(projectName)
       setFileSystem(fs)
     },
     []

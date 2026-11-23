@@ -1,3 +1,4 @@
+import { TEMPLATE_PRESETS } from './templates'
 /**
  * Project File System Manager
  * Manages the complete file structure of a LaTeX project
@@ -15,6 +16,18 @@ import { generatePreamble } from './template-parser'
 /**
  * Create a new project file system
  */
+export function createDefaultProject(projectName: string) {
+  const preset = TEMPLATE_PRESETS['english-article']
+  const now = new Date().toISOString()
+  return createProjectFileSystem({
+    documentClass: preset.documentClass,
+    documentClassOptions: preset.documentClassOptions,
+    preamble: preset.preambleTemplate,
+    packages: preset.packages.map(name => ({ name })),
+    metadata: { language: 'en', createdAt: now, updatedAt: now },
+  }, projectName)
+}
+
 export function createProjectFileSystem(
   template: LatexTemplate,
   projectName: string = 'Untitled Project'

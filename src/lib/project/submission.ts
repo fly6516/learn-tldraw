@@ -11,6 +11,8 @@ export type SubmissionFiles = { pdf: Blob; zip: Blob; warnings: boolean; diagnos
 export type SubmissionVersion = SubmissionFiles & { id: string; name: string; createdAt: string; main: string;
   paths: string[]; excluded: string[]; drafts: string[]; issues: SubmissionIssue[]; externalEngine?: ExternalEngine; sourceChecksum?: string }
 export type SubmissionVersionInfo = Omit<SubmissionVersion, 'pdf' | 'zip'>
+export type SubmissionBuild = Omit<SubmissionVersion, 'id' | 'name' | 'createdAt'>
+export type SubmissionSelection = Pick<SubmissionVersion, 'paths' | 'excluded' | 'drafts' | 'issues'> & { target: ProjectFileSystem }
 
 export async function exportExternalBuild(project: ProjectFileSystem) {
   const files = new Map([...project.files].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0))

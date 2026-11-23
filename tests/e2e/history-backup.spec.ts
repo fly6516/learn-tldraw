@@ -138,7 +138,51 @@ test('restores archived submission files and reviewer replies from Chromium into
     }
     await openMenu(restored, 'Project Snapshots')
     await expect(restored.getByText('Before transfer', { exact: true })).toBeVisible()
+    if (!isFixture) await verifyLibraryTransfer(restored, archive)
   } finally {
     await other.close()
   }
 })
+
+async function verifyLibraryTransfer(page: Page, archive: string) {
+  const openList = async () => {
+    await page.getByRole('link', { name: 'Back to projects' }).click()
+    await expect(page.getByRole('heading', { name: 'Research projects' })).toBeVisible()
+  }
+  const chooseFile = () => page.getByLabel('Choose project ZIP or backup')
+  const source = page.getByRole('region', { name: 'Source editor' })
+  async function draft(text: string) {
+    await page.getByRole('button', { name: 'results.tex', exact: true }).click()
+    const editor = page.getByRole('textbox', { name: 'Project source editor' })
+    await editor.press('Control+End')
+    await page.keyboard.insertText('\n' + text + '\n')
+    await expect(page.getByText('1 local draft · Not saved to project', { exact: true })).toBeVisible()
+  }
+  await page.goto('/research')
+  await chooseFile().setInputFiles(archive)
+  await expect(page.getByRole('heading', { name: 'Morning Walk Study', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Writing', exact: true }).click()
+  await draft('Draft for the Morning Walk project only.')
+  await openList()
+  const fixture = await page.request.get('/api/latex/test-fixture')
+  expect(fixture.ok()).toBe(true)
+  await chooseFile().setInputFiles({ name: 'Second study.zip', mimeType: 'application/zip', buffer: await fixture.body() })
+  await expect(page.getByRole('heading', { name: 'Second study', exact: true })).toBeVisible()
+  await draft('Draft for the second project only.')
+  await openList()
+  await page.getByRole('link', { name: 'Open Morning Walk Study' }).click()
+  await expect(page).toHaveURL(/project=[a-f0-9-]+.*view=write/)
+  await page.reload()
+  await expect(source.getByText('sections/results.tex', { exact: true })).toBeVisible()
+  await page.getByRole('textbox', { name: 'Project source editor' }).press('Control+End')
+  await expect(source.locator('.view-lines')).toContainText('Draft for the Morning Walk project only.')
+  await expect(source.locator('.view-lines')).not.toContainText('Draft for the second project only.')
+  await page.getByRole('button', { name: 'Revision rounds', exact: true }).click()
+  const revision = page.getByRole('dialog', { name: 'Revision rounds' })
+  await expect(revision.getByText('Clarify the reported results.')).toBeVisible()
+  await expect(revision.getByText('Submission v1', { exact: true })).toBeVisible()
+  await revision.getByRole('button', { name: 'Close', exact: true }).click()
+  await openList()
+  await page.getByRole('link', { name: 'Open Second study' }).click()
+  await expect(source.locator('.view-lines')).toContainText('Draft for the second project only.')
+}

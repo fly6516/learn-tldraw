@@ -1,5 +1,6 @@
-import { ResearchWorkspace } from '@/components/research/ResearchWorkspace'
+import { Suspense } from 'react'
+import { ProjectLibrary } from '@/components/research/ProjectLibrary'
 
 export default function ResearchPage() {
-  return <ResearchWorkspace />
+  return <Suspense fallback={<p role="status">Opening local projects…</p>}><ProjectLibrary /></Suspense>
 }

@@ -90,8 +90,16 @@ test('restores exact submission archives, linked rounds, snapshots and optional 
     snapshots: [{ id: 'snapshot', name: 'Initial', createdAt: now, project }],
     ai: { history: { selected: 'chat', conversations: [{ id: 'chat', title: 'Review', messages: [
       { id: 'user-msg', role: 'user', parts: [{ type: 'text', text: 'Review this.' }], metadata: { run: 'run' } },
-    ], runs: { run: { sources: {}, pathRevision: 0 } } }] }, moves: [{ from: 'old.tex', to: 'main.tex' }],
-    tasks: { run: [{ kind: 'saved', at: Date.now() }] }, checkpoints: {}, verifications: {} },
+      { id: 'local-msg', role: 'assistant', parts: [{ type: 'text', text: 'Review the manifest.' }], metadata: {
+        run: 'submission', local: true, complete: true, submission: { name: 'Submission v1' },
+        feedback: { status: 'passed', message: 'Compiled.', diagnostics: [] },
+      } },
+    ], runs: { run: { sources: {}, pathRevision: 0, reply: {
+      round: 'round', roundName: 'Review', comment: 'comment', commentText: 'Clarify the methods.',
+      originalId: 'v1', revisedId: 'v2', paths: ['main.tex'], kind: 'changed',
+    } } } }] }, moves: [{ from: 'old.tex', to: 'main.tex' }],
+    tasks: { run: [{ kind: 'reply-saved', at: Date.now() }], submission: [{ kind: 'archived', at: Date.now(), detail: 'Submission v1' }] },
+    checkpoints: {}, verifications: {} },
   }
   const exported = await encodeProjectBackup(canvas, project, undefined, history)
   const restored = (await decodeProjectBackup(exported)).history

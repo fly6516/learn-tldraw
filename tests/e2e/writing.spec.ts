@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import { readFile } from 'node:fs/promises'
 import { testEvidence, testMethodEdit, testMethodLine, testResultEdit, testResultLine, testScenarios } from '../../src/lib/project/test-paper'
 
 const workspace = '/research-test?view=write'
@@ -15,10 +16,10 @@ async function openAi(page: Page) {
 
 async function scopeBoth(page: Page) {
   await page.getByRole('button', { name: 'methods.tex', exact: true }).click()
+  await page.getByRole('combobox', { name: 'Writing workflow' }).selectOption('project')
   await page.getByText('Scope · 1', { exact: true }).click()
   await page.getByRole('checkbox', { name: 'sections/results.tex', exact: true }).click()
   await page.getByText('Scope · 2', { exact: true }).click()
-  await page.getByRole('combobox', { name: 'Writing workflow' }).selectOption('project')
 }
 
 async function request(page: Page, text: string) {
@@ -32,6 +33,95 @@ async function selectSource(page: Page, name: string) {
   await page.getByRole('textbox', { name: 'Project source editor' }).press('Control+Home')
   return source
 }
+
+test('runs writing, preview, submission and a grounded reviewer reply from one conversation', async ({ page }, info) => {
+  test.setTimeout(120_000)
+  await page.goto(workspace)
+  await openAi(page)
+  await request(page, '/layout floating')
+  await expect(page.getByRole('article', { name: 'Assistant' }).getByText('Writing AI is now floating.')).toBeVisible()
+  await page.reload()
+  await openAi(page)
+  await expect(page.getByRole('button', { name: /same level|dock/i })).toBeVisible()
+  await request(page, '/layout docked')
+
+  await request(page, 'Test: compile preview')
+  await page.getByRole('button', { name: 'Approve preview compile' }).click()
+  await expect(page.getByText(/^Compile passed ·/)).toBeVisible()
+  await request(page, 'Test: explain build')
+  await expect(page.getByText(/The compiler result is available/)).toBeVisible()
+
+  await request(page, 'Test: prepare submission')
+  const first = page.getByRole('region', { name: 'Submission task' }).first()
+  await first.getByText(/^ZIP manifest/).click()
+  await expect(first.getByRole('checkbox', { name: 'references.bib' })).not.toBeChecked()
+  await first.getByRole('button', { name: 'Compile reviewed ZIP' }).click()
+  await expect(first.getByText(/ZIP SHA-256/)).toBeVisible()
+  const original = []
+  for (const kind of ['ZIP', 'PDF']) {
+    const pending = page.waitForEvent('download')
+    await first.getByRole('button', { name: kind === 'ZIP' ? 'Download compiled source ZIP' : 'Download compiled PDF' }).click()
+    const file = info.outputPath(`first.${kind.toLowerCase()}`)
+    await (await pending).saveAs(file)
+    original.push(await readFile(file))
+  }
+  await first.getByRole('button', { name: 'Confirm submission archive' }).click()
+  await expect(first.getByText('Archived Submission v1.')).toBeVisible()
+
+  await request(page, testScenarios.fail)
+  const proposals = page.getByRole('region', { name: 'Source change proposal' })
+  await expect(proposals.last().getByText('sections/methods.tex', { exact: true })).toBeVisible()
+  await expect(proposals.last().getByText('sections/results.tex', { exact: true })).toBeVisible()
+  await proposals.last().getByRole('button', { name: 'Save if verification passes' }).click()
+  await expect(proposals.last().getByText(/^Verification failed\./)).toBeVisible()
+  await expect(await selectSource(page, 'results.tex')).toContainText(testResultLine)
+  await request(page, 'Test: explain build')
+  await expect(page.getByText(/The compiler result is available: failed/)).toBeVisible()
+  await proposals.last().getByRole('button', { name: 'Use diagnostics in chat' }).click()
+  await expect(proposals).toHaveCount(2)
+  await proposals.last().getByRole('button', { name: 'Save if verification passes' }).click()
+  await expect(proposals.last().getByText('Saved to project', { exact: true })).toBeVisible()
+  await expect(await selectSource(page, 'results.tex')).toContainText(testResultEdit)
+
+  await request(page, '/submission Submission v2')
+  const second = page.getByRole('region', { name: 'Submission task' }).last()
+  await second.getByRole('button', { name: 'Compile reviewed ZIP' }).click()
+  await second.getByRole('button', { name: 'Confirm submission archive' }).click()
+  await expect(second.getByText('Archived Submission v2.')).toBeVisible()
+
+  await request(page, '/newround Round 1 | Submission v1')
+  const setup = page.getByRole('region', { name: 'Revision setup' })
+  await setup.getByRole('button', { name: 'Confirm revision round' }).click()
+  await expect(setup.getByText('Revision round created.')).toBeVisible()
+  await request(page, '/comment sections/results.tex | Clarify the reported results.')
+  await setup.getByRole('button', { name: 'Confirm reviewer comment' }).click()
+  await expect(setup.getByText('Reviewer comment added.')).toBeVisible()
+
+  await request(page, 'Test: reply to comment 1')
+  await page.getByRole('button', { name: 'Draft reply from archived changes' }).click()
+  const reply = page.getByRole('region', { name: 'Reviewer reply proposal' })
+  await expect(reply.getByText(/Archived evidence · sections\/results\.tex/)).toBeVisible()
+  await expect(reply.getByText('Reply saved.')).toHaveCount(0)
+  await reply.getByRole('button', { name: 'Confirm archive link and save reply' }).click()
+  await expect(reply.getByText('Reply saved.')).toBeVisible()
+  await request(page, '/letter')
+  const letter = page.getByRole('region', { name: 'Response letter' })
+  await expect(letter.getByText(/We clarified the synthetic mean temperature/)).toBeVisible()
+  const downloadedLetter = page.waitForEvent('download')
+  await letter.getByRole('button', { name: 'Download response letter' }).click()
+  expect((await downloadedLetter).suggestedFilename()).toBe('Round 1-response.md')
+
+  await page.reload()
+  await openAi(page)
+  await expect(reply.getByText('Reply saved.')).toBeVisible()
+  for (const [index, kind] of ['ZIP', 'PDF'].entries()) {
+    const pending = page.waitForEvent('download')
+    await first.getByRole('button', { name: kind === 'ZIP' ? 'Download compiled source ZIP' : 'Download compiled PDF' }).click()
+    const file = info.outputPath(`restored.${kind.toLowerCase()}`)
+    await (await pending).saveAs(file)
+    expect(await readFile(file)).toEqual(original[index])
+  }
+})
 
 test('imports the sample, validates and saves a streamed edit, and restores the exported backup', async ({ page, browser }, info) => {
   await page.goto(workspace)
