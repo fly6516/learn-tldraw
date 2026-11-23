@@ -14,7 +14,7 @@ import { externalManuscriptVerification, validateManuscript, type ChatVerificati
 import { sameDraft, type WritingDrafts, type WritingKey } from '@/lib/project/writing-drafts'
 import type { ManuscriptTask } from '@/lib/project/manuscript-task'
 import type { SourceMove } from '@/lib/project/writing-ai-evidence'
-import { assessClaim, claimSourceLine } from '@/lib/project/writing-claims'
+import { assessClaim, claimPresent, claimSourceLine } from '@/lib/project/writing-claims'
 import { ClaimEvidence, type ReviewedClaim } from './ClaimEvidence'
 import { ChatExternalBuild } from './ChatExternalBuild'
 
@@ -84,8 +84,11 @@ export function ManuscriptReviewDialog(props: {
   const claims = useMemo(() => {
     const found = new Map<string, ReviewedClaim>()
     for (const batch of props.taskBatches) {
-      if (!runs.includes(batch.run)) continue
+      const checkpoint = batches?.[runs.indexOf(batch.run)]
+      if (!checkpoint) continue
       batch.claims?.forEach((original, index) => {
+        const applied = checkpoint.after[original.path]
+        if (!applied || !claimPresent(original, text(applied))) return
         const id = `${batch.run}:${index}`
         const review = props.claimReviews?.[id]
         const claim = review?.evidence ? { ...original, references: review.evidence.references, calculations: review.evidence.calculations,
@@ -96,7 +99,7 @@ export function ManuscriptReviewDialog(props: {
       })
     }
     return [...found.values()]
-  }, [props.claimReviews, props.sourceMoves, props.taskBatches, runs, working])
+  }, [batches, props.claimReviews, props.sourceMoves, props.taskBatches, runs, working])
   const needsClaimReview = claims.some(item => paths.includes(item.claim.path) && item.assessment.needsReview)
   const queue = [
     ...claims.filter(item => item.assessment.needsReview).map(({ id, claim, review, assessment }) => ({ id, path: claim.path,

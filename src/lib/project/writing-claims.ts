@@ -35,6 +35,11 @@ export type WritingClaims = z.infer<typeof writingClaimsSchema>
 export type ClaimReference = z.infer<typeof evidence>
 export type ClaimReview = z.infer<typeof claimReviewSchema>
 
+export function claimPresent(claim: WritingClaims[number], source: string | undefined) {
+  return Boolean(source && (claim.kind === 'citation'
+    ? findCitations(claim.path, source).some(item => item.key === claim.quote) : source.includes(claim.quote)))
+}
+
 export function claimSourceLine(claim: Pick<WritingClaims[number], 'path' | 'kind' | 'quote'>, project: ProjectFileSystem) {
   const file = project.files.get(claim.path)
   const source = file && 'content' in file ? file.content : undefined
@@ -67,8 +72,7 @@ export function assessClaim(claim: WritingClaims[number], project: ProjectFileSy
   revision: number | undefined, review?: ClaimReview, reviewedPath = claim.path) {
   const file = project.files.get(claim.path)
   const source = file && 'content' in file ? file.content : undefined
-  const present = Boolean(source && (claim.kind === 'citation'
-    ? findCitations(claim.path, source).some(item => item.key === claim.quote) : source.includes(claim.quote)))
+  const present = claimPresent(claim, source)
   const refs = claim.references.map(reference => {
     const location = locateEvidence(project, reference, moves, revision)
     if (!location) return { location: undefined, text: null }
@@ -93,7 +97,7 @@ export function assessClaim(claim: WritingClaims[number], project: ProjectFileSy
   const needsReview = !excluded && !confirmed && (!present || claim.needsConfirmation || calculated.some(item => !item.current)
     || !refs.some(ref => ref.location) && !calculated.some(item => item.current)
     || review?.decision === 'requested' || review?.decision === 'confirmed' || review?.decision === 'excluded')
-  return { fingerprint, present, confirmed, excluded, needsReview, locations: refs.map(ref => ref.location) }
+  return { fingerprint, present, confirmed, excluded, needsReview, locations: refs.map(ref => ref.location), calculations: calculated }
 }
 
 function reversibleChange(edit: ProjectSuggestion['edits'][number], quote: string) {

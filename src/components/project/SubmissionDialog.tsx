@@ -10,6 +10,9 @@ import type { WritingKey } from '@/lib/project/writing-drafts'
 import { listSubmissionVersions, readSubmissionFiles, saveSubmissionVersion } from '@/lib/project/storage'
 import { ExternalCompilePanel } from './ExternalCompilePanel'
 import type { CompileCompatibility, ExternalEngine } from '@/lib/project/compile-compatibility'
+import type { ProjectFileSystem } from '@/lib/project/types'
+import { claimSourceLine } from '@/lib/project/writing-claims'
+import { SubmissionEvidenceFindings, SubmissionEvidencePanel, useSubmissionEvidence } from './SubmissionEvidence'
 
 export function download(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob)
@@ -28,7 +31,7 @@ type VersionDraft = Omit<SubmissionVersion, 'id' | 'createdAt' | 'name'>
 
 export function SubmissionDialog({ main, drafts, includeDrafts, onDraftChoice, conflicting, paths, excluded, onToggle,
   issues, ready, busy, error, log, result, compilerIssues, onClose, onCompile, onLocate, database, storageKey,
-  compatibility, external, onPrepareExternal, onAttachExternal, onStartRevision }: {
+  compatibility, external, onPrepareExternal, onAttachExternal, onStartRevision, target, working, onEvidenceLocate }: {
   main: string
   drafts: string[]
   includeDrafts: boolean
@@ -54,12 +57,16 @@ export function SubmissionDialog({ main, drafts, includeDrafts, onDraftChoice, c
   onPrepareExternal: () => Promise<void>
   onAttachExternal: (pdf: File, engine: ExternalEngine, checksum: string) => void
   onStartRevision: (submissionId: string) => void
+  target: ProjectFileSystem
+  working: ProjectFileSystem
+  onEvidenceLocate: (path: string, line?: number) => void
 }) {
   const [versions, setVersions] = useState<SubmissionVersionInfo[]>([])
   const [versionName, setVersionName] = useState('')
   const [saving, setSaving] = useState(false)
   const [archived, setArchived] = useState<VersionDraft>()
   const [archiveError, setArchiveError] = useState('')
+  const evidence = useSubmissionEvidence(database, storageKey, target, result)
   useEffect(() => {
     if (!database || !storageKey) return
     let active = true
@@ -70,18 +77,19 @@ export function SubmissionDialog({ main, drafts, includeDrafts, onDraftChoice, c
 
   async function archive() {
     const name = versionName.trim()
-    if (!name || !result || !database || !storageKey || saving) return
+    if (!name || !result || !database || !storageKey || saving || !evidence.canArchive) return
     setSaving(true)
     setArchiveError('')
     try {
-      const version = { ...result, name, id: crypto.randomUUID(), createdAt: new Date().toISOString() }
+      const record = await evidence.archiveRecord()
+      const version = { ...result, evidence: record, name, id: crypto.randomUUID(), createdAt: new Date().toISOString() }
       await saveSubmissionVersion(database, storageKey, version)
       const { pdf, zip, ...info } = version
       setVersions(current => [info, ...current])
       setArchived({ ...info, pdf, zip })
       setVersionName('')
-    } catch {
-      setArchiveError('Could not save the submission version. The compiled downloads are still available.')
+    } catch (cause) {
+      setArchiveError(cause instanceof Error ? cause.message : 'Could not save the submission version. The compiled downloads are still available.')
     } finally {
       setSaving(false)
     }
@@ -137,6 +145,8 @@ export function SubmissionDialog({ main, drafts, includeDrafts, onDraftChoice, c
           </li>)}
         </ul>
       </section>
+      <SubmissionEvidencePanel review={evidence} working={working} disabled={busy || saving}
+        onLocate={finding => onEvidenceLocate(finding.path, claimSourceLine(finding, working))} />
       <p role="status" className="text-sm" aria-label="Compilation">
         {busy ? 'Compiling the confirmed source ZIP…' : result?.externalEngine ? `External PDF attached · ${result.externalEngine} · Source match confirmed by you`
           : result ? (result.warnings ? 'Compiled with warnings' : 'Compiled successfully') : error ? 'Compilation failed' : 'Ready to compile'}
@@ -158,7 +168,9 @@ export function SubmissionDialog({ main, drafts, includeDrafts, onDraftChoice, c
         <label className="flex-1 space-y-1 text-sm font-medium"><span>Version name</span>
           <Input value={versionName} onChange={event => setVersionName(event.target.value)} maxLength={100} disabled={saving} />
         </label>
-        <Button type="submit" variant="outline" disabled={saving || !versionName.trim() || archived?.pdf === result.pdf}>Save submission version</Button>
+        <Button type="submit" variant="outline" disabled={saving || !versionName.trim() || archived?.pdf === result.pdf || !evidence.canArchive}>
+          Save submission version
+        </Button>
       </form>}
       {!!versions.length && <section aria-label="Archived submissions" className="space-y-2 border-t pt-2 text-sm">
         <h2 className="font-medium">Archived submissions</h2>
@@ -167,6 +179,10 @@ export function SubmissionDialog({ main, drafts, includeDrafts, onDraftChoice, c
           <p className="mt-1 break-all">{version.main} · {version.paths.length} files · {version.drafts.length} local drafts</p>
           <p>{version.externalEngine ? `External PDF · ${version.externalEngine}` : version.warnings ? 'Compiled with warnings' : 'Compiled successfully'} · {version.issues.length} preflight findings</p>
           {version.sourceChecksum && <p className="break-all text-xs">ZIP SHA-256 <code>{version.sourceChecksum}</code></p>}
+          {version.evidence && <details className="mt-1"><summary>Archived evidence check · {version.evidence.checked} claims</summary>
+            {version.evidence.exceptionAccepted && <p>Evidence exceptions accepted for this ZIP.</p>}
+            <SubmissionEvidenceFindings findings={version.evidence.findings} />
+          </details>}
           <details className="mt-1"><summary>Files and findings</summary>
             <ul className="max-h-40 overflow-auto break-all">
               {version.paths.map(path => <li key={path}>{path}{version.drafts.includes(path) && ' · Local draft'}</li>)}

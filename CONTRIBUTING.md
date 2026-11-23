@@ -47,6 +47,10 @@ In PowerShell set `$env:RESEARCH_LIVE_TEST = '1'` before running the command. To
 local copy of the same fixture, set `RESEARCH_LIVE_TEST_ZIP` to the ZIP path or
 `RESEARCH_LIVE_TEST_PATH` to a locally seeded demo route including `?view=write`.
 
+`tests/e2e/submission-evidence.spec.ts` checks saved manuscript claims against the selected
+manifest and the final ZIP. It excludes a supporting CSV, checks source navigation, and
+confirms that the project archive retains the author's exception after a reload.
+
 The optional Biber browser test builds a separate synthetic River Gauge Study. Install
 pdfLaTeX, biblatex, Biber, latexmk, and Poppler `pdftotext` in the test environment. Set
 `RESEARCH_BIBER_TEST=1` on a system with those commands on PATH, or set

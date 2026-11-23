@@ -10,6 +10,7 @@ import type { SourceMove } from './writing-ai-evidence'
 import { chatWorkflowSchema, compileFeedbackSchema, revisionSetupSchema, submissionChatSchema, type ChatCheckpoint, type ChatHistory, type ChatTaskStep, type WritingChatMessage } from './writing-chat'
 import type { ChatVerification, ManuscriptBuild } from './writing-chat-validation'
 import { manuscriptTaskSchema } from './manuscript-task'
+import { submissionEvidenceSchema } from './submission-evidence'
 
 export type PortableProjectHistory = {
   publication?: { submissions: SubmissionVersion[]; rounds: RevisionRound[] }
@@ -33,8 +34,8 @@ const storedBlob = z.object({ sha256: hash, bytes: z.number().int().positive() }
 const submission = identity.extend({
   main: path, paths: z.array(path), excluded: z.array(path), drafts: z.array(path), issues: z.array(issue),
   warnings: z.boolean(), diagnostics: z.array(issue), externalEngine: z.enum(['pdflatex', 'xelatex', 'lualatex']).optional(),
-  sourceChecksum: hash.optional(), pdf: storedBlob, zip: storedBlob,
-})
+  sourceChecksum: hash.optional(), pdf: storedBlob, zip: storedBlob, evidence: submissionEvidenceSchema.optional(),
+}).refine(value => !value.evidence || value.evidence.sourceChecksum === value.sourceChecksum && value.sourceChecksum === value.zip.sha256)
 const target = z.discriminatedUnion('type', [
   z.object({ type: z.literal('file'), path }),
   z.object({ type: z.literal('section'), anchor: sectionAnchorSchema }),

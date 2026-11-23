@@ -816,7 +816,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     }
     try {
       const snapshot = { main, files: updatePreview ? workingFiles : target.files }
-      const packaged = submissionSelection && chatSignal ? await exportExternalBuild(target) : undefined
+      const packaged = submissionSelection ? await exportExternalBuild(target) : undefined
       const archive = packaged?.zip ?? await exportSourceArchive(target)
       const response = await fetch(`/api/latex/compile?main=${encodeURIComponent(main)}&sync=1`, {
         method: 'POST', body: archive, signal,
@@ -1183,6 +1183,10 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         </div>
       </footer>
       {submission && <SubmissionDialog main={main} drafts={draftPaths} includeDrafts={includeDrafts} paths={submission.paths}
+        target={submission.target} working={workingProject} onEvidenceLocate={(path, line) => {
+          setSubmissionOpen(false)
+          openFile(path, line)
+        }}
         excluded={submission.excluded} issues={submission.issues} compilerIssues={submissionCompilerIssues}
         compatibility={submission.compatibility} external={externalSubmission} onPrepareExternal={prepareExternalSubmission} onAttachExternal={attachExternalPdf}
         conflicting={includeDrafts && conflicts.some(path => !submission.excluded.has(path))}

@@ -5,11 +5,13 @@ import { groupEnd, lineNumber, maskLatexCode, type SourceLocation } from './late
 import type { ProjectFileSystem } from './types'
 import { detectCompileCompatibility, type ExternalEngine } from './compile-compatibility'
 import { exportSourceArchive } from './source-archive'
+import type { SubmissionEvidence } from './submission-evidence'
 
 export type SubmissionIssue = { severity: 'error' | 'warning'; message: string; location?: SourceLocation }
 export type SubmissionFiles = { pdf: Blob; zip: Blob; warnings: boolean; diagnostics: SubmissionIssue[] }
 export type SubmissionVersion = SubmissionFiles & { id: string; name: string; createdAt: string; main: string;
-  paths: string[]; excluded: string[]; drafts: string[]; issues: SubmissionIssue[]; externalEngine?: ExternalEngine; sourceChecksum?: string }
+  paths: string[]; excluded: string[]; drafts: string[]; issues: SubmissionIssue[]; externalEngine?: ExternalEngine; sourceChecksum?: string
+  evidence?: SubmissionEvidence }
 export type SubmissionVersionInfo = Omit<SubmissionVersion, 'pdf' | 'zip'>
 export type SubmissionBuild = Omit<SubmissionVersion, 'id' | 'name' | 'createdAt'>
 export type SubmissionSelection = Pick<SubmissionVersion, 'paths' | 'excluded' | 'drafts' | 'issues'> & { target: ProjectFileSystem }

@@ -10,6 +10,7 @@ import type { ProjectFileSystem } from './types'
 import type { ProjectSnapshot, ProjectSnapshotInfo } from './snapshots'
 import { restoreSnapshotFiles } from './snapshots'
 import type { SubmissionVersion, SubmissionVersionInfo } from './submission'
+import { submissionEvidenceLedger } from './submission-evidence'
 import type { RevisionComment, RevisionResponse, RevisionRound } from './revision-rounds'
 import { applyWritingDrafts, draftConflicts, editableSource, sameDraft, type PortableWritingState, type WritingDraft, type WritingDrafts, type WritingKey, type WritingView } from './writing-drafts'
 
@@ -79,6 +80,29 @@ export async function readSubmissionFiles(database: IDBDatabase, key: WritingKey
     const request = transaction.objectStore(storeName).get(['submission-files', ...key, id])
     await complete(transaction)
     return request.result as Pick<SubmissionVersion, 'pdf' | 'zip'> | undefined
+}
+
+export async function readSubmissionEvidence(database: IDBDatabase, key: WritingKey) {
+    const transaction = database.transaction(storeName)
+    const store = transaction.objectStore(storeName)
+    const history = store.get(['ai-history', ...key])
+    const moves = store.get(['source-moves', ...key])
+    function records<T>(prefix: string) {
+        const entries: Record<string, T> = Object.create(null)
+        const range = IDBKeyRange.bound([prefix, ...key], [prefix, ...key, []], true, true)
+        const request = store.openCursor(range)
+        request.onsuccess = () => {
+            const cursor = request.result
+            if (!cursor) return
+            entries[(cursor.key as [string, ...WritingKey, string])[3]] = cursor.value
+            cursor.continue()
+        }
+        return entries
+    }
+    const checkpoints = records<ChatCheckpoint>('ai-change')
+    const tasks = records<ChatTaskStep[]>('ai-task')
+    await complete(transaction)
+    return submissionEvidenceLedger(history.result, checkpoints, tasks, moves.result ?? [])
 }
 
 export async function listRevisionRounds(database: IDBDatabase, key: WritingKey) {

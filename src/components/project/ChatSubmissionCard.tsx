@@ -11,6 +11,8 @@ import type { WritingDrafts, WritingKey } from '@/lib/project/writing-drafts'
 import { download, submissionFilename } from './SubmissionDialog'
 import { ChatExternalBuild } from './ChatExternalBuild'
 import type { ChatVerification } from '@/lib/project/writing-chat-validation'
+import { claimSourceLine } from '@/lib/project/writing-claims'
+import { SubmissionEvidencePanel, useSubmissionEvidence } from './SubmissionEvidence'
 
 export function ChatSubmissionCard({ runId, request, saved, working, drafts, main, active, disabled, storage, projectKey, archived, manuscriptReport,
   onBuild, onLocate, onExternal, onResult, onArchive }: {
@@ -46,6 +48,8 @@ export function ChatSubmissionCard({ runId, request, saved, working, drafts, mai
   const allowed = active && !disabled && !busy && !archiveName
   const canBuild = main && !invalid.length && !selection.issues.some(issue => issue.severity === 'error')
   const externalRequired = selection.compatibility.bibliography === 'biber' || ['pdflatex', 'lualatex'].includes(selection.compatibility.engine ?? '')
+  const result = build?.selection === selection || archiveName ? build?.result : undefined
+  const evidence = useSubmissionEvidence(archiveName ? null : storage, projectKey, selection.target, result)
   useEffect(() => {
     current.current = selection
     return () => operation.current?.abort()
@@ -94,11 +98,14 @@ export function ChatSubmissionCard({ runId, request, saved, working, drafts, mai
 
   async function archive() {
     const title = name.trim()
-    if (!allowed || !title || !build || build.selection !== selection || operation.current) return
+    if (!allowed || !title || !build || build.selection !== selection || operation.current || !evidence.canArchive) return
     setBusy(true)
     setError('')
     try {
-      const archivedVersion = await saveSubmissionVersion(storage, projectKey, { ...build.result, id: runId, name: title, createdAt: new Date().toISOString() }, runId)
+      const record = await evidence.archiveRecord()
+      if (current.current !== selection) throw new Error('The ZIP selection changed. Review the current build again.')
+      const archivedVersion = await saveSubmissionVersion(storage, projectKey, { ...build.result, evidence: record,
+        id: runId, name: title, createdAt: new Date().toISOString() }, runId)
       setArchiveName(archivedVersion.name)
       await onArchive()
     } catch (cause) {
@@ -106,7 +113,6 @@ export function ChatSubmissionCard({ runId, request, saved, working, drafts, mai
     } finally { setBusy(false) }
   }
 
-  const result = build?.selection === selection || archiveName ? build?.result : undefined
   const compiler = feedback?.selection === selection ? feedback.result : undefined
   const filename = submissionFilename(archiveName || name.trim() || main.split('/').at(-1)?.replace(/\.tex$/i, '') || 'submission')
   async function downloadResult(kind: 'zip' | 'pdf') {
@@ -145,6 +151,8 @@ export function ChatSubmissionCard({ runId, request, saved, working, drafts, mai
           {issue.message} · {issue.location.path}:{issue.location.line}
         </button> : issue.message}
       </div>)}
+      <SubmissionEvidencePanel review={evidence} working={working} disabled={!allowed}
+        onLocate={finding => onLocate(finding.path, claimSourceLine(finding, working) ?? 1)} />
       {!result && <div className="flex flex-wrap gap-1">
         <Button size="sm" disabled={!allowed || !canBuild || externalRequired} onClick={() => void compile()}>Compile reviewed ZIP</Button>
         {!manuscriptReport && <Button size="sm" variant="outline" disabled={!allowed || !canBuild} onClick={() => onExternal(include, selection.excluded)}>Open external compile handoff</Button>}
@@ -168,7 +176,7 @@ export function ChatSubmissionCard({ runId, request, saved, working, drafts, mai
       </div>
       {!archiveName && <div className="flex flex-wrap items-center gap-1">
         <Input aria-label="Submission version name" className="min-w-28 flex-1" value={name} maxLength={100} onChange={event => setName(event.target.value)} disabled={!allowed} />
-        <Button size="sm" disabled={!allowed || !name.trim()} onClick={() => void archive()}>Confirm submission archive</Button>
+        <Button size="sm" disabled={!allowed || !name.trim() || !evidence.canArchive} onClick={() => void archive()}>Confirm submission archive</Button>
       </div>}
     </>}
     {error && <p role="alert" className="text-red-800">{error}</p>}
