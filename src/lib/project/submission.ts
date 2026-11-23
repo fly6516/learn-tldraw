@@ -124,7 +124,7 @@ export function prepareSubmission(project: ProjectFileSystem, main: string, excl
         const excludedPath = candidates.find(candidate => excluded.has(candidate))
         const graphics = command === 'includegraphics' || command === 'XeTeXpicfile'
         const optionalGraphics = graphics && templateFile
-        const searchPath = graphics && hasGraphicsPath && !excludedPath
+        const searchPath = command === 'includegraphics' && hasGraphicsPath && !excludedPath
         issue(optionalGraphics ? `Check conditional template graphic: ${excludedPath ?? literal}`
           : excludedPath ? `Excluded dependency: ${excludedPath}` : searchPath ? `Check graphics search path: ${literal}` : `Missing file for \\${command}: ${literal}`,
           optionalGraphics || searchPath ? 'warning' : 'error', offset, offset + literal.length)

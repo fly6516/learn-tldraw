@@ -66,3 +66,12 @@ test('flags the selected nested bibliography style without requiring inactive cl
     { severity: 'warning', message: 'Check conditional template graphic: logo.eps' },
   ])
 })
+
+test('retains a missing-file error for literal XeTeX graphics even when graphicx has a search path', () => {
+  const path = 'main.tex'
+  const content = String.raw`\graphicspath{{figures/}}
+\XeTeXpicfile "missing.eps" width 2cm`
+  const project = { files: new Map([[path, { path, type: 'editable', content }]]) }
+  const { issues } = prepareSubmission(project, path, new Set())
+  expect(issues.find(issue => issue.location.line === 2)).toMatchObject({ severity: 'error', message: 'Missing file for \\XeTeXpicfile: missing.eps' })
+})
