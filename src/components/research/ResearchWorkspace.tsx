@@ -46,17 +46,18 @@ import { bindReviewTarget, resolveReviewTarget, reviewItems, reviewResource } fr
 import { sourceOffsetAtPosition, type SourceLocation } from '@/lib/project/latex-source'
 import type { SearchSourceLink } from '@/lib/project/project-search'
 
-type WorkspaceProps = { sample?: ResearchCanvas }
+type WorkspaceProps = { sample?: ResearchCanvas; initialProject?: () => Promise<ProjectFileSystem>; storageNamespace?: string; notice?: React.ReactNode }
 type GraphSnapshot = Pick<ResearchCanvas, 'pages' | 'crossPageEdges' | 'activePageId'>
 const emptyHistory: CanvasHistory<GraphSnapshot> = { undo: [], redo: [] }
 const noBlocks: LatexBlock[] = []
 
-function Workspace({ sample }: WorkspaceProps) {
+function Workspace({ sample, initialProject, notice }: WorkspaceProps) {
   const { fileSystem, initializeProject, setFileSystem, storage, storageKey, acceptStoredProject } = useProjectFileSystem()
-  const view = useSearchParams().get('view') === 'write' ? 'write' : 'canvas'
+  const view = useSearchParams()?.get('view') === 'write' ? 'write' : 'canvas'
   const [importOpen, setImportOpen] = useState(false)
   const [backupOpen, setBackupOpen] = useState<{ writing?: PortableWritingState }>()
   const [snapshotsOpen, setSnapshotsOpen] = useState(false)
+  const [loadError, setLoadError] = useState(false)
   const [showFiles, setShowFiles] = useState(true)
   const [mobileExplorer, setMobileExplorer] = useState(false)
   const [filesTab, setFilesTab] = useState(false)
@@ -177,8 +178,18 @@ function Workspace({ sample }: WorkspaceProps) {
 
   useEffect(() => {
     if (fileSystem) return
-    initializeProject(undefined, sample ? 'Sample paper' : 'My Research Project')
-  }, [fileSystem, initializeProject, sample])
+    if (!initialProject) {
+      initializeProject(undefined, sample ? 'Sample paper' : 'My Research Project')
+      return
+    }
+    let active = true
+    void initialProject().then(project => {
+      if (active) setFileSystem(current => current ?? project)
+    }).catch(() => {
+      if (active) setLoadError(true)
+    })
+    return () => { active = false }
+  }, [fileSystem, initialProject, initializeProject, sample, setFileSystem])
 
   useEffect(() => {
     if (!fileSystem || generated.source === undefined) return
@@ -464,7 +475,8 @@ function Workspace({ sample }: WorkspaceProps) {
     setSourceLinksDialog(undefined)
   }
 
-  if (!fileSystem) return <p role="status">Opening research project…</p>
+  if (!fileSystem) return loadError ? <p role="alert">Could not load the initial project.</p>
+    : <p role="status">Opening research project…</p>
 
   return (
     <main className="flex h-dvh min-h-0 min-w-0 flex-col overflow-hidden bg-background text-foreground">
@@ -502,6 +514,7 @@ function Workspace({ sample }: WorkspaceProps) {
         <div ref={setCanvasActions} className={view === 'canvas' ? 'order-4 ml-auto' : 'hidden'} />
         <div ref={setWritingActions} className={view === 'write' ? 'order-4 col-span-2 flex min-w-0 flex-1 items-center justify-end gap-2' : 'hidden'} />
       </header>
+      {notice}
       <div className={view === 'canvas' ? 'flex min-h-0 flex-1 flex-col overflow-hidden' : 'hidden'}>
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b bg-muted/35 px-2 py-1.5 sm:px-3">
           <Button size="icon-sm" variant="ghost" className="hidden lg:inline-flex" aria-label="Toggle Canvas explorer"
@@ -694,11 +707,11 @@ function Workspace({ sample }: WorkspaceProps) {
   )
 }
 
-export function ResearchWorkspace({ sample }: WorkspaceProps) {
+export function ResearchWorkspace({ sample, initialProject, storageNamespace, notice }: WorkspaceProps) {
   return (
-    <ProjectFileSystemProvider storageKey={sample ? 'research-flow-example-v1' : 'research-flow-v2'}>
+    <ProjectFileSystemProvider storageKey={storageNamespace ?? (sample ? 'research-flow-example-v1' : 'research-flow-v2')}>
       <Suspense fallback={<p role="status">Opening research project…</p>}>
-        <Workspace sample={sample} />
+        <Workspace sample={sample} initialProject={initialProject} notice={notice} />
       </Suspense>
     </ProjectFileSystemProvider>
   )

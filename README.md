@@ -3,6 +3,8 @@
 Install dependencies with `bun install --frozen-lockfile` and start the app with `bun run dev`.
 Open http://localhost:3000 to choose a workspace.
 
+See [Contributing](CONTRIBUTING.md) for CI checks and the key-free test workspace.
+
 - `/research` opens the research project's **Canvas** view. Canvas and project files are saved
   in the current browser. **Writing** uses `/research?view=write` and is part of the same project.
 - `/research-dev` uses the same views with a sample paper.
@@ -230,4 +232,4 @@ Filter by the current section, current file, or all Canvas pages. Status changes
 both views. A captured selection follows its text as it moves and becomes unavailable if the
 text can no longer be identified reliably.
 
-Run `bun run lint`, `bun run build`, and `bun test` to check the project.
+Run `bun run lint`, `bun run build`, and `bun run test` to check the project.

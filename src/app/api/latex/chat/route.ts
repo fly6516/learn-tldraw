@@ -13,8 +13,6 @@ export const runtime = 'nodejs'
 export async function POST(request: Request) {
   const error = (message: string, status: number) => Response.json({ error: message }, { status })
   if (!isLocalAiRequest(request)) return error('Writing AI is available from the local workbench only.', 403)
-  const provider = configuredAi()
-  if (!provider) return error('Configure the model on the local server before opening a conversation.', 503)
   const limit = 1_600_000
   if (Number(request.headers.get('content-length')) > limit) return error('The AI snapshot is too large.', 413)
   const raw = await request.text().catch(() => '')
@@ -24,6 +22,10 @@ export async function POST(request: Request) {
   const parsed = chatRequestSchema.safeParse(json)
   if (!parsed.success) return error('Open a valid project source file or archived revision before sending.', 400)
   const input = parsed.data
+  const provider = process.env.RESEARCH_TEST_MODE === '1'
+    ? { model: (await import('@/lib/project/test-writing-model')).testWritingModel(input.scope, input.messages.at(-1)?.text ?? '') }
+    : configuredAi()
+  if (!provider) return error('Configure the model on the local server before opening a conversation.', 503)
   const { source, revision, scope, workflow, run, selection } = input
   const isRevision = workflow === 'revision'
   const chapter = !isRevision && source ? createChapterTools(source) : undefined
