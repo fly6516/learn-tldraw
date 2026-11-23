@@ -15,7 +15,8 @@ export type SubmissionBuild = Omit<SubmissionVersion, 'id' | 'name' | 'createdAt
 export type SubmissionSelection = Pick<SubmissionVersion, 'paths' | 'excluded' | 'drafts' | 'issues'> & { target: ProjectFileSystem }
 
 export async function exportExternalBuild(project: ProjectFileSystem) {
-  const files = new Map([...project.files].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0))
+  const files = new Map([...project.files].filter(([, file]) => file.type !== 'directory')
+    .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0))
   const zip = await exportSourceArchive({ ...project, files }, new Date('1980-01-01T00:00:00Z'))
   const digest = await crypto.subtle.digest('SHA-256', await zip.arrayBuffer())
   const checksum = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
@@ -45,6 +46,24 @@ export function prepareSubmission(project: ProjectFileSystem, main: string, excl
   buildProjectOutline(target, main, undefined, add, add)
   const root = main.slice(0, main.lastIndexOf('/') + 1)
   const issues: SubmissionIssue[] = []
+  // A local class or package can choose the bibliography backend for the document.
+  for (const [sourcePath, source] of sources) {
+    for (const command of maskLatexCode(source).matchAll(/\\(documentclass|LoadClass|usepackage|RequirePackage)\s*(?:\[[^\]]*\])?\s*\{([^{}]+)\}/g)) {
+      const suffix = command[1] === 'documentclass' || command[1] === 'LoadClass' ? '.cls' : '.sty'
+      for (const name of command[2].split(',')) {
+        const path = projectPath(root, name.trim())
+        const resolved = path?.endsWith(suffix) ? path : path && path + suffix
+        if (!resolved || sources.has(resolved)) continue
+        if (excluded.has(resolved) && project.files.has(resolved)) {
+          const start = command.index + command[0].lastIndexOf('{') + 1
+          issues.push({ severity: 'error', message: `Excluded dependency: ${resolved}`,
+            location: { path: sourcePath, line: lineNumber(source, start), start, end: start + command[2].length } })
+        }
+        const file = files.get(resolved)
+        if (file && 'content' in file && typeof file.content === 'string') sources.set(resolved, file.content)
+      }
+    }
+  }
   const bibliographyPaths = new Set<string>()
   let uncertainBibliography = false
   const hasGraphicsPath = [...sources.values()].some(source => /\\graphicspath\s*\{/.test(maskLatexCode(source)))

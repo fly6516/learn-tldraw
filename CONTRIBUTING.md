@@ -32,11 +32,21 @@ Open **Writing AI** in Auto and send one of the test prompts shown on the page.
 The test workspace uses separate browser
 storage from the main project. Keep test mode disabled in normal use.
 
-The optional live browser tests require the synthetic **Morning Walk Study** sources and the
-server's configured DeepSeek key. They send synthetic chapter excerpts, CSV data and reviewer
-comments to the configured model. Set `RESEARCH_LIVE_TEST_ZIP` to a local copy of the source ZIP
-or set `RESEARCH_LIVE_TEST_PATH` to a locally seeded demo route including `?view=write`.
-Build the app, then run `bun run test:e2e tests/e2e/live-writing.spec.ts`.
+The optional live browser tests generate the synthetic **Morning Walk Study** ZIP from the
+checked-in fixture. Configure `DEEPSEEK_API_KEY` for the loopback test server. The test
+sends synthetic chapter excerpts, CSV data and reviewer comments to the configured model.
+After building, run `RESEARCH_LIVE_TEST=1 bun run test:e2e tests/e2e/live-writing.spec.ts`.
+In PowerShell set `$env:RESEARCH_LIVE_TEST = '1'` before running the command. To use another
+local copy of the same fixture, set `RESEARCH_LIVE_TEST_ZIP` to the ZIP path or
+`RESEARCH_LIVE_TEST_PATH` to a locally seeded demo route including `?view=write`.
+
+The optional Biber browser test builds a separate synthetic River Gauge Study. Install
+pdfLaTeX, biblatex, Biber, latexmk, and Poppler `pdftotext` in the test environment. Set
+`RESEARCH_BIBER_TEST=1` on a system with those commands on PATH, or set
+`RESEARCH_BIBER_WSL` to the configured WSL distribution on Windows. Build the app and run
+`bun run test:e2e tests/e2e/biber-delivery.spec.ts`. The test compiles the actual downloaded
+ZIP, backs up the verified task in Chromium, and imports it in Firefox before archiving.
+It compares the archived ZIP and PDF bytes and checks that an edited copy needs a fresh build.
 
 Use `.env.example` as a reference for local environment options. Keep real credentials,
 private research, and local test outputs out of commits.

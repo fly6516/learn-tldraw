@@ -4,6 +4,8 @@ import { updateFileContent } from './file-system'
 import { lineNumber, sourceOffsetAtPosition } from './latex-source'
 import { buildManuscriptSnapshot } from './manuscript-review'
 import { collectBibliography, findNewUnknownCitations } from './references'
+import type { ExternalEngine } from './compile-compatibility'
+import { exportExternalBuild, prepareSubmission } from './submission'
 import { exportSourceArchive, sourceArchiveEntry } from './source-archive'
 import type { ProjectFileSystem } from './types'
 import type { ChatCheckpoint, ChatRun } from './writing-chat'
@@ -25,6 +27,7 @@ export type ChatVerification = {
   message: string
   log: string
 }
+export type ManuscriptBuild = { pdf: Blob; sourceChecksum: string; compiledBaseline: string; externalEngine?: ExternalEngine }
 
 const encoder = new TextEncoder()
 const binaryHashes = new WeakMap<Blob, Promise<string>>()
@@ -104,7 +107,8 @@ export async function validateChatProposal(input: {
       return source === undefined ? [] : [[path, source] as const]
     })),
   } : buildValidationSnapshot(project, working, drafts, run, edits)
-  const result = await compileChatSnapshot(project, drafts, candidate, changed, sources, main, signal, verificationPatch(edits))
+  const { pdf: _pdf, ...result } = await compileChatSnapshot(project, drafts, candidate, changed, sources, main, signal, verificationPatch(edits))
+  void _pdf
   const diagnostics = result.diagnostics.map(issue => {
     const file = working.files.get(issue.path)
     const original = file && 'content' in file ? file.content : undefined
@@ -118,12 +122,13 @@ export async function validateChatProposal(input: {
 export async function validateManuscript(input: {
   project: ProjectFileSystem; working: ProjectFileSystem; drafts: WritingDrafts; checkpoints: ChatCheckpoint[]
   paths: string[]; accepted: string[]; signal: AbortSignal
-}): Promise<ChatVerification> {
+}): Promise<{ report: ChatVerification; build?: ManuscriptBuild }> {
   const { project, working, drafts, checkpoints, paths, accepted, signal } = input
   const { candidate, checkpoint } = buildManuscriptSnapshot(project, drafts, checkpoints, paths, accepted)
   const before = new Map(paths.map(path => [path, checkpoint.before[path].saved]))
   const after = new Map(paths.map(path => [path, checkpoint.after[path].saved]))
-  const result = await compileChatSnapshot(project, drafts, candidate, after, before, checkpoint.main, signal, Promise.resolve(''))
+  const archive = await exportExternalBuild(candidate)
+  const { pdf, ...result } = await compileChatSnapshot(project, drafts, candidate, after, before, checkpoint.main, signal, undefined, archive.zip)
   const diagnostics = result.diagnostics.map(issue => {
     const compiled = candidate.files.get(issue.path)
     const live = working.files.get(issue.path)
@@ -131,14 +136,34 @@ export async function validateManuscript(input: {
       && compiled.content && issue.line <= compiled.content.split(/\r\n|\r|\n/).length ? issue.line : undefined
     return { ...issue, sourceLine }
   })
-  return { ...result, diagnostics, patch: result.compiledBaseline, selected: [], manuscript: { paths, accepted } }
+  const report = { ...result, diagnostics, selected: [], manuscript: { paths, accepted } }
+  const build = pdf && report.status === 'passed' ? { pdf, sourceChecksum: archive.checksum, compiledBaseline: report.compiledBaseline } : undefined
+  return { report, build }
+}
+
+export async function externalManuscriptVerification(project: ProjectFileSystem, drafts: WritingDrafts, candidate: ProjectFileSystem,
+  paths: string[], accepted: string[], pdf: File, sourceChecksum: string, externalEngine: ExternalEngine) {
+  const main = candidate.metadata.mainFile
+  if (!main) throw new Error('Choose a compile entry.')
+  const issues = prepareSubmission(candidate, main, new Set()).issues
+  if (issues.some(issue => issue.severity === 'error' || /^(Unknown citation key|Duplicate bibliography key):/.test(issue.message))) {
+    throw new Error('Resolve missing project files and bibliography keys before attaching the external build.')
+  }
+  const [baseline, compiledBaseline, archive] = await Promise.all([
+    verificationBaseline(project, drafts), verificationBaseline(candidate, {}), exportExternalBuild(candidate),
+  ])
+  if (sourceChecksum !== archive.checksum) throw new Error('The manuscript changed. Download its current source ZIP and compile it again.')
+  const report: ChatVerification = { baseline, compiledBaseline, patch: compiledBaseline, main, selected: [],
+    manuscript: { paths, accepted }, status: 'passed', diagnostics: [], log: '',
+    message: `External PDF attached · ${externalEngine} · Source match confirmed by you.` }
+  return { report, build: { pdf, sourceChecksum, compiledBaseline, externalEngine } satisfies ManuscriptBuild }
 }
 
 async function compileChatSnapshot(project: ProjectFileSystem, drafts: WritingDrafts, candidate: ProjectFileSystem,
-  changed: Map<string, string>, sources: Map<string, string>, main: string, signal: AbortSignal, patchHash: Promise<string>) {
+  changed: Map<string, string>, sources: Map<string, string>, main: string, signal: AbortSignal, patchHash?: Promise<string>, sourceZip?: Blob) {
   signal.throwIfAborted()
   const [baseline, patch, archive, compiledBaseline] = await Promise.all([
-    verificationBaseline(project, drafts), patchHash, exportSourceArchive(candidate),
+    verificationBaseline(project, drafts), patchHash, sourceZip ?? exportSourceArchive(candidate),
     verificationBaseline(candidate, {}),
   ])
   signal.throwIfAborted()
@@ -147,9 +172,12 @@ async function compileChatSnapshot(project: ProjectFileSystem, drafts: WritingDr
     .map(({ line, key }): CompileDiagnostic => ({ path, line, severity: 'error', message: `New unknown citation: ${key}` })))
   const response = await fetch(`/api/latex/compile?main=${encodeURIComponent(main)}&sync=1`, { method: 'POST', body: archive, signal })
   let report: Partial<CompileReport> & { error?: string }
+  let pdf: Blob | undefined
   if (response.ok) {
     const form = await response.formData()
-    if (!(form.get('pdf') instanceof Blob)) throw new Error('The compiler did not return a PDF.')
+    const file = form.get('pdf')
+    if (!(file instanceof Blob)) throw new Error('The compiler did not return a PDF.')
+    pdf = file
     const data = form.get('report')
     report = typeof data === 'string' ? JSON.parse(data) : {}
   } else {
@@ -158,7 +186,7 @@ async function compileChatSnapshot(project: ProjectFileSystem, drafts: WritingDr
   const issues = [...citations, ...(report.diagnostics ?? [])]
   const passed = response.ok && !issues.some(issue => issue.severity === 'error')
   const diagnostics = issues.slice(0, 50)
-  return { baseline, patch, compiledBaseline, main, diagnostics, status: passed ? 'passed' as const : 'failed' as const,
+  return { baseline, patch: patch ?? compiledBaseline, compiledBaseline, main, diagnostics, pdf, status: passed ? 'passed' as const : 'failed' as const,
     message: passed ? report.hasWarnings || diagnostics.length ? 'Compiled with warnings.' : 'Compiled successfully.'
       : report.error ?? 'Validation found errors in the selected changes.',
     log: report.log?.slice(-8000) ?? '' }

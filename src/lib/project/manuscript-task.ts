@@ -1,29 +1,44 @@
 import { z } from 'zod'
 import { isProjectPath } from './source-archive'
+import { claimReviewSchema, writingClaimsSchema } from './writing-claims'
 
 const path = z.string().max(500).refine(isProjectPath)
 const notes = z.array(z.string().trim().min(1).max(450)).max(12)
+export const manuscriptDataSchema = z.array(z.object({
+  path: path.refine(value => /\.csv$/i.test(value)), startRow: z.number().int().min(1).max(24000),
+  rowCount: z.number().int().min(1).max(12),
+})).max(4)
+const delivery = z.object({
+  data: manuscriptDataSchema,
+  submissionName: z.string().trim().min(1).max(100).optional(),
+})
 
 export const manuscriptPlanSchema = z.object({
   title: z.string().trim().min(1).max(100),
   files: z.array(path).min(1).max(49),
   decisions: notes,
   questions: notes,
+  delivery: delivery.optional(),
 })
 
 export const manuscriptTaskSchema = manuscriptPlanSchema.extend({
   id: z.uuid(),
   goal: z.string().trim().min(1).max(12000),
-  batches: z.array(z.object({ run: z.uuid(), files: z.array(path).min(1).max(6), replaces: z.uuid().optional() })).max(120),
+  batches: z.array(z.object({ run: z.uuid(), files: z.array(path).min(1).max(6), replaces: z.uuid().optional(),
+    claims: writingClaimsSchema.optional(), sourceRevision: z.number().int().nonnegative().optional() })).max(120),
+  claimReviews: z.record(z.string().regex(/^[\da-f-]{36}:\d{1,2}$/i), claimReviewSchema)
+    .refine(reviews => Object.keys(reviews).length <= 120 * 24).optional(),
 })
 
 export const manuscriptContextSchema = z.object({
-  mode: z.enum(['plan', 'batch', 'repair', 'context']),
+  mode: z.enum(['plan', 'batch', 'repair', 'context', 'evidence']),
   goal: manuscriptTaskSchema.shape.goal,
   files: z.array(path).max(49),
   completed: z.array(path).max(49).optional(),
   decisions: notes.optional(),
   questions: notes.optional(),
+  data: manuscriptDataSchema.optional(),
+  claim: writingClaimsSchema.element.pick({ path: true, quote: true, kind: true }).optional(),
 })
 
 export type ManuscriptTask = z.infer<typeof manuscriptTaskSchema>

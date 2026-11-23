@@ -6,6 +6,7 @@ import type { EvidenceQuote } from './writing-ai-evidence'
 import type { WritingDraft } from './writing-drafts'
 import { manuscriptContextSchema, type ManuscriptTask } from './manuscript-task'
 import { attachmentContextSchema } from './ai-attachments'
+import { writingClaimsSchema } from './writing-claims'
 
 export const writingWorkflows = {
   auto: { name: 'Auto', instruction: 'Infer whether to review, compare, edit, compile, prepare a submission, start a revision round, record a reviewer comment, or draft a reply. Search for relevant files when the file is unclear or the request spans files.' },
@@ -18,7 +19,8 @@ export const writingWorkflows = {
 export const chatWorkflowSchema = z.enum(['auto', 'chapter', 'project', 'diagnostics', 'revision'])
 export type ChatWorkflow = z.infer<typeof chatWorkflowSchema>
 export const workflowVersion = 1
-export const chatEditSchema = z.object({ summary: projectSuggestionSchema.shape.summary, edits: projectSuggestionSchema.shape.edits.min(1) })
+export const chatEditSchema = z.object({ summary: projectSuggestionSchema.shape.summary, edits: projectSuggestionSchema.shape.edits.min(1),
+  claims: writingClaimsSchema.optional() })
 export const editPermissionRequestSchema = z.object({
   paths: z.array(z.string().min(1).max(500)).min(1).max(6),
   reason: z.string().trim().min(1).max(600),

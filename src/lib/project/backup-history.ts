@@ -8,14 +8,14 @@ import { isProjectPath } from './source-archive'
 import type { SubmissionVersion } from './submission'
 import type { SourceMove } from './writing-ai-evidence'
 import { chatWorkflowSchema, compileFeedbackSchema, revisionSetupSchema, submissionChatSchema, type ChatCheckpoint, type ChatHistory, type ChatTaskStep, type WritingChatMessage } from './writing-chat'
-import type { ChatVerification } from './writing-chat-validation'
+import type { ChatVerification, ManuscriptBuild } from './writing-chat-validation'
 import { manuscriptTaskSchema } from './manuscript-task'
 
 export type PortableProjectHistory = {
   publication?: { submissions: SubmissionVersion[]; rounds: RevisionRound[] }
   snapshots?: ProjectSnapshot[]
   ai?: { history?: ChatHistory; moves: SourceMove[]; tasks: Record<string, ChatTaskStep[]>
-    checkpoints: Record<string, ChatCheckpoint>; verifications: Record<string, ChatVerification> }
+    checkpoints: Record<string, ChatCheckpoint>; verifications: Record<string, ChatVerification>; builds?: Record<string, ManuscriptBuild> }
 }
 export type BackupHistorySelection = { publication: boolean; snapshots: boolean; ai: boolean }
 
@@ -84,6 +84,8 @@ const ai = z.object({
     main: path, status: z.enum(['passed', 'failed']),
     diagnostics: z.array(z.object({ path, line: positive, severity: z.enum(['error', 'warning']), message: text, sourceLine: positive.optional() })),
     message: text, log: text })),
+  builds: z.array(z.object({ id, pdf: storedBlob, sourceChecksum: hash, compiledBaseline: hash,
+    externalEngine: z.enum(['pdflatex', 'xelatex', 'lualatex']).optional() })).max(12).refine(unique).optional(),
 })
 export const backupHistorySchema = z.object({
   publication: z.object({ submissions: z.array(submission), rounds: z.array(round) }).refine(({ submissions, rounds }) => {
@@ -123,8 +125,14 @@ export async function encodeBackupHistory(archive: JSZip, history: PortableProje
     snapshots.push({ ...info, hasCanvas: Boolean(project.canvas),
       archive: await write(`history/snapshots/${index}.zip`, await encodeSnapshot(snapshot)) })
   }
+  const { builds, ...aiHistory } = history.ai ?? {}
+  const encodedBuilds = []
+  for (const [index, [id, { pdf, ...build }]] of Object.entries(builds ?? {}).entries()) {
+    encodedBuilds.push({ id, ...build, pdf: await write(`history/manuscript-builds/${index}.pdf`, pdf) })
+  }
   return backupHistorySchema.parse({
-    publication: history.publication && { submissions, rounds: history.publication.rounds }, snapshots: history.snapshots && snapshots, ai: history.ai,
+    publication: history.publication && { submissions, rounds: history.publication.rounds }, snapshots: history.snapshots && snapshots,
+    ai: history.ai && { ...aiHistory, builds: encodedBuilds.length ? encodedBuilds : undefined },
   })
 }
 
@@ -154,6 +162,19 @@ export async function decodeBackupHistory(archive: JSZip, manifest: z.infer<type
     const { archive: entry, hasCanvas, ...info } = snapshot
     snapshots.push({ ...info, project: await decodeSnapshot(await read(`history/snapshots/${index}.zip`, entry, 'application/zip'), hasCanvas) })
   }
+  const builds = manifest.ai?.builds
+  const decodedBuilds: Record<string, ManuscriptBuild> = Object.create(null)
+  for (const [index, { id, pdf, ...build }] of (builds ?? []).entries()) {
+    const report = manifest.ai?.verifications[id]
+    if (report?.status !== 'passed' || !report.manuscript || report.compiledBaseline !== build.compiledBaseline
+      || !manifest.ai?.history?.conversations.some(item => item.manuscript?.id === id)) {
+      throw new Error('The pending manuscript PDF does not have a matching verification.')
+    }
+    const blob = await read(`history/manuscript-builds/${index}.pdf`, pdf, 'application/pdf')
+    if (await blob.slice(0, 5).text() !== '%PDF-') throw new Error('The pending manuscript artifact is not a PDF.')
+    decodedBuilds[id] = { ...build, pdf: blob }
+  }
   return { publication: manifest.publication && { submissions, rounds: manifest.publication.rounds },
-    snapshots: manifest.snapshots && snapshots, ai: manifest.ai }
+    snapshots: manifest.snapshots && snapshots,
+    ai: manifest.ai && { ...manifest.ai, builds: Object.keys(decodedBuilds).length ? decodedBuilds : undefined } }
 }

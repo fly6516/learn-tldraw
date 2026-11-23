@@ -124,3 +124,24 @@ test('restores exact submission archives, linked rounds, snapshots and optional 
   archive.file('project.json', JSON.stringify(manifest))
   await expect(decodeProjectBackup(await archive.generateAsync({ type: 'blob' }))).rejects.toThrow('invalid')
 })
+
+test('carries a pending verified PDF only with AI history and rejects tampered bytes', async () => {
+  const project = createProjectFileSystem(template)
+  const id = '6bfaca2c-0e53-453b-89f1-d4c0f03d5030'
+  const checksum = 'a'.repeat(64)
+  const pdf = new Blob(['%PDF-1.4\nverified'], { type: 'application/pdf' })
+  const build = { pdf, sourceChecksum: checksum, compiledBaseline: checksum, externalEngine: 'pdflatex' }
+  const ai = { history: { selected: 'chat', conversations: [{ id: 'chat', title: 'Pending', messages: [], runs: {},
+    manuscript: { id, title: 'Task', goal: 'Revise', files: ['main.tex'], decisions: [], questions: [], batches: [] } }] },
+  tasks: {}, moves: [], checkpoints: {}, verifications: { [id]: { main: 'main.tex', compiledBaseline: checksum,
+    baseline: checksum, patch: checksum, selected: [], status: 'passed', diagnostics: [], message: 'External', log: '',
+    manuscript: { paths: ['main.tex'], accepted: [] } } }, builds: { [id]: build } }
+  const exported = await encodeProjectBackup(canvas, project, undefined, { ai })
+  expect((await decodeProjectBackup(await encodeProjectBackup(canvas, project))).history?.ai).toBeUndefined()
+  const restored = (await decodeProjectBackup(exported)).history.ai.builds[id]
+  expect(restored.sourceChecksum).toBe(checksum)
+  expect(await restored.pdf.arrayBuffer()).toEqual(await pdf.arrayBuffer())
+  const archive = await JSZip.loadAsync(await exported.arrayBuffer())
+  archive.file('history/manuscript-builds/0.pdf', '%PDF-1.4\nchanged!')
+  await expect(decodeProjectBackup(await archive.generateAsync({ type: 'blob' }))).rejects.toThrow('checksum')
+})

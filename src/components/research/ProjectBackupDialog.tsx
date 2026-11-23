@@ -128,7 +128,10 @@ export function ProjectBackupDialog({ canvas, project, writing, readHistory, onR
                 onChange={event => setHistoryOptions({ ...historyOptions, [kind]: event.target.checked })} />
               {label}
             </label>)}
-            {historyOptions.ai && <p className="text-xs text-muted-foreground">Conversations and evidence may contain manuscript text. Restored AI sessions require fresh approval.</p>}
+            {historyOptions.ai && <p className="text-xs text-muted-foreground">
+              Includes claim reviews and verified PDFs waiting for archiving. Conversations and evidence may contain manuscript text.
+              Restored AI sessions require fresh approval.{draftCount > 0 && ' Include local drafts to resume work that has not been saved to the project.'}
+            </p>}
           </fieldset>}
         </div>
         {pending && (
@@ -141,14 +144,10 @@ export function ProjectBackupDialog({ canvas, project, writing, readHistory, onR
               {pending.history.publication && <li>{pending.history.publication.submissions.length} submission versions, {pending.history.publication.rounds.length} revision rounds</li>}
               {pending.history.snapshots && <li>{pending.history.snapshots.length} project snapshots</li>}
               {pending.history.ai && <li>{pending.history.ai.history?.conversations.length ?? 0} AI conversations with task history</li>}
+              {!!Object.keys(pending.history.ai?.builds ?? {}).length && <li>{Object.keys(pending.history.ai?.builds ?? {}).length} verified manuscript PDFs</li>}
             </ul>}
             {pending.conflicts.length > 0 && <p className="text-amber-800">
-              {pending.history && <ul className="list-inside list-disc">
-              {pending.history.publication && <li>{pending.history.publication.submissions.length} submission versions, {pending.history.publication.rounds.length} revision rounds</li>}
-              {pending.history.snapshots && <li>{pending.history.snapshots.length} project snapshots</li>}
-              {pending.history.ai && <li>{pending.history.ai.history?.conversations.length ?? 0} AI conversations with task history</li>}
-            </ul>}
-            {pending.conflicts.length} {pending.conflicts.length === 1 ? 'draft differs' : 'drafts differ'} from their saved baseline. Compare in Writing after restoring.
+              {pending.conflicts.length} {pending.conflicts.length === 1 ? 'draft differs' : 'drafts differ'} from their saved baseline. Compare in Writing after restoring.
             </p>}
           </div>
         )}

@@ -1,14 +1,16 @@
 import { expect, test, type Page } from '@playwright/test'
 import { readFile } from 'node:fs/promises'
+import { morningWalkZip } from '../fixtures/morning-walk'
 
 const zipPath = process.env.RESEARCH_LIVE_TEST_ZIP
-const path = process.env.RESEARCH_LIVE_TEST_PATH || (zipPath ? '/research' : undefined)
+const seededPath = process.env.RESEARCH_LIVE_TEST_PATH
+const path = seededPath || (process.env.RESEARCH_LIVE_TEST === '1' || zipPath ? '/research' : undefined)
 test.skip(!path, 'Requires a local synthetic Morning Walk Study and a configured model.')
 
 async function openPaper(page: Page) {
   await page.goto(path!)
-  if (zipPath) await page.getByLabel('Choose project ZIP or backup').setInputFiles({
-    name: 'Morning Walk Study.zip', mimeType: 'application/zip', buffer: await readFile(zipPath),
+  if (zipPath || !seededPath) await page.getByLabel('Choose project ZIP or backup').setInputFiles({
+    name: 'Morning Walk Study.zip', mimeType: 'application/zip', buffer: zipPath ? await readFile(zipPath) : await morningWalkZip(),
   })
   await expect(page.getByRole('heading', { name: 'Morning Walk Study' })).toBeVisible()
 }
@@ -47,8 +49,8 @@ test('real model moves Morning Walk Study from writing through submission and re
   const results = 'The shaded route was cooler in all four paired sessions.'
   await send(page, `For a synthetic compiler QA check, read sections/methods.tex and sections/results.tex and stage these two exact edits. In Methods replace the sentence about observers traversing the routes with "${methods}" In Results replace only the first sentence about the shaded route with "${results} \\qaUndefinedMorningWalk" Leave the intentionally undefined LaTeX command in this test proposal so I can check that failed compilation prevents saving. Use propose_edits for both files.`)
   const proposals = page.getByRole('region', { name: 'Source change proposal' })
-  await expect(proposals.last().getByText('sections/methods.tex', { exact: true })).toBeVisible({ timeout: 65_000 })
-  await expect(proposals.last().getByText('sections/results.tex', { exact: true })).toBeVisible()
+  await expect(proposals.last().getByText('sections/methods.tex', { exact: true }).first()).toBeVisible({ timeout: 65_000 })
+  await expect(proposals.last().getByText('sections/results.tex', { exact: true }).first()).toBeVisible()
   await proposals.last().getByRole('button', { name: 'Save if verification passes' }).click()
   await expect(proposals.last().getByText(/^Verification failed\./)).toBeVisible()
   await expect(proposals.last().getByText('Saved to project', { exact: true })).toHaveCount(0)
@@ -135,7 +137,7 @@ test('real model reads Morning Walk Study evidence and applies a multi-batch man
   await page.getByRole('combobox', { name: 'Approval mode' }).selectOption('full')
   await page.getByRole('button', { name: 'Grant full draft access', exact: true }).click()
   const files = ['sections/introduction.tex', 'sections/methods.tex', 'sections/results.tex', 'sections/discussion.tex']
-  await send(page, `Plan a manuscript writing task to edit exactly these four LaTeX files: ${files.join(', ')}. In every file append a short paragraph with this exact sentence: "This draft uses synthetic observations for workflow testing." Preserve all other content, numbers, labels and citations.`)
+  await send(page, `Plan a manuscript writing task to edit exactly these four LaTeX files: ${files.join(', ')}. In each file replace its complete opening section or subsection heading line with the same line followed by a new short paragraph: "This draft uses synthetic observations for workflow testing." Keep all math, LaTeX commands, labels and citations unchanged.`)
   const task = page.getByRole('region', { name: 'Manuscript task' })
   await expect(task.getByRole('status')).toContainText('0 of 4 files applied', { timeout: 65_000 })
   await task.getByRole('button', { name: 'Continue task' }).click()
@@ -159,6 +161,14 @@ test('real model reads Morning Walk Study evidence and applies a multi-batch man
   const review = page.getByRole('dialog', { name: 'Review manuscript task' })
   await expect(review.getByText('4 files selected')).toBeVisible()
   await review.getByRole('button', { name: 'Verify manuscript' }).click()
+  const repair = review.getByRole('button', { name: 'Repair affected files with AI' })
+  await expect(review.getByRole('status')).toContainText(/Manuscript verification (passed|failed)\./)
+  if (await repair.isVisible()) {
+    await repair.click()
+    await proposals.last().getByRole('button', { name: 'Apply to drafts' }).click({ timeout: 65_000 })
+    await send(page, 'Review the manuscript task.')
+    await review.getByRole('button', { name: 'Verify manuscript' }).click()
+  }
   await expect(review.getByRole('status')).toContainText('Manuscript verification passed.')
   await review.getByRole('button', { name: 'Save verified files' }).click()
   await expect(task.getByText('4 task files saved together.')).toBeVisible()
@@ -169,4 +179,47 @@ test('real model reads Morning Walk Study evidence and applies a multi-batch man
   await expect(page.getByRole('button', { name: /^methods\.tex/ }).getByLabel('Unsaved')).toBeVisible()
   await mainFile.click()
   await expect(source.locator('.view-lines')).toContainText('Author draft kept outside the manuscript task.')
+})
+
+test('real model carries one Morning Walk Study request from CSV evidence to an approved archive', async ({ page }) => {
+  test.setTimeout(180_000)
+  await openPaper(page)
+  await openAi(page)
+  await send(page, 'Read rows 1 through 5 of data/sessions.csv, revise exactly sections/methods.tex and sections/results.tex, compile the manuscript, and prepare a submission named "Evidence review". In Methods clarify that the sessions were paired. In Results add that the shaded route measured 28.1 degrees Celsius in session 1. Link that sentence to CSV physical line 2 in your proposal. These are synthetic observations confirmed for this test. Preserve the rest of the text, figures and citations. No further factual questions need answering.')
+  const task = page.getByRole('region', { name: 'Manuscript task' })
+  await expect(task.getByText(/data\/sessions\.csv · CSV rows/)).toBeVisible({ timeout: 65_000 })
+  const continueTask = task.getByRole('button', { name: 'Continue task' })
+  if (await continueTask.isDisabled()) {
+    await task.getByText('Author decisions and open questions').click()
+    const questions = task.getByRole('textbox', { name: 'Task open questions' })
+    expect(await questions.inputValue()).toMatch(/(?:CSV|data\/sessions\.csv)/i)
+    await questions.fill('')
+    await questions.press('Tab')
+  }
+  await continueTask.click()
+  const proposals = page.getByRole('region', { name: 'Source change proposal' })
+  // The final batch opens the modal, which hides the task card from the accessibility tree.
+  const appliedFiles = async () => Number((await page.locator('section[aria-label="Manuscript task"] [role="status"]').textContent())?.[0])
+  for (let applied = 0; applied < 2;) {
+    await proposals.last().getByRole('button', { name: 'Apply to drafts' }).click({ timeout: 65_000 })
+    await expect.poll(appliedFiles).toBeGreaterThan(applied)
+    applied = await appliedFiles()
+  }
+  const review = page.getByRole('dialog', { name: 'Review manuscript task' })
+  await expect(review.getByRole('status')).toContainText('Manuscript verification passed.')
+  await review.getByRole('button', { name: 'sections/results.tex', exact: true }).click()
+  const evidence = review.getByRole('region', { name: 'Evidence for proposed changes' })
+  await expect(evidence.getByText(/28\.1/).first()).toBeVisible()
+  await expect(evidence.getByRole('button', { name: 'CSV · data/sessions.csv:2' })).toBeVisible()
+  for (const path of ['sections/methods.tex', 'sections/results.tex']) {
+    await review.getByRole('button', { name: path, exact: true }).click()
+    for (const claim of await review.getByRole('button', { name: 'Confirm claim' }).all()) {
+      if (await claim.isEnabled()) await claim.click()
+    }
+  }
+  await review.getByRole('button', { name: 'Save verified files' }).click()
+  const submission = page.getByRole('region', { name: 'Submission task' })
+  await expect(submission.getByRole('textbox', { name: 'Submission version name' })).toHaveValue('Evidence review')
+  await submission.getByRole('button', { name: 'Confirm submission archive' }).click()
+  await expect(submission.getByText('Archived Evidence review.')).toBeVisible()
 })

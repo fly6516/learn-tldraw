@@ -249,6 +249,28 @@ Writing AI can list attachment paths and cite line-linked CSV records from the c
 CSV reads are bounded to the available prefix and a requested row range. Figure filenames can
 be checked against the project inventory.
 
+To start an end-to-end task, send a request such as “Read `data/sessions.csv`, revise
+`sections/methods.tex` and `sections/results.tex`, compile, and prepare a submission.” The
+task card shows planned CSV ranges and author questions. Continue after resolving questions
+and reviewing the plan. Approving a batch resumes the remaining files, and the last batch
+opens manuscript verification. After a refresh, review any pending batch or continue the
+remaining files. Automatic draft permissions expire on refresh.
+
+The proposal and manuscript review link exact new wording to the CSV rows, table excerpts,
+or bibliography entries the application could locate. Confirm a claim, request fresh read-only
+evidence, or exclude its linked change from the draft. The task remembers decisions. Changes to
+the wording or linked evidence reopen that claim. A bibliography link locates an entry for the
+author to check.
+
+A workflow reuses the verified PDF only when its source ZIP exactly matches the submission
+manifest. Confirm the archive in the submission card. A task keeps the same archive ID after
+refresh. For Biber and templates that specify pdfLaTeX or LuaLaTeX, use the external build
+ZIP in task review and attach the corresponding PDF before saving. The local browser retains
+the verified PDF until archiving. Include **AI conversations and task history** in a project
+backup to carry that PDF and the claim decisions to another browser. Include local drafts
+to continue work before project save. The restored task checks the main file and exact ZIP
+checksum before offering the PDF for archiving.
+
 Ask for submission preflight or use `/submission Submission v1`. Review file exclusions
 and the local-draft setting in the chat card before compiling the exact ZIP. The compiled
 PDF and ZIP can be downloaded and explicitly archived from the card. Templates that need

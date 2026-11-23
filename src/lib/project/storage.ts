@@ -1,7 +1,7 @@
 import { legacyProjectId, legacyStorageKey, libraryStorageKey, type LibraryProject, type LibraryProjectState, type LibraryView } from './project-library'
 import type { BackupHistorySelection, PortableProjectHistory } from './backup-history'
 import type { SourceMove } from './writing-ai-evidence'
-import { verificationBaseline, verificationPatch, type ChatVerification } from './writing-chat-validation'
+import { verificationBaseline, verificationPatch, type ChatVerification, type ManuscriptBuild } from './writing-chat-validation'
 import { buildManuscriptSnapshot } from './manuscript-review'
 import { chatActionPaths, nextChatCheckpoint, type ChatAction } from './writing-chat-actions'
 import type { ChatCheckpoint, ChatHistory, ChatReplyTarget, ChatSource, ChatTaskStep } from './writing-chat'
@@ -59,10 +59,19 @@ export async function saveSubmissionVersion(database: IDBDatabase, key: WritingK
     const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
     const store = transaction.objectStore(storeName)
     const { pdf, zip, ...info } = version
-    store.add({ pdf, zip }, ['submission-files', ...key, version.id])
-    store.add(info, ['submission-info', ...key, version.id])
-    if (chatRun) appendTaskStep(store, key, chatRun, { kind: 'archived', at: Date.now(), detail: version.name })
+  const entry = ['submission-info', ...key, version.id]
+  const previous = store.get(entry)
+  previous.onsuccess = () => {
+      if (previous.result) return
+      store.add({ pdf, zip }, ['submission-files', ...key, version.id])
+      store.add(info, entry)
+      if (chatRun) {
+          appendTaskStep(store, key, chatRun, { kind: 'archived', at: Date.now(), detail: version.name })
+          store.delete(['ai-manuscript-build', ...key, chatRun])
+      }
+  }
     await complete(transaction)
+  return (previous.result as SubmissionVersionInfo | undefined) ?? info
 }
 
 export async function readSubmissionFiles(database: IDBDatabase, key: WritingKey, id: string) {
@@ -376,7 +385,7 @@ export async function readBackupHistory(database: IDBDatabase, key: WritingKey, 
     const ai = selection.ai ? {
         history: store.get(['ai-history', ...key]), moves: store.get(['source-moves', ...key]),
         tasks: readRecord<ChatTaskStep[]>('ai-task'), checkpoints: readRecord<ChatCheckpoint>('ai-change'),
-        verifications: readRecord<ChatVerification>('ai-verify'),
+        verifications: readRecord<ChatVerification>('ai-verify'), builds: readRecord<ManuscriptBuild>('ai-manuscript-build'),
     } : undefined
     await complete(transaction)
 
@@ -397,8 +406,15 @@ export async function readBackupHistory(database: IDBDatabase, key: WritingKey, 
             return { ...info, project: projects[info.id] }
         })
     }
-    if (ai) backup.ai = { history: ai.history.result, moves: ai.moves.result ?? [], tasks: ai.tasks(),
-        checkpoints: ai.checkpoints(), verifications: ai.verifications() }
+    if (ai) {
+        const history = ai.history.result as ChatHistory | undefined
+        const verifications = ai.verifications()
+        const taskIds = new Set(history?.conversations.map(item => item.manuscript?.id))
+        const builds = Object.fromEntries(Object.entries(ai.builds()).filter(([run, build]) =>
+            taskIds.has(run) && verifications[run]?.status === 'passed' && verifications[run]?.manuscript
+            && verifications[run].compiledBaseline === build.compiledBaseline))
+        backup.ai = { history, moves: ai.moves.result ?? [], tasks: ai.tasks(), checkpoints: ai.checkpoints(), verifications, builds }
+    }
     return backup
 }
 
@@ -424,7 +440,8 @@ function restoreBackupHistory(store: IDBObjectStore, key: WritingKey, history: P
         if (ai.history) store.put(ai.history, ['ai-history', ...key])
         else store.delete(['ai-history', ...key])
         store.put(ai.moves, ['source-moves', ...key])
-        for (const [bucket, records] of [['ai-task', ai.tasks], ['ai-change', ai.checkpoints], ['ai-verify', ai.verifications]] as const) {
+        for (const [bucket, records] of [['ai-task', ai.tasks], ['ai-change', ai.checkpoints], ['ai-verify', ai.verifications],
+            ['ai-manuscript-build', ai.builds ?? {}]] as const) {
             store.delete(historyRange(bucket, key))
             for (const [run, value] of Object.entries(records)) store.put(value, [bucket, ...key, run])
         }
@@ -675,12 +692,22 @@ export async function readChatVerifications(database: IDBDatabase, key: WritingK
     return verifications
 }
 
-export async function writeChatVerification(database: IDBDatabase, key: WritingKey, run: string, result: ChatVerification, record = false) {
+export async function writeChatVerification(database: IDBDatabase, key: WritingKey, run: string, result: ChatVerification, record = false,
+    build?: ManuscriptBuild) {
     const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
     const store = transaction.objectStore(storeName)
     store.put(result, ['ai-verify', ...key, run])
+    if (build) store.put(build, ['ai-manuscript-build', ...key, run])
+    else if (result.manuscript) store.delete(['ai-manuscript-build', ...key, run])
     if (record) appendTaskStep(store, key, run, { kind: result.status, at: Date.now(), selected: result.selected.length, selection: result.selected, detail: result.message })
     await complete(transaction)
+}
+
+export async function readManuscriptBuild(database: IDBDatabase, key: WritingKey, run: string) {
+    const transaction = database.transaction(storeName)
+    const read = transaction.objectStore(storeName).get(['ai-manuscript-build', ...key, run])
+    await complete(transaction)
+    return read.result as ManuscriptBuild | undefined
 }
 
 export async function commitChatAction(database: IDBDatabase, key: WritingKey, runId: string, action: ChatAction) {

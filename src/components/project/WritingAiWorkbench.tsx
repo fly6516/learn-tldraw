@@ -12,7 +12,7 @@ import { applyProjectEdits, buildChapterContext, maxChapterLength, type ChapterE
 import { confirmChatReply, listRevisionRounds, readChatCheckpoints, readChatHistory, readChatTaskSteps, readChatVerifications, recordChatTaskStep, writeChatHistory, writeChatVerification } from '@/lib/project/storage'
 import { chatEditSchema, editPermissionRequestSchema, replyChatSchema, revisionRoundRequestSchema, reviewerCommentRequestSchema, submissionChatSchema, writingWorkflows, type ChatCheckpoint, type ChatCompileFeedback, type ChatConversation, type ChatHistory, type ChatRevisionSetup, type ChatRun, type ChatTaskStep, type ChatWorkflow, type ReplyChatRequest, type SubmissionChatRequest, type WritingChatMessage } from '@/lib/project/writing-chat'
 import type { ChatAction } from '@/lib/project/writing-chat-actions'
-import { validateChatProposal, verificationBaseline, type ChatVerification } from '@/lib/project/writing-chat-validation'
+import { validateChatProposal, verificationBaseline, type ChatVerification, type ManuscriptBuild } from '@/lib/project/writing-chat-validation'
 import { editableSource, type WritingDrafts, type WritingKey } from '@/lib/project/writing-drafts'
 import type { ProjectFileSystem } from '@/lib/project/types'
 import { locateEvidence, type SourceMove } from '@/lib/project/writing-ai-evidence'
@@ -26,6 +26,8 @@ import { ManuscriptTaskCard } from './ManuscriptTaskCard'
 import { ManuscriptReviewDialog } from './ManuscriptReviewDialog'
 import { manuscriptPlanSchema, manuscriptProgress, type ManuscriptContext, type ManuscriptTask } from '@/lib/project/manuscript-task'
 import { buildAttachmentContext } from '@/lib/project/ai-attachments'
+import { ClaimEvidence, type ReviewedClaim } from './ClaimEvidence'
+import { writingClaimsSchema, type ClaimReview } from '@/lib/project/writing-claims'
 
 const Diff = dynamic(() => import('./MonacoSourceEditor').then(module => module.WritingDraftComparison), { ssr: false })
 type DraftAccess = 'all' | string[]
@@ -56,6 +58,8 @@ const toolLabels: Record<string, string> = {
   prepare_submission: 'Prepare submission checklist', request_reviewer_reply: 'Find archived reply evidence',
   prepare_revision_round: 'Check revision baseline', prepare_reviewer_comment: 'Check reviewer comment target',
   plan_manuscript: 'Plan manuscript changes', list_attachments: 'List project attachments', read_csv_rows: 'Read CSV evidence',
+  read_manuscript_data: 'Read planned CSV evidence',
+  resolve_claim_evidence: 'Link fresh claim evidence',
 }
 const receiptKinds = new Set(['draft', 'saved', 'undone', 'rejected', 'archived', 'revision-created', 'comment-added', 'reply-saved',
   'permission-granted', 'permission-denied'])
@@ -179,8 +183,8 @@ export function WritingAiWorkbench(props: WorkbenchProps) {
       await recordChatTaskStep(storage, [workspace, projectId], id, { ...step, at: Date.now() })
       await refreshTasks()
     }}
-    verifications={verifications} onVerification={async (id, report, record) => {
-      await writeChatVerification(storage, [workspace, projectId], id, report, record)
+    verifications={verifications} onVerification={async (id, report, record, build) => {
+      await writeChatVerification(storage, [workspace, projectId], id, report, record, build)
       setVerifications(current => ({ ...current, [id]: report }))
       if (record) await refreshTasks()
     }}
@@ -229,7 +233,7 @@ export function WritingAiWorkbench(props: WorkbenchProps) {
 
 function Conversation(props: WorkbenchProps & {
   conversation: ChatConversation; conversations: ChatConversation[]; storageError: string; checkpoints: Checkpoints
-  verifications: Record<string, ChatVerification>; onVerification: (id: string, report: ChatVerification, record?: boolean) => Promise<void>
+  verifications: Record<string, ChatVerification>; onVerification: (id: string, report: ChatVerification, record?: boolean, build?: ManuscriptBuild) => Promise<void>
   tasks: Record<string, ChatTaskStep[]>; onTaskStep: (id: string, step: Omit<ChatTaskStep, 'at'>) => Promise<void>
   onRefreshTasks: () => Promise<void>
   onSelect: (id: string) => void; onNew: () => void; onDelete: () => void
@@ -267,7 +271,7 @@ function Conversation(props: WorkbenchProps & {
     setWasActive(props.active)
     if (!props.active) { setPermission(undefined); setConsent(undefined); setRunningManuscript(false) }
   }
-  const pending = useRef<{ id: string; grant?: string; manuscriptId?: string } | null>(null)
+  const pending = useRef<{ id: string; grant?: string; manuscriptId?: string; claimId?: string } | null>(null)
   const [runSnapshots, setRunSnapshots] = useState(props.conversation.runs)
   const runs = useRef(props.conversation.runs)
   const latest = useRef(props)
@@ -300,10 +304,19 @@ function Conversation(props: WorkbenchProps & {
         updateManuscript({ ...plan, id: crypto.randomUUID(), goal: chatText(original).slice(0, 12000), batches: [] })
       }
       const projectTask = manuscriptRef.current
-      if (runId && projectTask && run?.manuscriptId === projectTask.id && task?.id === runId) {
+      if (runId && task?.claimId && task.id === runId && projectTask && run?.manuscriptId === projectTask.id && latest.current.active) {
+        const evidence = toolResult(message, 'tool-resolve_claim_evidence', writingClaimsSchema.element)
+        if (evidence) {
+          updateManuscript({ ...projectTask, claimReviews: { ...projectTask.claimReviews,
+            [task.claimId]: { decision: 'requested', evidence, revision: run.pathRevision ?? 0 } } })
+          setReviewManuscript(true)
+        } else setError('No fresh evidence was linked. The claim still needs review.')
+      }
+      if (runId && projectTask && run?.manuscriptId === projectTask.id && task?.id === runId && !task.claimId) {
         if (proposal && projectTask.batches.length < 120) {
           updateManuscript({ ...projectTask, batches: [...projectTask.batches, {
             run: runId, files: [...new Set(proposal.edits.map(edit => edit.path))], replaces: run.replacesBatch,
+            claims: proposal.claims, sourceRevision: run.pathRevision ?? 0,
           }] })
         } else {
           setRunningManuscript(false)
@@ -328,6 +341,41 @@ function Conversation(props: WorkbenchProps & {
     manuscriptRef.current = value
     setManuscript(value)
     latest.current.onManuscript(value)
+  }
+
+  async function reviewClaim(item: ReviewedClaim, decision: 'confirmed' | 'requested' | 'excluded') {
+    const task = manuscriptRef.current
+    if (!task || !props.active || streaming || mutating) return
+    const review: ClaimReview = { ...task.claimReviews?.[item.id], decision,
+      fingerprint: decision === 'confirmed' ? item.assessment.fingerprint : undefined }
+    let next = { ...task, claimReviews: { ...task.claimReviews, [item.id]: review } }
+    if (decision === 'requested') {
+      const { path, quote } = item.claim
+      if (!submit(`Find verifiable evidence for this exact claim in ${path}: ${JSON.stringify(quote)}. Do not edit any files. Link the exact physical source lines with resolve_claim_evidence.`,
+        undefined, [], 'evidence', item)) throw new Error('Could not start a read-only evidence request.')
+      setReviewManuscript(false)
+    }
+    if (decision === 'excluded' && item.assessment.present) {
+      const { path, exclusion } = item.claim
+      const saved = editableSource(props.project, path)
+      const text = editableSource(props.working, path)
+      if (!exclusion || saved === undefined || text === undefined || task.batches.length >= 120) {
+        throw new Error('This exact change cannot be reverted. Compare the current file or exclude it from the save.')
+      }
+      const edits = [{ path, ...exclusion }]
+      const updated = applyProjectEdits(new Map([[path, text]]), edits).get(path)!
+      if (updated.includes(item.claim.quote)) throw new Error('The claim also occurs elsewhere. Compare the current file before excluding it.')
+      const run = crypto.randomUUID()
+      const state = await props.onAction(run, { kind: 'apply', edits, run: {
+        main: props.project.metadata.mainFile, sources: { [path]: { saved, draft: props.drafts[path] } },
+      } })
+      if (state !== 'draft') throw new Error('The draft could not be updated.')
+      const removed = task.batches.flatMap(batch => (batch.claims ?? []).flatMap((claim, index) => claim.path === path
+        && text.includes(claim.quote) && !updated.includes(claim.quote) ? [`${batch.run}:${index}`] : []))
+      next = { ...next, batches: [...task.batches, { run, files: [path] }],
+        claimReviews: { ...next.claimReviews, ...Object.fromEntries(removed.map(id => [id, { decision: 'excluded' } as const])) } }
+    }
+    updateManuscript(next)
   }
 
   async function verifyRepairedProposal(id: string, run: ChatRun, proposal: NonNullable<ReturnType<typeof editProposal>>, approved?: DraftGrant) {
@@ -394,7 +442,11 @@ function Conversation(props: WorkbenchProps & {
     setError('')
     setMutating(true)
     if (runs.current[id]?.manuscriptId && (action.kind === 'reject' || action.kind === 'undo')) setRunningManuscript(false)
-    try { await latest.current.onAction(id, action) }
+    try {
+      await latest.current.onAction(id, action)
+      if (action.kind === 'apply' && !action.automatic && manuscriptRef.current?.delivery
+        && runs.current[id]?.manuscriptId === manuscriptRef.current.id) setRunningManuscript(true)
+    }
     catch (cause) {
       if (runs.current[id]?.manuscriptId) setRunningManuscript(false)
       setError(cause instanceof Error ? cause.message : 'Could not change the source.')
@@ -504,7 +556,7 @@ function Conversation(props: WorkbenchProps & {
         return
       }
       case 'review':
-        if (!taskProgress?.active.length || taskProgress.pending || runningManuscript
+        if (!taskProgress?.active.length || taskProgress.pending || runningManuscript || manuscript?.delivery && taskProgress.remaining.length
           || !manuscript || props.checkpoints[manuscript.id] === 'saved') {
           setError('Apply or resolve the task batches before opening manuscript review.')
         } else setReviewManuscript(true)
@@ -563,7 +615,7 @@ function Conversation(props: WorkbenchProps & {
 
   function submit(value: string, repair?: { id: string; report: ChatVerification; proposal?: NonNullable<ReturnType<typeof editProposal>>;
     reverify?: boolean; manuscriptTask?: boolean },
-    approvedScope?: string[], taskMode?: 'plan' | 'batch') {
+    approvedScope?: string[], taskMode?: 'plan' | 'batch' | 'evidence', evidence?: ReviewedClaim) {
     const text = value.trim()
     if (!text || streaming || props.disabled || mutating || !props.active) return false
     setError('')
@@ -610,8 +662,9 @@ function Conversation(props: WorkbenchProps & {
       return saved === undefined ? [] : [[path, { saved, draft: props.drafts[path] }] as const]
     }))
     const task = manuscriptRef.current
-    const manuscriptId = taskMode === 'batch' || repair?.manuscriptTask ? task?.id : repair ? runs.current[repair.id]?.manuscriptId : undefined
-    pending.current = { id, grant: repair?.manuscriptTask ? undefined : grant.current?.id, manuscriptId }
+    const manuscriptId = taskMode === 'batch' || taskMode === 'evidence' || repair?.manuscriptTask
+      ? task?.id : repair ? runs.current[repair.id]?.manuscriptId : undefined
+    pending.current = { id, grant: repair?.manuscriptTask ? undefined : grant.current?.id, manuscriptId, claimId: evidence?.id }
     const source: ChapterEditRequest = { mode: 'rewrite', path: primary, main: props.main, source: file.content,
       instruction: '', compiler: props.compiler, context }
     setPrompt('')
@@ -641,9 +694,12 @@ function Conversation(props: WorkbenchProps & {
     const selection = revisionOf || taskMode ? undefined : props.selection()
     const repairFiles = failedProposal ? [...new Set(failedProposal.edits.map(edit => edit.path))] : editPaths
     const taskContext: ManuscriptContext | undefined = taskMode === 'plan' ? { mode: 'plan', goal: text, files: editPaths }
+      : taskMode === 'evidence' && task && evidence ? { mode: 'evidence', goal: task.goal, files: [], data: task.delivery?.data,
+        claim: { path: evidence.claim.path, kind: evidence.claim.kind, quote: evidence.claim.quote } }
       : repair?.reverify || previousRun ? { mode: 'repair', goal: task?.goal ?? text, files: repairFiles, decisions: task?.decisions, questions: task?.questions }
       : task ? { mode: taskMode === 'batch' ? 'batch' : 'context', goal: task.goal, files: taskMode === 'batch' ? editPaths : task.files,
-        completed: [...manuscriptProgress(task, props.checkpoints, props.tasks).done], decisions: task.decisions, questions: task.questions } : undefined
+        completed: [...manuscriptProgress(task, props.checkpoints, props.tasks).done], decisions: task.decisions, questions: task.questions,
+        data: taskMode === 'batch' ? task.delivery?.data : undefined } : undefined
     const workspaceActivity = messages.flatMap(message => {
       if (message.role !== 'assistant' || !message.metadata?.run) return []
       const step = props.tasks[message.metadata.run]?.findLast(item => receiptKinds.has(item.kind))
@@ -653,7 +709,8 @@ function Conversation(props: WorkbenchProps & {
     }))
     void sendMessage({ text, metadata: { run: id, selection } }, {
       body: { run: id, workflow: turnWorkflow, scope: editPaths, source, selection, feedback, previousProposal: failedProposal,
-        workspaceActivity, draftPermission: access, manuscript: taskContext, attachments: buildAttachmentContext(props.working, text) },
+        workspaceActivity, draftPermission: access, manuscript: taskContext, attachments: buildAttachmentContext(props.working,
+          [text, taskContext?.goal, ...(taskContext?.data ?? []).map(file => file.path)].filter(Boolean).join('\n')) },
     })
     return true
   }
@@ -661,9 +718,14 @@ function Conversation(props: WorkbenchProps & {
   const runNextBatch = useEffectEvent(() => {
     const task = manuscriptRef.current
     if (!task || !props.active || props.disabled || streaming || mutating || pending.current) return
+    if (task.delivery && task.questions.length) { setRunningManuscript(false); return }
     const progress = manuscriptProgress(task, props.checkpoints, props.tasks)
     if (progress.pending) return
-    if (!progress.remaining.length) { setRunningManuscript(false); return }
+    if (!progress.remaining.length) {
+      setRunningManuscript(false)
+      if (task.delivery && props.checkpoints[task.id] !== 'saved') setReviewManuscript(true)
+      return
+    }
     if (task.batches.length >= 120 || progress.remaining.some(path => !files.includes(path))) {
       setRunningManuscript(false)
       setError('The task reached its batch limit or a remaining file changed. Review the remaining file list.')
@@ -734,6 +796,8 @@ function Conversation(props: WorkbenchProps & {
 
   const anyError = error || (streamError ? 'The request failed. Check the model configuration or retry.' : '') || props.storageError
   const lastPrompt = [...messages].reverse().find(message => message.role === 'user')
+  const deliveryArchive = manuscript && props.tasks[manuscript.id]?.findLast(step => step.kind === 'archived')?.detail
+  const deliveryName = manuscript?.delivery?.submissionName
   return <div className="flex size-full min-h-0 min-w-0 flex-col text-sm">
     <div className="flex shrink-0 flex-wrap items-center gap-1 border-b px-2 py-1">
       <select aria-label="AI conversation" className="min-w-0 flex-1 rounded border bg-white px-1 py-1 text-xs" value={props.conversation.id}
@@ -756,7 +820,9 @@ function Conversation(props: WorkbenchProps & {
       working={props.working} drafts={props.drafts} baseline={baseline?.input === input ? baseline.raw : undefined}
       report={props.verifications[manuscript.id]} disabled={props.disabled || streaming || mutating}
       generatedEntry={props.saved !== props.project}
-      onVerify={report => props.onVerification(manuscript.id, report, true)}
+      autoVerify={Boolean(manuscript.delivery)} taskBatches={manuscript.batches} sourceMoves={props.sourceMoves ?? []}
+      claimReviews={manuscript.claimReviews} onClaimDecision={reviewClaim}
+      onVerify={(report, build) => props.onVerification(manuscript.id, report, true, build)}
       onSave={report => props.onSaveManuscript(manuscript.id, taskProgress.active, report)}
       onClose={() => setReviewManuscript(false)}
       onLocate={(path, line) => { setReviewManuscript(false); props.onLocate(path, line) }}
@@ -776,6 +842,14 @@ function Conversation(props: WorkbenchProps & {
         </div>
       </DialogContent>
     </Dialog>
+    {manuscript && deliveryName && (props.checkpoints[manuscript.id] === 'saved' || deliveryArchive) && <div className="max-h-[35%] shrink-0 overflow-auto border-b px-2 py-1">
+      <ChatSubmissionCard runId={manuscript.id} request={{ name: deliveryName }} saved={props.saved} working={props.working}
+        drafts={props.drafts} main={props.main ?? ''} active={props.active} disabled={props.disabled || streaming || mutating}
+        storage={props.storage} projectKey={props.projectKey} archived={deliveryArchive} manuscriptReport={props.verifications[manuscript.id]}
+        onLocate={props.onLocate} onBuild={props.onBuildSubmission} onExternal={props.onExternalSubmission}
+        onResult={feedback => void props.onTaskStep(manuscript.id, { kind: feedback.status, detail: feedback.message }).catch(() => setError('Could not record the submission compile.'))}
+        onArchive={props.onRefreshTasks} />
+    </div>}
     <div ref={scroll} className="min-h-0 flex-1 space-y-3 overflow-auto px-3 py-2" onScroll={event => {
       const element = event.currentTarget
       atBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight < 48
@@ -909,7 +983,7 @@ function Conversation(props: WorkbenchProps & {
                   composer.current?.focus()
                 }} /> : null}
               {proposal && run && runId && <Proposal proposal={proposal} run={run} state={props.checkpoints[runId]} project={props.working}
-            disabled={props.disabled || mutating} onAction={action => mutate(runId, action)} active={props.active}
+            disabled={props.disabled || mutating} onAction={action => mutate(runId, action)} active={props.active} sourceMoves={props.sourceMoves}
             input={input} baseline={baseline?.input === input ? baseline : undefined} verification={props.verifications[runId]}
             appliedSelection={steps?.find(step => step.kind === 'draft')?.selection}
             onVerification={(report, record) => props.onVerification(runId, report, record)} onLocate={props.onLocate}
@@ -983,7 +1057,10 @@ function Conversation(props: WorkbenchProps & {
       {permission && <div className="flex items-center justify-between gap-2 rounded border border-indigo-200 px-2 text-xs">
         <span role="status" className="min-w-0 break-words">{permission === 'all' ? 'Full draft access · This project and conversation'
           : `Automatic edits · ${permission.length} approved ${permission.length === 1 ? 'file' : 'files'}`}</span>
-        <Button type="button" size="sm" variant="ghost" onClick={revokePermission}>Revoke access</Button>
+        <Button type="button" size="sm" variant="ghost" onClick={() => {
+          revokePermission()
+          if (manuscriptRef.current?.delivery) setRunningManuscript(false)
+        }}>Revoke access</Button>
       </div>}
     </form>
     <Dialog open={Boolean(undoBatches)} onOpenChange={open => { if (!open && !mutating) setUndoBatches(undefined) }}>
@@ -1088,12 +1165,13 @@ function EvidenceList({ evidence, project, moves, revision, onLocate, onRefresh 
   </details>
 }
 
-function Proposal({ proposal, run, state, disabled, onAction, project, input, verification, baseline, active, appliedSelection, onVerification, onLocate, onUseDiagnostics, onTaskStep }: {
+function Proposal({ proposal, run, state, disabled, onAction, project, input, verification, baseline, active, appliedSelection, onVerification, onLocate, onUseDiagnostics, onTaskStep, sourceMoves }: {
   proposal: NonNullable<ReturnType<typeof editProposal>>; run: ChatRun; state?: ChatCheckpoint['state']
   disabled: boolean; onAction: (action: ChatAction) => Promise<void>; project: ProjectFileSystem
   input: Pick<Parameters<typeof validateChatProposal>[0], 'project' | 'working' | 'drafts' | 'main'>
   verification?: ChatVerification; baseline?: { raw: string; working: string }; active: boolean
   appliedSelection?: number[]
+  sourceMoves?: SourceMove[]
   onUseDiagnostics: (report: ChatVerification, reverify?: boolean) => void
   onVerification: (report: ChatVerification, record?: boolean) => Promise<void>
   onTaskStep: (step: Omit<ChatTaskStep, 'at'>) => Promise<void>
@@ -1177,10 +1255,14 @@ function Proposal({ proposal, run, state, disabled, onAction, project, input, ve
   const paths = [...new Set(proposal.edits.map(edit => edit.path))]
   const previewText = after.get(preview)
   const bibliography = useMemo(() => collectBibliography(project), [project])
-  const unknown = new Set([...after].flatMap(([path, text]) => findNewUnknownCitations(path, base.get(path) ?? '', text, bibliography)))
+  const unknown = new Set([...after].flatMap(([path, text]) => findNewUnknownCitations(path, base.get(path) ?? '', text, bibliography)
+    .map(issue => issue.key)))
+  const claims = (proposal.claims ?? []).filter(claim => changes.some(edit => edit.path === claim.path
+    && edit.after.includes(claim.quote) && !edit.before.includes(claim.quote))).map(claim => ({ claim, revision: run.pathRevision ?? 0 }))
   return <section aria-label="Source change proposal" className="space-y-2 rounded-md border border-indigo-200 p-2">
     <p className="font-medium">Proposed source changes</p>
     <p className="break-words text-xs">{proposal.summary}</p>
+    <ClaimEvidence claims={claims} project={project} moves={sourceMoves ?? []} onLocate={onLocate} />
     {state ? <div className="flex flex-wrap items-center gap-2">
       <span role="status" className="text-xs">{state === 'draft' ? 'Applied to local drafts' : state === 'saved' ? 'Saved to project' : state === 'undone' ? 'Undone' : 'Rejected'}</span>
       {state === 'draft' && <p className="w-full text-xs text-slate-600">These working drafts are kept in this browser. Project save and PDF verification are separate actions.</p>}

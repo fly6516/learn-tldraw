@@ -22,15 +22,25 @@ export function ManuscriptTaskCard({ task, states, receipts, messages, running, 
   const progress = manuscriptProgress(task, states, receipts)
   const saved = states[task.id] === 'saved'
   const savedFiles = receipts[task.id]?.findLast(step => step.kind === 'saved')?.paths?.length
+  const archive = receipts[task.id]?.findLast(step => step.kind === 'archived')?.detail
   return <section aria-label="Manuscript task" className="mx-2 my-1 max-h-[45%] shrink-0 space-y-2 overflow-auto rounded border border-indigo-200 p-2 text-xs">
     <h3 className="font-semibold">{task.title}</h3>
     <p role="status">{progress.done.size} of {task.files.length} files applied · {running
       ? progress.pending ? 'Review the current batch to continue' : 'Running' : progress.remaining.length ? 'Paused' : 'All planned files applied'}</p>
     {saved && <p className="text-emerald-800">{savedFiles ? `${savedFiles} task files saved together.` : 'Task files saved together.'}</p>}
+    {task.delivery && <div aria-label="Task next step" className="space-y-1 text-slate-700">
+      <p>{archive ? `Complete · ${archive} archived` : saved ? task.delivery.submissionName ? 'Review the submission and confirm its archive.' : 'Complete · Sources saved.'
+        : progress.pending ? 'Review the pending draft before continuing.'
+          : task.questions.length ? 'Resolve the author questions below before editing.'
+            : progress.remaining.length ? 'Continue with evidence and the remaining source files.' : 'Review the verified files and confirm saving.'}</p>
+      {task.delivery.data.map(range => <p key={`${range.path}:${range.startRow}`} className="break-all font-mono">
+        {range.path} · CSV rows {range.startRow}–{range.startRow + range.rowCount - 1}</p>)}
+    </div>}
     <div className="flex flex-wrap gap-1">
       {running ? <Button type="button" size="sm" variant="outline" onClick={onPause}>Pause task</Button>
-        : <Button type="button" size="sm" disabled={busy || Boolean(progress.pending) || !progress.remaining.length} onClick={onRun}>Continue task</Button>}
-      {!saved && <Button type="button" size="sm" variant="outline" disabled={busy || running || Boolean(progress.pending) || !progress.active.length}
+        : <Button type="button" size="sm" disabled={busy || Boolean(progress.pending) || !progress.remaining.length || Boolean(task.delivery && task.questions.length)} onClick={onRun}>Continue task</Button>}
+      {!saved && <Button type="button" size="sm" variant="outline" disabled={busy || running || Boolean(progress.pending) || !progress.active.length
+        || Boolean(task.delivery && progress.remaining.length)}
         onClick={onReview}>Review and save task</Button>}
       {saved && <Button type="button" size="sm" variant="outline" disabled={busy} onClick={onUndoSave}>Undo manuscript save</Button>}
       <Button type="button" size="sm" variant="outline" disabled={busy || running || saved || !progress.active.length}

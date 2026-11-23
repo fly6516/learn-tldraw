@@ -135,7 +135,7 @@ test('runs writing, preview, submission and a grounded reviewer reply from one c
   await request(page, 'Test: explain build')
   await expect(page.getByText(/The compiler result is available/)).toBeVisible()
 
-  await request(page, 'Test: prepare submission')
+  await request(page, 'Test: prepare submission excluding references.bib')
   const first = page.getByRole('region', { name: 'Submission task' }).first()
   await first.getByText(/^ZIP manifest/).click()
   await expect(first.getByRole('checkbox', { name: 'references.bib' })).not.toBeChecked()

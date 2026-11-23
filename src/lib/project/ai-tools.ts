@@ -7,6 +7,7 @@ import { searchProjectSources } from './source-search'
 import type { ProjectFileSystem } from './types'
 import { captureEvidenceQuote, type EvidenceQuote } from './writing-ai-evidence'
 import { readCsvRange, type AttachmentContext } from './ai-attachments'
+import type { ClaimReference } from './writing-claims'
 
 type Answer = z.infer<typeof chapterAnswerSchema>
 const query = z.string().trim().min(1).max(100)
@@ -18,6 +19,7 @@ export function createChapterTools(input: ChapterEditRequest, attachments?: Atta
   const files: ProjectFileSystem['files'] = new Map([...sources].map(([path, file]) => [path,
     { path, name: path.split('/').at(-1) ?? path, type: 'editable', content: file.source }]))
   const evidence: (Answer['evidence'][number] & { anchor?: EvidenceQuote })[] = []
+  const claimEvidence: ClaimReference[] = []
   const calls: Answer['tools'] = []
   const observed = new Set<string>()
   const readFiles = new Set<string>()
@@ -28,15 +30,28 @@ export function createChapterTools(input: ChapterEditRequest, attachments?: Atta
     const output = items.map(item => ({ ...item, text: item.text.slice(0, 500) }))
     for (const item of output) {
       observed.add(`${item.path}:${item.line}`)
-      if (evidence.length < 40 && !evidence.some(found => found.path === item.path && found.line === item.line && found.kind === kind)) {
-        const source = sources.get(item.path)?.source ?? csv.get(item.path)?.text
-        evidence.push({ ...item, kind, anchor: source === undefined ? undefined : captureEvidenceQuote(item.path, source, item.line) })
+      const referenceKind = kind === 'read_csv_rows' ? 'data'
+        : kind === 'query_references' && /\.bib$/i.test(item.path) ? 'bibliography'
+          : kind === 'read_source' && /(?<!\\)&|\\(?:caption|begin\{tabular)/.test(item.text) ? 'table' : undefined
+      const source = sources.get(item.path)?.source ?? csv.get(item.path)?.text
+      const anchor = source === undefined ? undefined : captureEvidenceQuote(item.path, source, item.line)
+      if (evidence.length < 40 && !evidence.some(found => found.path === item.path && found.line === item.line && found.kind === kind)) evidence.push({ ...item, kind, anchor })
+      if (referenceKind && claimEvidence.length < 72 && !claimEvidence.some(found => found.path === item.path && found.line === item.line)) {
+        claimEvidence.push({ ...item, kind: referenceKind, anchor })
       }
     }
     return { items: output }
   }
 
-  return { calls, evidence, observed, readFiles, tools: {
+  function readAttachmentRows(path: string, startRow: number, rowCount: number) {
+    const source = csv.get(path)
+    if (!source) return { unavailable: 'This CSV is outside the readable attachment snapshot.' }
+    const result = readCsvRange(source.text, startRow, rowCount, source.truncated)
+    const citations = record('read_csv_rows', result.rows.map(row => ({ path, line: row.line, text: JSON.stringify(row.cells) })))
+    return { path, header: readCsvRange(source.text, 1, 1, source.truncated).rows[0], ...result, ...citations }
+  }
+
+  return { calls, evidence, claimEvidence, observed, readFiles, readAttachmentRows, tools: {
     ...(attachments ? {
       list_attachments: tool({
         description: 'List local project attachments by path, including figures and datasets. Only CSV files marked csv are readable. This does not inspect image contents.',
@@ -49,13 +64,7 @@ export function createChapterTools(input: ChapterEditRequest, attachments?: Atta
       read_csv_rows: tool({
         description: 'Read CSV records by one-based row number, including row 1 for headers. Cite the returned project path and physical line numbers. Truncated data do not support whole-file claims.',
         inputSchema: z.object({ path: pathName, startRow: z.number().int().min(1).max(24_000), rowCount: z.number().int().min(1).max(12) }),
-        execute: async ({ path, startRow, rowCount }) => {
-          const source = csv.get(path)
-          if (!source) return { unavailable: 'This CSV is outside the readable attachment snapshot.' }
-          const result = readCsvRange(source.text, startRow, rowCount, source.truncated)
-          const citations = record('read_csv_rows', result.rows.map(row => ({ path, line: row.line, text: JSON.stringify(row.cells) })))
-          return { path, header: readCsvRange(source.text, 1, 1, source.truncated).rows[0], ...result, ...citations }
-        },
+        execute: async ({ path, startRow, rowCount }) => readAttachmentRows(path, startRow, rowCount),
       }),
     } : {}),
     search_source: tool({

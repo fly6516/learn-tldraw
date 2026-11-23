@@ -1,7 +1,7 @@
 import { defineConfig, devices } from '@playwright/test'
 
 const livePath = process.env.RESEARCH_LIVE_TEST_PATH
-  || (process.env.RESEARCH_LIVE_TEST_ZIP ? '/research' : undefined)
+  || (process.env.RESEARCH_LIVE_TEST === '1' || process.env.RESEARCH_LIVE_TEST_ZIP ? '/research' : undefined)
 const port = livePath ? 3178 : 3177
 const server = `http://127.0.0.1:${port}`
 

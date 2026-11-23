@@ -3,17 +3,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { readSubmissionFiles, saveSubmissionVersion } from '@/lib/project/storage'
-import { prepareSubmission, type SubmissionBuild, type SubmissionSelection } from '@/lib/project/submission'
+import { readManuscriptBuild, readSubmissionFiles, saveSubmissionVersion } from '@/lib/project/storage'
+import { exportExternalBuild, prepareSubmission, type SubmissionBuild, type SubmissionSelection } from '@/lib/project/submission'
 import type { ProjectFileSystem } from '@/lib/project/types'
 import type { ChatCompileFeedback, SubmissionChatRequest } from '@/lib/project/writing-chat'
 import type { WritingDrafts, WritingKey } from '@/lib/project/writing-drafts'
 import { download, submissionFilename } from './SubmissionDialog'
+import { ChatExternalBuild } from './ChatExternalBuild'
+import type { ChatVerification } from '@/lib/project/writing-chat-validation'
 
-export function ChatSubmissionCard({ runId, request, saved, working, drafts, main, active, disabled, storage, projectKey, archived,
+export function ChatSubmissionCard({ runId, request, saved, working, drafts, main, active, disabled, storage, projectKey, archived, manuscriptReport,
   onBuild, onLocate, onExternal, onResult, onArchive }: {
   runId: string; request: SubmissionChatRequest; saved: ProjectFileSystem; working: ProjectFileSystem; drafts: WritingDrafts
   main: string; active: boolean; disabled: boolean; storage: IDBDatabase; projectKey: WritingKey; archived?: string
+  manuscriptReport?: ChatVerification
   onBuild: (selection: SubmissionSelection, signal: AbortSignal) => Promise<{ feedback: ChatCompileFeedback; submission?: SubmissionBuild } | undefined>
   onLocate: (path: string, line: number) => void
   onExternal: (include: boolean, excluded: string[]) => void
@@ -24,6 +27,7 @@ export function ChatSubmissionCard({ runId, request, saved, working, drafts, mai
   const [excluded, setExcluded] = useState(() => new Set(request.excluded))
   const [name, setName] = useState(request.name ?? '')
   const [build, setBuild] = useState<{ selection: SubmissionSelection; result: SubmissionBuild }>()
+  const [staleBuild, setStaleBuild] = useState<SubmissionSelection>()
   const [feedback, setFeedback] = useState<{ selection: SubmissionSelection; result: ChatCompileFeedback }>()
   const [archiveName, setArchiveName] = useState(archived)
   const [error, setError] = useState('')
@@ -33,14 +37,15 @@ export function ChatSubmissionCard({ runId, request, saved, working, drafts, mai
   const paths = useMemo(() => [...source.files].filter(([, file]) => file.type !== 'directory').map(([path]) => path).sort(), [source])
   const invalid = [...excluded].filter(path => path === main || !paths.includes(path))
   const selection = useMemo(() => {
-    const { target, issues } = prepareSubmission(source, main, excluded)
+    const { target, issues, compatibility } = prepareSubmission(source, main, excluded)
     const included = [...target.files.keys()].sort()
-    return { target, issues, paths: included, excluded: paths.filter(path => excluded.has(path)),
+    return { target, issues, compatibility, paths: included, excluded: paths.filter(path => excluded.has(path)),
       drafts: include ? included.filter(path => Object.hasOwn(drafts, path)) : [] }
   }, [drafts, excluded, include, main, paths, source])
   const current = useRef(selection)
   const allowed = active && !disabled && !busy && !archiveName
   const canBuild = main && !invalid.length && !selection.issues.some(issue => issue.severity === 'error')
+  const externalRequired = selection.compatibility.bibliography === 'biber' || ['pdflatex', 'lualatex'].includes(selection.compatibility.engine ?? '')
   useEffect(() => {
     current.current = selection
     return () => operation.current?.abort()
@@ -49,6 +54,22 @@ export function ChatSubmissionCard({ runId, request, saved, working, drafts, mai
     if (!active) operation.current?.abort()
     return () => operation.current?.abort()
   }, [active])
+
+  useEffect(() => {
+    if (!manuscriptReport || manuscriptReport.status !== 'passed' || archiveName || !active) return
+    let mounted = true
+    void Promise.all([readManuscriptBuild(storage, projectKey, runId), exportExternalBuild(selection.target)]).then(([verified, source]) => {
+      if (!mounted || !verified) return
+      if (canBuild && !include && !excluded.size && manuscriptReport.main === main
+        && verified.compiledBaseline === manuscriptReport.compiledBaseline && verified.sourceChecksum === source.checksum) {
+        setBuild({ selection, result: { main, paths: selection.paths, excluded: selection.excluded, drafts: selection.drafts, issues: selection.issues,
+          pdf: verified.pdf, zip: source.zip, sourceChecksum: source.checksum,
+          externalEngine: verified.externalEngine, warnings: manuscriptReport.diagnostics.length > 0,
+          diagnostics: manuscriptReport.diagnostics.map(issue => ({ severity: issue.severity, message: `${issue.path}:${issue.line} · ${issue.message}` })) } })
+      } else setStaleBuild(selection)
+    }).catch(() => {})
+    return () => { mounted = false }
+  }, [active, archiveName, canBuild, excluded.size, include, main, manuscriptReport, projectKey, runId, selection, storage])
 
   async function compile() {
     if (!allowed || !canBuild || operation.current) return
@@ -77,8 +98,8 @@ export function ChatSubmissionCard({ runId, request, saved, working, drafts, mai
     setBusy(true)
     setError('')
     try {
-      await saveSubmissionVersion(storage, projectKey, { ...build.result, id: runId, name: title, createdAt: new Date().toISOString() }, runId)
-      setArchiveName(title)
+      const archivedVersion = await saveSubmissionVersion(storage, projectKey, { ...build.result, id: runId, name: title, createdAt: new Date().toISOString() }, runId)
+      setArchiveName(archivedVersion.name)
       await onArchive()
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not archive the submission.')
@@ -125,15 +146,22 @@ export function ChatSubmissionCard({ runId, request, saved, working, drafts, mai
         </button> : issue.message}
       </div>)}
       {!result && <div className="flex flex-wrap gap-1">
-        <Button size="sm" disabled={!allowed || !canBuild} onClick={() => void compile()}>Compile reviewed ZIP</Button>
-        <Button size="sm" variant="outline" disabled={!allowed || !canBuild} onClick={() => onExternal(include, selection.excluded)}>Open external compile handoff</Button>
+        <Button size="sm" disabled={!allowed || !canBuild || externalRequired} onClick={() => void compile()}>Compile reviewed ZIP</Button>
+        {!manuscriptReport && <Button size="sm" variant="outline" disabled={!allowed || !canBuild} onClick={() => onExternal(include, selection.excluded)}>Open external compile handoff</Button>}
         {busy && <Button size="sm" variant="ghost" onClick={() => operation.current?.abort()}>Cancel compile</Button>}
       </div>}
-      {build && !result && <p className="text-amber-800">The manifest or sources changed. Compile the reviewed ZIP again.</p>}
+      {!result && (manuscriptReport || externalRequired) && <ChatExternalBuild target={selection.target} main={main} compatibility={selection.compatibility}
+        busy={!allowed} ready={Boolean(canBuild)} onAttach={async (pdf, externalEngine, zip, sourceChecksum) => {
+          if (current.current !== selection) throw new Error('The submission manifest changed. Prepare its current ZIP again.')
+          setBuild({ selection, result: { main, paths: selection.paths, drafts: selection.drafts, excluded: selection.excluded,
+            issues: selection.issues, pdf, zip, sourceChecksum, externalEngine, warnings: false, diagnostics: [] } })
+        }} />}
+      {(staleBuild === selection || build) && !result && <p role="status" className="text-amber-800">The verified PDF is out of date. The manifest, compile entry, or saved sources changed.</p>}
     </>}
     {compiler && <p role="status" className={compiler.status === 'failed' ? 'text-red-800' : undefined}>{compiler.message}</p>}
     {(result || archiveName) && <>
       {result && <p className="break-all">ZIP SHA-256 <code>{result.sourceChecksum}</code></p>}
+      {result?.externalEngine && <p>External PDF · {result.externalEngine} · Source match confirmed by you</p>}
       <div className="flex flex-wrap gap-1">
         <Button size="sm" variant="outline" disabled={busy} onClick={() => void downloadResult('zip')}>Download compiled source ZIP</Button>
         <Button size="sm" variant="outline" disabled={busy} onClick={() => void downloadResult('pdf')}>Download compiled PDF</Button>

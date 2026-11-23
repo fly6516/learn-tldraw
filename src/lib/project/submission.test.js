@@ -30,10 +30,21 @@ test('external build ZIP bytes stay identical across export order and carry the 
   const files = new Map([['main.tex', { type: 'editable', path: 'main.tex', content: 'Main' }],
     ['figure.eps', { type: 'asset', path: 'figure.eps', blob: new Blob(['figure data']) }]])
   const first = await exportExternalBuild({ files })
-  const second = await exportExternalBuild({ files: new Map([...files].reverse()) })
+  const second = await exportExternalBuild({ files: new Map([...files].reverse().concat([['figures', { type: 'directory', path: 'figures' }]])) })
   const bytes = await first.zip.arrayBuffer()
   expect(second.checksum).toBe(first.checksum)
   expect(first.checksum).toBe(new Bun.CryptoHasher('sha256').update(bytes).digest('hex'))
   const archive = await JSZip.loadAsync(bytes)
   expect(await archive.file('figure.eps').async('text')).toBe('figure data')
+})
+
+test('finds Biber in the selected custom class and reports a locally excluded class', () => {
+  const file = (path, content) => [path, { path, type: 'editable', content }]
+  const project = { files: new Map([
+    file('main.tex', String.raw`\documentclass{riverstudy}\begin{document}River\end{document}`),
+    file('riverstudy.cls', String.raw`\LoadClass{article}\RequirePackage[backend=biber]{biblatex}`),
+  ]) }
+  expect(prepareSubmission(project, 'main.tex', new Set()).compatibility.bibliography).toBe('biber')
+  expect(prepareSubmission(project, 'main.tex', new Set(['riverstudy.cls'])).issues[0])
+    .toMatchObject({ severity: 'error', message: 'Excluded dependency: riverstudy.cls', location: { path: 'main.tex', line: 1 } })
 })
