@@ -6,7 +6,7 @@ import { Input } from '@/components/ui/input'
 import { checkCitations, type BibliographyEntry, type ReferenceLocation } from '@/lib/project/references'
 import type { ProjectFileSystem } from '@/lib/project/types'
 
-export function ReferencesPanel({ project, entries, path, draft, canInsert, onInsert, onLocate, canvasAction }: {
+export function ReferencesPanel({ project, entries, path, draft, canInsert, onInsert, onLocate, canvasAction, onRename, onMerge }: {
   project: ProjectFileSystem
   entries: BibliographyEntry[]
   path: string
@@ -15,6 +15,8 @@ export function ReferencesPanel({ project, entries, path, draft, canInsert, onIn
   onInsert: (key: string) => void
   onLocate: (location: ReferenceLocation) => void
   canvasAction: (entry: BibliographyEntry) => { label: string; run: () => void } | undefined
+  onRename?: (key: string) => void
+  onMerge?: () => void
 }) {
   const [query, setQuery] = useState('')
   const issues = useMemo(() => checkCitations(project, entries, { path, source: draft }), [project, entries, path, draft])
@@ -23,10 +25,14 @@ export function ReferencesPanel({ project, entries, path, draft, canInsert, onIn
     const haystack = [entry.key, entry.title, entry.author, entry.year].join(' ').toLowerCase()
     return words.every(word => haystack.includes(word))
   })
+  const duplicates = new Set(issues.filter(issue => issue.kind === 'duplicate').map(issue => issue.key))
   return (
     <section aria-label="References" className="space-y-4 p-3">
       <div className="space-y-2">
-        <label htmlFor="reference-search" className="font-semibold">Search bibliography</label>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <label htmlFor="reference-search" className="font-semibold">Search bibliography</label>
+          {onMerge && <Button size="sm" variant="outline" onClick={onMerge}>Merge bibliography</Button>}
+        </div>
         <Input id="reference-search" placeholder="Key, title, author, or year" value={query}
           onChange={event => setQuery(event.target.value)} />
         {!matches.length && <p className="text-sm text-muted-foreground">{entries.length ? 'No matching entries.' : 'No bibliography entries found.'}</p>}
@@ -45,6 +51,8 @@ export function ReferencesPanel({ project, entries, path, draft, canInsert, onIn
               <div className="flex shrink-0 flex-col items-end gap-1">
                 <Button size="sm" variant="outline" aria-label={`Insert citation for ${entry.key}`}
                   disabled={!canInsert} onClick={() => onInsert(entry.key)}>Insert</Button>
+                {onRename && <Button size="sm" variant="ghost" aria-label={`Rename citation key ${entry.key}`}
+                  disabled={duplicates.has(entry.key)} onClick={() => onRename(entry.key)}>Rename key</Button>}
                 {action && <Button size="sm" variant="ghost" onClick={action.run}>{action.label}</Button>}
               </div>
             </li>

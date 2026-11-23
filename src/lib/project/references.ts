@@ -40,10 +40,10 @@ function bibliographyFields(body: string) {
   return { title: metadata.title, author: metadata.author, year: metadata.year }
 }
 
-export function parseBibliography(path: string, source: string): BibliographyEntry[] {
+export function bibliographyRecords(path: string, source: string) {
   const text = withoutComments(source)
   const header = /@([a-z]+)\s*([({])/gi
-  const entries: BibliographyEntry[] = []
+  const entries: { entry: BibliographyEntry; start: number; end: number; fields: string; fieldsStart: number }[] = []
   for (let match = header.exec(text); match; match = header.exec(text)) {
     const bodyStart = header.lastIndex
     const open = match[2]
@@ -56,10 +56,52 @@ export function parseBibliography(path: string, source: string): BibliographyEnt
     if (!keyMatch) continue
     const key = keyMatch[1]
     const start = bodyStart + keyMatch[0].indexOf(key)
-    entries.push({ path, start, end: start + key.length, line: lineNumber(source, start), key,
-      ...bibliographyFields(body.slice(keyMatch[0].length)) })
+    const fields = body.slice(keyMatch[0].length)
+    const entry = { path, start, end: start + key.length, line: lineNumber(source, start), key, ...bibliographyFields(fields) }
+    entries.push({ entry, start: match.index, end: end + 1, fields, fieldsStart: bodyStart + keyMatch[0].length })
   }
   return entries
+}
+
+export function parseBibliography(path: string, source: string): BibliographyEntry[] {
+  return bibliographyRecords(path, source).map(record => record.entry)
+}
+
+export function bibliographyKeyUses(path: string, source: string) {
+  const uses: (SourceLocation & { key: string })[] = []
+  const field = /^\s*([a-z]+)\s*=\s*/i
+  const keyFields = new Set(['crossref', 'xref', 'xdata', 'related', 'entryset'])
+  for (const record of bibliographyRecords(path, source)) {
+    const text = record.fields
+    for (let cursor = 0; cursor < text.length;) {
+      const match = field.exec(text.slice(cursor))
+      if (!match) break
+      const start = cursor + match[0].length
+      let braces = 0
+      let quoted = false
+      let end = start
+      for (; end < text.length; end++) {
+        const token = text[end]
+        if (token === '\\') { end++; continue }
+        if (token === ',' && !braces && !quoted) break
+        if (token === '"' && !braces) quoted = !quoted
+        if (token === '{') braces++
+        if (token === '}') braces--
+      }
+      cursor = end + 1
+      if (!keyFields.has(match[1].toLowerCase())) continue
+      const value = text.slice(start, end).trimEnd()
+      const delimited = /^(\{([^{}"]*)\}|"([^{}"]*)")$/.exec(value)
+      if (!delimited) continue
+      const body = delimited[2] ?? delimited[3]
+      if (!/^\s*[^\s,{}\\#]+\s*(?:,\s*[^\s,{}\\#]+\s*)*$/.test(body)) continue
+      for (const item of body.matchAll(/[^\s,]+/g)) {
+        const offset = record.fieldsStart + start + 1 + item.index
+        uses.push({ path, start: offset, end: offset + item[0].length, line: lineNumber(source, offset), key: item[0] })
+      }
+    }
+  }
+  return uses
 }
 
 export function findCitations(path: string, source: string): (ReferenceLocation & { key: string })[] {

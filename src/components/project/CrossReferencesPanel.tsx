@@ -6,12 +6,13 @@ import { Input } from '@/components/ui/input'
 import type { CrossReferenceIndex } from '@/lib/project/cross-references'
 import type { SourceLocation } from '@/lib/project/latex-source'
 
-export function CrossReferencesPanel({ index, titles, canInsert, onInsert, onLocate }: {
+export function CrossReferencesPanel({ index, titles, canInsert, onInsert, onLocate, onRename }: {
   index: CrossReferenceIndex
   titles: ReadonlyMap<string, string>
   canInsert: boolean
   onInsert: (command: 'ref' | 'pageref', key: string) => void
   onLocate: (location: SourceLocation) => void
+  onRename?: (key: string) => void
 }) {
   const [query, setQuery] = useState('')
   const [command, setCommand] = useState<'ref' | 'pageref'>('ref')
@@ -49,8 +50,12 @@ export function CrossReferencesPanel({ index, titles, canInsert, onInsert, onLoc
                 className="block break-all text-left font-mono text-xs underline">{item.path}:{item.line} · \{item.command}</button>)}
             </details>}
           </div>
-          <Button size="sm" variant="outline" aria-label={`Insert cross-reference for ${key}`} disabled={!canInsert || definitions.length !== 1}
-            onClick={() => onInsert(command, key)}>Insert</Button>
+          <div className="flex shrink-0 flex-col items-end gap-1">
+            <Button size="sm" variant="outline" aria-label={`Insert cross-reference for ${key}`} disabled={!canInsert || definitions.length !== 1}
+              onClick={() => onInsert(command, key)}>Insert</Button>
+            {onRename && <Button size="sm" variant="ghost" aria-label={`Rename LaTeX label ${key}`} disabled={definitions.length !== 1}
+              onClick={() => onRename(key)}>Rename label</Button>}
+          </div>
         </li>
       })}
     </ul>

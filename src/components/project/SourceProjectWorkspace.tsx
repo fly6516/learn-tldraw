@@ -39,6 +39,7 @@ import type { ChatVerification } from '@/lib/project/writing-chat-validation'
 import type { SourceMove } from '@/lib/project/writing-ai-evidence'
 import type { FileOperation } from '@/lib/project/file-refactor'
 import { FileOperationDialog, type FileOperationPlan } from './FileOperationDialog'
+import { ReferenceOperationDialog, type ReferenceRequest } from './ReferenceOperationDialog'
 import { SubmissionDialog } from './SubmissionDialog'
 import { RevisionRoundsDialog } from './RevisionRoundsDialog'
 import { exportExternalBuild, prepareSubmission, type SubmissionIssue, type SubmissionBuild, type SubmissionSelection } from '@/lib/project/submission'
@@ -171,8 +172,8 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   actions: HTMLElement | null
   generateSource?: GenerateSource
   onOpenCanvas: () => void
-  outlineCanvas: OutlineCanvasActions
   onRecoveryBackup: () => void
+  outlineCanvas: OutlineCanvasActions
   onArchiveOutline: (outline: CanvasSourceCatalog | undefined) => void
   referenceCanvasAction: (entry: BibliographyEntry) => { label: string; run: () => void } | undefined
   review: WritingReviewActions
@@ -205,7 +206,9 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const [submissionCompilerIssues, setSubmissionCompilerIssues] = useState<SubmissionIssue[]>([])
   const [saveError, setSaveError] = useState('')
   const [fileOperation, setFileOperation] = useState<{ request: FileOperation; view?: PortableWritingState['view'] }>()
-  const [fileUndo, setFileUndo] = useState<{ before: ProjectFileSystem; writing: PortableWritingState; after: FileOperationPlan; move?: SourceMove }>()
+  const [referenceOperation, setReferenceOperation] = useState<{ request: ReferenceRequest; view?: PortableWritingState['view'] }>()
+  const [fileUndo, setFileUndo] = useState<{ before: ProjectFileSystem; writing: PortableWritingState;
+    after: { project: ProjectFileSystem; writing: PortableWritingState }; move?: SourceMove; references?: boolean }>()
   const [comparison, setComparison] = useState<string>()
   const [error, setError] = useState('')
   const [log, setLog] = useState('')
@@ -629,6 +632,10 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     setFileOperation({ request, view: captureWritingState()?.view })
   }
 
+  function openReferenceOperation(request: ReferenceRequest) {
+    setReferenceOperation({ request, view: captureWritingState()?.view })
+  }
+
   async function writeFileOperation(before: ProjectFileSystem, after: ProjectFileSystem, writingState: PortableWritingState, move?: SourceMove) {
     if (locked || writeInProgress.current || !storage || !journal.key || journal.loadError) throw new Error('Writing storage is not ready.')
     writeInProgress.current = true
@@ -691,6 +698,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   }
 
   const canSync = !locked && !pdfStale && sourceMap.length > 0
+  const canRefactorReferences = project.metadata.sourceMode === 'archive' && !!storage && journal.ready && !journal.loadError && !locked
 
   function showInPdf() {
     const line = editorRef.current?.getPosition()?.lineNumber
@@ -976,6 +984,11 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         </ul>
       </div>}
       {saveError && <p role="alert" className="shrink-0 border-b bg-red-50 px-3 py-1.5 text-sm text-red-900">{saveError}</p>}
+      {(journal.failed.size > 0 || (dirty && journal.loadError)) && <div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-amber-50 px-3 py-1.5 text-sm text-amber-950">
+        <span>Drafts could not be written to this browser. The editor still holds your changes.</span>
+        <Button size="sm" variant="outline" onClick={onRecoveryBackup}>Back up working drafts</Button>
+        {journal.failed.size > 0 && <Button size="sm" variant="ghost" disabled={!!journal.pending} onClick={() => void journal.retryFailed()}>Retry draft save</Button>}
+      </div>}
       {returnToAi && !aiOpen && <div className="flex shrink-0 items-center border-b bg-white px-2 py-1">
         <Button type="button" size="sm" variant="outline" onClick={resumeAi}>Back to Writing AI</Button>
       </div>}
@@ -984,11 +997,6 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
           setResumeManuscriptReview(undefined)
           setAiOpen(true)
           resumeManuscriptReview()
-      {(journal.failed.size > 0 || (dirty && journal.loadError)) && <div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-amber-50 px-3 py-1.5 text-sm text-amber-950">
-        <span>Drafts could not be written to this browser. The editor still holds your changes.</span>
-        <Button size="sm" variant="outline" onClick={onRecoveryBackup}>Back up working drafts</Button>
-        {journal.failed.size > 0 && <Button size="sm" variant="ghost" disabled={!!journal.pending} onClick={() => void journal.retryFailed()}>Retry draft save</Button>}
-      </div>}
         }}>Back to manuscript review</Button>
       </div>}
       <div className="flex shrink-0 items-center gap-2 border-b bg-white px-2 py-1.5 lg:hidden">
@@ -1032,7 +1040,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
                             onClick={() => openFileOperation({ kind: 'chapter', parent: selected,
                               to: selected.replace(/\.tex$/i, '-detail.tex'), title: '' })}>New chapter</Button>
                           {fileUndo && <Button size="sm" variant="outline" disabled={locked} onClick={() => void undoFileOperation()}>
-                            Undo file changes
+                            {fileUndo.references ? 'Undo reference changes' : 'Undo file changes'}
                           </Button>}
                         </div>}
                         <Files nodes={tree} selected={selected} main={main} dirty={drafts} sourcePaths={sourcePaths}
@@ -1172,9 +1180,13 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
             </details>}
           </div>}
           {panel === 'references' && <ReferencesPanel project={workingProject} entries={bibliography} path={selected} draft={draft}
-            canInsert={isTex && !readOnly && !locked} onInsert={insertReference} onLocate={locate} canvasAction={referenceCanvasAction} />}
+            canInsert={isTex && !readOnly && !locked} onInsert={insertReference} onLocate={locate} canvasAction={referenceCanvasAction}
+            onRename={canRefactorReferences ? from => openReferenceOperation({ kind: 'citation', from }) : undefined}
+            onMerge={canRefactorReferences && [...sourcePaths].some(path => /\.bib$/i.test(path) && editableSource(project, path) !== undefined)
+              ? () => openReferenceOperation({ kind: 'merge' }) : undefined} />}
           {panel === 'cross-references' && <CrossReferencesPanel index={crossReferences} titles={labelTitles} onLocate={locate}
-            canInsert={isTex && !readOnly && !locked} onInsert={(command, key) => insertReference(key, command)} />}
+            canInsert={isTex && !readOnly && !locked} onInsert={(command, key) => insertReference(key, command)}
+            onRename={canRefactorReferences ? from => openReferenceOperation({ kind: 'label', from }) : undefined} />}
           {panel === 'review' && <WritingReviewPanel key={selected} path={selected} line={reviewCursor?.path === selected ? reviewCursor.line : 1}
             catalog={catalog} canvas={outlineCanvas.canvas} actions={review} canSelect={isTex && currentFile?.type !== 'generated'}
             readSelection={readReviewSelection} onLocate={locate} />}
@@ -1239,6 +1251,13 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         openCanvas={card => { setRevision(undefined); review.locateCanvas(card) }} onClose={() => setRevision(undefined)} />}
       {fileOperation && <FileOperationDialog request={fileOperation.request} project={project} writing={{ drafts, view: fileOperation.view }}
         main={main} onClose={() => setFileOperation(undefined)} onApply={applyFileOperation} />}
+      {referenceOperation && <ReferenceOperationDialog request={referenceOperation.request} project={project}
+        writing={{ drafts, view: referenceOperation.view }} onClose={() => setReferenceOperation(undefined)}
+        onApply={async (plan, before, prior) => {
+          if (before !== project || prior.drafts !== drafts) throw new Error('Project data changed. Go back and preview the latest changes.')
+          await writeFileOperation(before, plan.project, plan.writing)
+          setFileUndo({ before, writing: prior, after: plan, references: true })
+        }} />}
       {comparison && comparedDraft && <Dialog open onOpenChange={open => { if (!open) setComparison(undefined) }}>
         <DialogContent className="flex h-[85dvh] min-h-0 flex-col sm:max-w-[90vw]">
           <DialogTitle>Compare local draft</DialogTitle>
