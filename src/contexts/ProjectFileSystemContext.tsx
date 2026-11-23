@@ -22,7 +22,7 @@ import {
   deleteFile as deleteFileFromFs,
   type FileTreeNode,
 } from '@/lib/project/file-system'
-import { openProjectStorage, readProject, writeProject } from '@/lib/project/storage'
+import { openProjectStorage, ProjectStorageConflict, readProject, writeProject } from '@/lib/project/storage'
 
 interface ProjectFileSystemContextValue {
   fileSystem: ProjectFileSystem | null
@@ -37,9 +37,16 @@ interface ProjectFileSystemContextValue {
   storage: IDBDatabase | null
   storageKey?: string
   acceptStoredProject: (project: ProjectFileSystem, previous?: ProjectFileSystem) => void
+  flushProject: (project: ProjectFileSystem) => Promise<ProjectFileSystem>
+  projectConflict: boolean
+  hasUnstoredProject: () => boolean
 }
 
 const ProjectFileSystemContext = createContext<ProjectFileSystemContextValue | null>(null)
+
+function sameLocalProject(first: ProjectFileSystem, second: ProjectFileSystem) {
+  return first.files === second.files && first.canvas === second.canvas && first.metadata === second.metadata && first.template === second.template
+}
 
 export function ProjectFileSystemProvider({ children, storageKey }: { children: ReactNode; storageKey?: string }) {
   const [fileSystem, setFileSystem] = useState<ProjectFileSystem | null>(null)
@@ -47,13 +54,45 @@ export function ProjectFileSystemProvider({ children, storageKey }: { children: 
   const [storage, setStorage] = useState<IDBDatabase | null>(null)
   const [ready, setReady] = useState(!storageKey)
   const [storageError, setStorageError] = useState(false)
+  const [projectConflict, setProjectConflict] = useState(false)
+  const [persisting, setPersisting] = useState(false)
   const lastStored = useRef<ProjectFileSystem | null>(null)
+  const pendingWrite = useRef<Promise<ProjectFileSystem> | null>(null)
+  const channel = useRef<BroadcastChannel | null>(null)
+  const hasUnstoredProject = useCallback(() => Boolean(fileSystem && (!lastStored.current || !sameLocalProject(fileSystem, lastStored.current))), [fileSystem])
 
   const acceptStoredProject = useCallback((project: ProjectFileSystem, previous?: ProjectFileSystem) => {
     lastStored.current = project
+    channel.current?.postMessage(project.storageRevision)
     setFileSystem(current => !previous || current === previous ? project : current?.metadata.createdAt === project.metadata.createdAt
       ? { ...project, canvas: current.canvas } : current)
   }, [])
+
+  const flushProject = useCallback(async (value: ProjectFileSystem): Promise<ProjectFileSystem> => {
+    if (!storageKey || !storage) return value
+    while (pendingWrite.current) await pendingWrite.current
+    const expected = lastStored.current
+    if (expected && sameLocalProject(value, expected)) return expected
+    if (expected && expected.storageRevision !== value.storageRevision) throw new ProjectStorageConflict()
+    const operation = writeProject(storage, storageKey, value, expected)
+    pendingWrite.current = operation
+    setPersisting(true)
+    try {
+      const saved = await operation
+      lastStored.current = saved
+      channel.current?.postMessage(saved.storageRevision)
+      setFileSystem(current => !current || current.storageRevision !== value.storageRevision ? current
+        : current === value ? saved : { ...current, storageRevision: saved.storageRevision })
+      return saved
+    } catch (error) {
+      if (error instanceof ProjectStorageConflict) setProjectConflict(true)
+      else setStorageError(true)
+      throw error
+    } finally {
+      pendingWrite.current = null
+      setPersisting(false)
+    }
+  }, [storage, storageKey])
 
   useEffect(() => {
     if (!storageKey) return
@@ -85,9 +124,33 @@ export function ProjectFileSystemProvider({ children, storageKey }: { children: 
   }, [storageKey])
 
   useEffect(() => {
-    if (!storageKey || !storage || !fileSystem || fileSystem === lastStored.current) return
-    void writeProject(storage, storageKey, fileSystem).catch(() => setStorageError(true))
-  }, [storage, storageKey, fileSystem])
+    if (!storageKey || !storage || !fileSystem || fileSystem === lastStored.current || projectConflict || persisting) return
+    void flushProject(fileSystem).catch(() => {})
+  }, [storage, storageKey, fileSystem, flushProject, projectConflict, persisting])
+
+  useEffect(() => {
+    if (!storage || !storageKey) return
+    const mailbox = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel(`research-project:${storageKey}`)
+    channel.current = mailbox
+    let alive = true
+    const check = async () => {
+      const before = lastStored.current
+      if (!before || pendingWrite.current) return
+      try {
+        const saved = await readProject(storage, storageKey)
+        if (alive && !pendingWrite.current && lastStored.current === before &&
+          (saved?.storageRevision !== before.storageRevision || saved?.metadata.createdAt !== before.metadata.createdAt)) setProjectConflict(true)
+      } catch { if (alive) setStorageError(true) }
+    }
+    mailbox?.addEventListener('message', check)
+    window.addEventListener('focus', check)
+    return () => {
+      alive = false
+      mailbox?.close()
+      channel.current = null
+      window.removeEventListener('focus', check)
+    }
+  }, [storage, storageKey])
 
   const fileTree = fileSystem ? getFileTree(fileSystem) : []
 
@@ -176,6 +239,9 @@ export function ProjectFileSystemProvider({ children, storageKey }: { children: 
         storage,
         storageKey,
         acceptStoredProject,
+        flushProject,
+        projectConflict,
+        hasUnstoredProject,
       }}
     >
       {storageError && (

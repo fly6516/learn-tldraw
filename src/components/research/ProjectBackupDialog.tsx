@@ -17,18 +17,19 @@ interface ProjectBackupDialogProps {
   canvas: ResearchCanvas
   project: ProjectFileSystem
   writing?: PortableWritingState
+  recovery?: boolean
   readHistory?: (selection: BackupHistorySelection) => Promise<PortableProjectHistory>
   onRestore: (project: ProjectFileSystem, writing?: PortableWritingState, history?: PortableProjectHistory) => Promise<boolean>
   onImportCopy?: (project: ProjectFileSystem, writing?: PortableWritingState, history?: PortableProjectHistory) => Promise<boolean>
   onClose: () => void
 }
 
-export function ProjectBackupDialog({ canvas, project, writing, readHistory, onRestore, onImportCopy, onClose }: ProjectBackupDialogProps) {
+export function ProjectBackupDialog({ canvas, project, writing, recovery = false, readHistory, onRestore, onImportCopy, onClose }: ProjectBackupDialogProps) {
   const [pending, setPending] = useState<Awaited<ReturnType<typeof decodeProjectBackup>>>()
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
-  const [includeDrafts, setIncludeDrafts] = useState(false)
+  const [includeDrafts, setIncludeDrafts] = useState(recovery)
   const [historyOptions, setHistoryOptions] = useState<BackupHistorySelection>({ publication: false, snapshots: false, ai: false })
   const fileInput = useRef<HTMLInputElement>(null)
   const draftCount = Object.keys(writing?.drafts ?? {}).length

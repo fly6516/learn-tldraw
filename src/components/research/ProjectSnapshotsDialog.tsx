@@ -27,7 +27,7 @@ export function ProjectSnapshotsDialog({ project, database, storageKey, verifyRe
   const [loading, setLoading] = useState(true)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
-  const [pending, setPending] = useState<{ item: ProjectSnapshotInfo; files: SnapshotFileChange[]; baseline: ProjectFileSystem['files'];
+  const [pending, setPending] = useState<{ item: ProjectSnapshotInfo; files: SnapshotFileChange[]; baseline: ProjectFileSystem['files']; revision?: string;
     changes: Awaited<ReturnType<typeof describeSnapshotRestore>> }>()
   const [selected, setSelected] = useState<string[]>([])
   const [compared, setCompared] = useState<SnapshotFileChange>()
@@ -64,14 +64,14 @@ export function ProjectSnapshotsDialog({ project, database, storageKey, verifyRe
       const files = await compareSnapshotFiles(project, target)
       setSelected([])
       setCompared(undefined)
-      setPending({ item, files, baseline: project.files, changes: await describeSnapshotRestore(project, target, files) })
+      setPending({ item, files, baseline: project.files, revision: project.storageRevision, changes: await describeSnapshotRestore(project, target, files) })
     })
   }
 
   function restore(paths?: readonly string[]) {
     if (!pending) return
     void perform(async () => {
-      if (pending.baseline !== project.files) throw new Error('Project files changed. Reopen the restore preview.')
+      if (pending.baseline !== project.files || pending.revision !== project.storageRevision) throw new Error('The project changed. Reopen the restore preview.')
       const blocked = verifyRestore(paths)
       if (blocked) throw new Error(blocked)
       const partial = Boolean(paths)

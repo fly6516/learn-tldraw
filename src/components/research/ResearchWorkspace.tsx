@@ -26,6 +26,7 @@ import { LatexImportDialog } from './LatexImportDialog'
 import { LatexPreviewPanel } from './LatexPreviewPanel'
 import { ProjectBackupDialog } from './ProjectBackupDialog'
 import { ProjectSnapshotsDialog } from './ProjectSnapshotsDialog'
+import { ProjectConflictNotice } from './ProjectConflictNotice'
 import { ResearchGraphEditor } from './ResearchGraphEditor'
 import { ProjectSearchDialog } from './ProjectSearchDialog'
 import { researchNodeTitle, type CanvasLocation } from '@/lib/project/canvas-search'
@@ -39,7 +40,7 @@ import { materialKind } from '@/lib/project/canvas-card-kinds'
 import type { BibliographyEntry, ReferenceLocation } from '@/lib/project/references'
 import { anchorLatexBlock, findSourceLinkIssues, repairSourceLink, type CanvasSourceCatalog } from '@/lib/project/canvas-source-links'
 import { SourceLinksDialog } from './SourceLinksDialog'
-import { readBackupHistory, restoreProjectBackup } from '@/lib/project/storage'
+import { readBackupHistory, readProject, restoreProjectBackup } from '@/lib/project/storage'
 import type { PortableProjectHistory } from '@/lib/project/backup-history'
 import type { LibraryView } from '@/lib/project/project-library'
 import type { PortableWritingState } from '@/lib/project/writing-drafts'
@@ -59,11 +60,12 @@ const noBlocks: LatexBlock[] = []
 
 function Workspace({ sample, initialProject, notice, projectListHref, onViewChange, onImportCopy }: WorkspaceProps) {
   const router = useRouter()
-  const { fileSystem, initializeProject, setFileSystem, storage, storageKey, acceptStoredProject } = useProjectFileSystem()
+  const { fileSystem, initializeProject, setFileSystem, storage, storageKey, acceptStoredProject, flushProject, projectConflict, hasUnstoredProject } = useProjectFileSystem()
+  const reloadingSavedProject = useRef(false)
   const view = useSearchParams()?.get('view') === 'write' ? 'write' : 'canvas'
   useEffect(() => { onViewChange?.(view) }, [onViewChange, view])
   const [importOpen, setImportOpen] = useState(false)
-  const [backupOpen, setBackupOpen] = useState<{ writing?: PortableWritingState }>()
+  const [backupOpen, setBackupOpen] = useState<{ writing?: PortableWritingState; recovery?: boolean }>()
   const [snapshotsOpen, setSnapshotsOpen] = useState(false)
   const [loadError, setLoadError] = useState(false)
   const [showFiles, setShowFiles] = useState(true)
@@ -212,8 +214,21 @@ function Workspace({ sample, initialProject, notice, projectListHref, onViewChan
 
   async function leaveForList(href: string) {
     if (await writing.current?.prepareProjectSwitch() === false) return
+    if (projectConflict && hasUnstoredProject()) {
+      setBackupOpen({ writing: writing.current?.getDraftBackup(), recovery: true })
+      return
+    }
     router.push(href)
   }
+
+  useEffect(() => {
+    if (!projectConflict) return
+    const warn = (event: BeforeUnloadEvent) => {
+      if (!reloadingSavedProject.current && hasUnstoredProject()) { event.preventDefault(); event.returnValue = '' }
+    }
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [projectConflict, hasUnstoredProject])
 
   function switchView(next: 'canvas' | 'write') {
     const url = new URL(window.location.href)
@@ -544,6 +559,14 @@ function Workspace({ sample, initialProject, notice, projectListHref, onViewChan
         <div ref={setWritingActions} className={view === 'write' ? 'order-4 col-span-2 flex min-w-0 flex-1 items-center justify-end gap-2' : 'hidden'} />
       </header>
       {notice}
+      {projectConflict && storage && storageKey && <ProjectConflictNotice project={{ ...fileSystem, canvas }}
+        readSaved={() => readProject(storage, storageKey)} onBackup={() => setBackupOpen({ writing: writing.current?.getDraftBackup(), recovery: true })}
+        onReload={async () => {
+          if (await writing.current?.prepareProjectSwitch() === false) return false
+          reloadingSavedProject.current = true
+          window.location.reload()
+          return true
+        }} />}
       <div className={view === 'canvas' ? 'flex min-h-0 flex-1 flex-col overflow-hidden' : 'hidden'}>
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b bg-muted/35 px-2 py-1.5 sm:px-3">
           <Button size="icon-sm" variant="ghost" className="hidden lg:inline-flex" aria-label="Toggle Canvas explorer"
@@ -730,13 +753,21 @@ function Workspace({ sample, initialProject, notice, projectListHref, onViewChan
             await onImportCopy(project, 'write')
             return true
           }
-          if (await writing.current?.prepareReplacement() === false) return false
+          if (storage && storageKey) {
+            const expectedDrafts = await writing.current?.confirmBackupReplacement()
+            if (!expectedDrafts) return false
+            const saved = await restoreProjectBackup(storage, [storageKey, fileSystem.metadata.createdAt], { ...project, canvas },
+              await flushProject(fileSystem), expectedDrafts)
+            acceptStoredProject(saved)
+          } else {
+            if (await writing.current?.prepareReplacement() === false) return false
+            setFileSystem({ ...project, canvas })
+          }
           setSourceVersion(version => version + 1)
-          setFileSystem(current => ({ ...project, canvas: current?.canvas }))
           switchView('write')
           return true
         }} />
-      {backupOpen && <ProjectBackupDialog canvas={canvas} project={fileSystem} writing={backupOpen.writing}
+      {backupOpen && <ProjectBackupDialog canvas={canvas} project={fileSystem} writing={backupOpen.writing} recovery={backupOpen.recovery}
         readHistory={storage && storageKey ? selection => readBackupHistory(storage, [storageKey, fileSystem.metadata.createdAt], selection) : undefined}
         onImportCopy={onImportCopy ? async (project, incoming, history) => {
           if (await writing.current?.prepareProjectSwitch() === false) return false
@@ -751,10 +782,12 @@ function Workspace({ sample, initialProject, notice, projectListHref, onViewChan
           setFileSystem(project)
           return true
         }
-        if (!await writing.current?.confirmBackupReplacement()) return false
-        await restoreProjectBackup(storage, [storageKey, fileSystem.metadata.createdAt], project, incoming, history)
+        const expectedDrafts = await writing.current?.confirmBackupReplacement()
+        if (!expectedDrafts) return false
+        const restored = await restoreProjectBackup(storage, [storageKey, fileSystem.metadata.createdAt], project,
+          await flushProject(fileSystem), expectedDrafts, incoming, history)
         resetProjectViews()
-        acceptStoredProject(project)
+        acceptStoredProject(restored)
         return true
       }} onClose={() => setBackupOpen(undefined)} />}
       {snapshotsOpen && storage && storageKey && <ProjectSnapshotsDialog database={storage} storageKey={storageKey}

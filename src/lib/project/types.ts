@@ -88,6 +88,7 @@ export interface ProjectDirectory {
  * Complete project file system
  */
 export interface ProjectFileSystem {
+  storageRevision?: string
   canvas?: ResearchCanvas
   // Template information
   template: LatexTemplate

@@ -34,7 +34,7 @@ import type { SourceProblem } from './MonacoSourceEditor'
 import type { CompileDiagnostic, CompileReport } from '@/lib/project/compile-diagnostics'
 import { findPdfRegion, type SyncRegion } from '@/lib/project/source-sync'
 import { applyWritingDrafts, draftConflicts, editableSource, sameDraft, type PortableWritingState, type WritingDrafts } from '@/lib/project/writing-drafts'
-import { clearWritingState, commitFileOperation, commitWritingDrafts, commitChatAction, commitManuscriptSave, readSourceMoves, undoChatBatches } from '@/lib/project/storage'
+import { commitFileOperation, commitWritingDrafts, commitChatAction, commitManuscriptSave, readSourceMoves, undoChatBatches } from '@/lib/project/storage'
 import type { ChatVerification } from '@/lib/project/writing-chat-validation'
 import type { SourceMove } from '@/lib/project/writing-ai-evidence'
 import type { FileOperation } from '@/lib/project/file-refactor'
@@ -143,7 +143,7 @@ export interface SourceWorkspaceHandle {
   prepareProjectSwitch: () => Promise<boolean>
   snapshotRestoreBlock: (paths?: readonly string[]) => string | undefined
   getDraftBackup: () => PortableWritingState | undefined
-  confirmBackupReplacement: () => Promise<boolean>
+  confirmBackupReplacement: () => Promise<WritingDrafts | false>
   prepareReplacement: () => Promise<boolean>
 }
 
@@ -176,7 +176,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   referenceCanvasAction: (entry: BibliographyEntry) => { label: string; run: () => void } | undefined
   review: WritingReviewActions
 }) {
-  const { setFileSystem, storage, storageKey, acceptStoredProject } = useProjectFileSystem()
+  const { setFileSystem, storage, storageKey, acceptStoredProject, flushProject } = useProjectFileSystem()
   const journal = useWritingDrafts(storage, storageKey, project.metadata.createdAt)
   const { drafts, restoredView, recordView } = journal
   const textFiles = useMemo(() => [...project.files.values()].filter(
@@ -488,19 +488,10 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         return false
       }
       if (!confirmDiscard()) return false
-      await journal.storedDrafts()
-      return true
+      return journal.storedDrafts()
     },
     async prepareReplacement() {
-      if (writeInProgress.current || !journal.ready || !confirmDiscard()) return false
-      try {
-        await journal.storedDrafts()
-        if (storage && journal.key) await clearWritingState(storage, journal.key)
-        return true
-      } catch {
-        setSaveError('Local drafts could not be cleared. The project was kept.')
-        return false
-      }
+      return !writeInProgress.current && journal.ready && confirmDiscard()
     },
     openGeneratedNode(node) {
       let line: number | undefined
@@ -569,7 +560,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       if (journal.failed.size || Object.keys(drafts).some(path => !sameDraft(persisted[path], drafts[path]))) {
         throw new Error('Local drafts are out of sync. Resolve them before applying.')
       }
-      const result = await commitChatAction(storage, journal.key, run, action)
+      const result = await commitChatAction(storage, journal.key, run, action, await flushProject(project))
       if (result.changed && action.kind !== 'reject') {
         const entries = Object.fromEntries(Object.entries(result.checkpoint.after).map(([path, source]) =>
           [path, source.draft ?? { base: source.saved, text: source.saved }]))
@@ -593,7 +584,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       if (journal.failed.size || Object.keys(drafts).some(path => !sameDraft(persisted[path], drafts[path]))) {
         throw new Error('Local drafts are out of sync. Resolve them before undoing the batches.')
       }
-      const result = await undoChatBatches(storage, journal.key, runs)
+      const result = await undoChatBatches(storage, journal.key, runs, await flushProject(project))
       acceptStoredProject(result.project, project)
       journal.acceptDraftBatch(Object.fromEntries(Object.entries(result.sources).map(([path, source]) =>
         [path, source.draft ?? { base: source.saved, text: source.saved }])))
@@ -614,7 +605,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       if (journal.failed.size || Object.keys(drafts).some(path => !sameDraft(persisted[path], drafts[path]))) {
         throw new Error('Local drafts are out of sync. Resolve them before saving the task.')
       }
-      const { candidate, checkpoint } = await commitManuscriptSave(storage, journal.key, taskId, runs, report)
+      const { candidate, checkpoint } = await commitManuscriptSave(storage, journal.key, taskId, runs, report, await flushProject(project))
       acceptStoredProject(candidate, project)
       journal.acceptDraftBatch(Object.fromEntries(Object.entries(checkpoint.after).map(([path, source]) =>
         [path, { base: source.saved, text: source.saved }])))
@@ -646,9 +637,9 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       if (JSON.stringify(Object.entries(stored).sort()) !== JSON.stringify(Object.entries(drafts).sort())) {
         throw new Error('Some drafts are not synchronized with local storage.')
       }
-      const moves = await commitFileOperation(storage, journal.key, before, stored, after, writingState, move)
-      if (moves) setSourceMoves(moves)
-      acceptStoredProject(after)
+      const committed = await commitFileOperation(storage, journal.key, await flushProject(before), stored, after, writingState, move)
+      if (committed.moves) setSourceMoves(committed.moves)
+      acceptStoredProject(committed.project)
       journal.acceptWritingState(writingState)
       setSelected(writingState.view?.path)
       restoredCursor.current = false
@@ -740,7 +731,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     try {
       if (!storage || !journal.key) throw new Error('Project storage is unavailable. Keep this tab open to retain your edits.')
       const stored = await journal.storedDrafts()
-      const result = await commitWritingDrafts(storage, journal.key, project, entries, stored)
+      const result = await commitWritingDrafts(storage, journal.key, await flushProject(project), entries, stored)
       acceptStoredProject(result.project, project)
       if (result.conflicts.length) {
         setComparison(result.conflicts[0])

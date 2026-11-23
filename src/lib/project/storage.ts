@@ -16,6 +16,20 @@ import { applyWritingDrafts, draftConflicts, editableSource, sameDraft, type Por
 
 const storeName = 'projects'
 
+export class ProjectStorageConflict extends Error {
+    constructor() { super('Another tab saved a newer project version. Your drafts were kept. Review the saved version before continuing.') }
+}
+
+function sameStoredProject(current: ProjectFileSystem | undefined, expected: ProjectFileSystem | null) {
+    return current?.metadata.createdAt === expected?.metadata.createdAt && current?.storageRevision === expected?.storageRevision
+}
+
+function putProject(store: IDBObjectStore, key: string, project: ProjectFileSystem) {
+    const saved = { ...project, storageRevision: crypto.randomUUID() }
+    store.put(saved, key)
+    return saved
+}
+
 export function openProjectStorage(): Promise<IDBDatabase> {
     return new Promise((resolve, reject) => {
         const request = indexedDB.open('research-canvas-projects', 1)
@@ -38,6 +52,13 @@ function complete(transaction: IDBTransaction) {
 function draftRange(key: WritingKey) {
     // Projects use string keys. Compound keys let drafts and project saves share a transaction.
     return IDBKeyRange.bound(['draft', ...key], ['draft', ...key, []], false, true)
+}
+
+function readDraftRecords(store: IDBObjectStore, key: WritingKey) {
+    const keys = store.getAllKeys(draftRange(key))
+    const values = store.getAll(draftRange(key))
+    return { values, match: (expected: WritingDrafts) => keys.result.length === Object.keys(expected).length && keys.result.every((entry, index) =>
+        sameDraft(values.result[index], expected[(entry as [string, ...WritingKey, string])[3]])) }
 }
 
 function snapshotEntry(key: WritingKey, id: string) {
@@ -231,8 +252,8 @@ export async function restoreProjectSnapshot(database: IDBDatabase, key: Writing
             error = 'Save or discard the local drafts in Writing before restoring a snapshot.'
             return
         }
-        if (current.result?.metadata.createdAt !== key[1]) {
-            error = 'This project changed in another tab. Reload it before restoring.'
+        if (!sameStoredProject(current.result, checkpoint.project)) {
+            error = new ProjectStorageConflict().message
             return
         }
         const project = saved.result as ProjectFileSystem | undefined
@@ -241,8 +262,7 @@ export async function restoreProjectSnapshot(database: IDBDatabase, key: Writing
         storeSnapshot(store, key, list.result ?? [], {
             ...checkpoint, project: { ...previous, canvas: previous.canvas ?? checkpoint.project.canvas },
         })
-        restored = { ...project, metadata: { ...project.metadata, aiReadExclusions: previous.metadata.aiReadExclusions } }
-        store.put(restored, key[0])
+        restored = putProject(store, key[0], { ...project, metadata: { ...project.metadata, aiReadExclusions: previous.metadata.aiReadExclusions } })
     }
     await complete(transaction)
     if (!restored) throw new Error(error)
@@ -263,8 +283,8 @@ export async function restoreSelectedSnapshotFiles(database: IDBDatabase, key: W
     drafts.onsuccess = () => {
         const before = current.result as ProjectFileSystem | undefined
         const snapshot = saved.result as ProjectFileSystem | undefined
-        if (before?.metadata.createdAt !== key[1] || before.metadata.updatedAt !== checkpoint.project.metadata.updatedAt) {
-            error = 'The saved project changed. Reopen the restore preview and try again.'
+        if (!before || !sameStoredProject(before, checkpoint.project)) {
+            error = new ProjectStorageConflict().message
             return
         }
         if (!snapshot || snapshot.metadata.createdAt !== key[1]) return
@@ -280,7 +300,7 @@ export async function restoreSelectedSnapshotFiles(database: IDBDatabase, key: W
             return
         }
         storeSnapshot(store, key, list.result ?? [], { ...checkpoint, project: before })
-        store.put(restored, key[0])
+        restored = putProject(store, key[0], restored)
     }
     await complete(transaction)
     if (!restored) throw new Error(error)
@@ -353,37 +373,33 @@ export async function writeWritingDraftBatch(database: IDBDatabase, key: Writing
     if (!accepted) throw new Error('The project or its local drafts changed. Request a new proposal.')
 }
 
-export async function commitWritingDrafts(database: IDBDatabase, key: WritingKey, fallback: ProjectFileSystem,
+export async function commitWritingDrafts(database: IDBDatabase, key: WritingKey, expected: ProjectFileSystem,
     drafts: WritingDrafts, storedDrafts: WritingDrafts) {
     const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
     const projects = transaction.objectStore(storeName)
     const read = projects.get(key[0])
     let result: { project: ProjectFileSystem; conflicts: string[] } | undefined
-    read.onsuccess = () => {
-        const current: ProjectFileSystem = read.result ?? fallback
-        if (current.metadata.createdAt !== key[1]) return
+    const entries = Object.keys(drafts).map(path => {
+        const keyPath = ['draft', ...key, path]
+        return { path, keyPath, value: projects.get(keyPath) }
+    })
+    let draftChanged = false
+    function save() {
+        const current = read.result as ProjectFileSystem | undefined
+        if (!current || !sameStoredProject(current, expected)) return
+        if (entries.some(item => !sameDraft(item.value.result, storedDrafts[item.path]))) { draftChanged = true; return }
         const conflicts = draftConflicts(current, drafts)
-        result = { project: conflicts.length ? current : applyWritingDrafts(current, drafts), conflicts }
-        if (conflicts.length) return
-        projects.put(result.project, key[0])
-        for (const path of Object.keys(drafts)) {
-            const entry = ['draft', ...key, path]
-            const pending = projects.get(entry)
-            pending.onsuccess = () => {
-                if (sameDraft(pending.result, storedDrafts[path])) projects.delete(entry)
-            }
-        }
+        const project = conflicts.length ? current : putProject(projects, key[0], applyWritingDrafts(current, drafts))
+        result = { project, conflicts }
+        if (!conflicts.length) for (const item of entries) projects.delete(item.keyPath)
     }
+    const last = entries.at(-1)
+    if (last) last.value.onsuccess = save
+    else read.onsuccess = save
     await complete(transaction)
-    if (!result) throw new Error('This project was replaced in another tab. Your local drafts were kept.')
+    if (draftChanged) throw new Error('Another tab changed a draft for this file. Your version is still open in this tab.')
+    if (!result) throw new ProjectStorageConflict()
     return result
-}
-
-export async function clearWritingState(database: IDBDatabase, key: WritingKey) {
-    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
-    transaction.objectStore(storeName).delete(draftRange(key))
-    transaction.objectStore(storeName).delete(['view', ...key])
-    await complete(transaction)
 }
 
 function historyRange(bucket: string, key: WritingKey) {
@@ -474,12 +490,13 @@ function restoreBackupHistory(store: IDBObjectStore, key: WritingKey, history: P
 
 function storeImportedProject(store: IDBObjectStore, key: WritingKey, project: ProjectFileSystem,
     writing?: PortableWritingState, history?: PortableProjectHistory) {
-    store.put(project, key[0])
+    const saved = putProject(store, key[0], project)
     if (history) restoreBackupHistory(store, key, history)
     if (writing) {
         for (const [path, draft] of Object.entries(writing.drafts)) store.put(draft, ['draft', ...key, path])
         if (writing.view) store.put(writing.view, ['view', ...key])
     }
+    return saved
 }
 
 type LibraryEntry = Omit<LibraryProject, 'name'>
@@ -544,7 +561,7 @@ export async function updateLibraryProject(database: IDBDatabase, id: string,
         } else {
             const name = change.name.trim()
             if (!name) return
-            store.put({ ...project, metadata: { ...project.metadata, projectName: name, updatedAt: new Date().toISOString() } }, key)
+            putProject(store, key, { ...project, metadata: { ...project.metadata, projectName: name, updatedAt: new Date().toISOString() } })
         }
         updated = true
     }
@@ -553,23 +570,24 @@ export async function updateLibraryProject(database: IDBDatabase, id: string,
 }
 
 export async function restoreProjectBackup(database: IDBDatabase, current: WritingKey, project: ProjectFileSystem,
-    writing?: PortableWritingState, history?: PortableProjectHistory) {
+    expected: ProjectFileSystem, expectedDrafts: WritingDrafts, writing?: PortableWritingState, history?: PortableProjectHistory) {
     const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
     const store = transaction.objectStore(storeName)
     const saved = store.get(current[0])
+    const drafts = readDraftRecords(store, current)
     const destination: WritingKey = [current[0], project.metadata.createdAt]
-    let replaced = false
-    saved.onsuccess = () => {
-        if (saved.result && saved.result.metadata.createdAt !== current[1]) return
+    let replaced: ProjectFileSystem | undefined
+    drafts.values.onsuccess = () => {
+        if (!sameStoredProject(saved.result, expected) || !drafts.match(expectedDrafts)) return
         for (const key of current[1] === destination[1] ? [current] : [current, destination]) {
             store.delete(draftRange(key))
             store.delete(['view', ...key])
         }
-        storeImportedProject(store, destination, project, writing, history)
-        replaced = true
+        replaced = storeImportedProject(store, destination, project, writing, history)
     }
     await complete(transaction)
-    if (!replaced) throw new Error('This project was replaced in another tab. Reload it before restoring a backup.')
+    if (!replaced) throw new ProjectStorageConflict()
+    return replaced
 }
 
 export async function commitFileOperation(database: IDBDatabase, key: WritingKey,
@@ -581,19 +599,13 @@ export async function commitFileOperation(database: IDBDatabase, key: WritingKey
     const keys = store.getAllKeys(draftRange(key))
     const moves = store.get(['source-moves', ...key])
     let committedMoves: SourceMove[] | undefined
-    let applied = false
+    let applied: ProjectFileSystem | undefined
     moves.onsuccess = () => {
         const current = project.result as ProjectFileSystem | undefined
-        if (current?.metadata.createdAt !== key[1] || JSON.stringify(current.metadata) !== JSON.stringify(before.metadata)
-            || JSON.stringify(current.canvas) !== JSON.stringify(before.canvas) || current.files.size !== before.files.size) return
-        for (const [path, file] of current.files) {
-            const expected = before.files.get(path)
-            if (!expected || file.type !== expected.type || ('content' in file &&
-                (!('content' in expected) || file.content !== expected.content || file.blob?.size !== expected.blob?.size))) return
-        }
+        if (!current || !sameStoredProject(current, before)) return
         if (keys.result.length !== Object.keys(expectedDrafts).length || keys.result.some((entry, index) =>
             !sameDraft(values.result[index], expectedDrafts[(entry as [string, ...WritingKey, string])[3]]))) return
-        store.put(after, key[0])
+        applied = putProject(store, key[0], after)
         if (move) {
             committedMoves = [...(moves.result ?? []), move]
             store.put(committedMoves, ['source-moves', ...key])
@@ -602,11 +614,10 @@ export async function commitFileOperation(database: IDBDatabase, key: WritingKey
         for (const [path, draft] of Object.entries(writing.drafts)) store.put(draft, ['draft', ...key, path])
         if (writing.view) store.put(writing.view, ['view', ...key])
         else store.delete(['view', ...key])
-        applied = true
     }
     await complete(transaction)
     if (!applied) throw new Error('The saved project or local drafts changed. Reopen the preview and try again.')
-    return committedMoves
+    return { project: applied, moves: committedMoves }
 }
 
 export function readProject(database: IDBDatabase, key: string): Promise<ProjectFileSystem | undefined> {
@@ -617,13 +628,17 @@ export function readProject(database: IDBDatabase, key: string): Promise<Project
     })
 }
 
-export function writeProject(database: IDBDatabase, key: string, project: ProjectFileSystem): Promise<void> {
-    return new Promise((resolve, reject) => {
-        const transaction = database.transaction(storeName, 'readwrite')
-        transaction.oncomplete = () => resolve()
-        transaction.onabort = () => reject(transaction.error)
-        transaction.objectStore(storeName).put(project, key)
-    })
+export async function writeProject(database: IDBDatabase, key: string, project: ProjectFileSystem, expected: ProjectFileSystem | null) {
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    const store = transaction.objectStore(storeName)
+    const current = store.get(key)
+    let saved: ProjectFileSystem | undefined
+    current.onsuccess = () => {
+        if (sameStoredProject(current.result, expected)) saved = putProject(store, key, project)
+    }
+    await complete(transaction)
+    if (!saved) throw new ProjectStorageConflict()
+    return saved
 }
 
 export async function readSourceMoves(database: IDBDatabase, key: WritingKey) {
@@ -734,7 +749,7 @@ export async function readManuscriptBuild(database: IDBDatabase, key: WritingKey
     return read.result as ManuscriptBuild | undefined
 }
 
-export async function commitChatAction(database: IDBDatabase, key: WritingKey, runId: string, action: ChatAction) {
+export async function commitChatAction(database: IDBDatabase, key: WritingKey, runId: string, action: ChatAction, expected: ProjectFileSystem) {
     const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
     const store = transaction.objectStore(storeName)
     const entry = ['ai-change', ...key, runId]
@@ -745,6 +760,7 @@ export async function commitChatAction(database: IDBDatabase, key: WritingKey, r
     checkpointRead.onsuccess = () => {
         const original = projectRead.result as ProjectFileSystem | undefined
         if (!original || original.metadata.createdAt !== key[1]) return
+        if (!sameStoredProject(original, expected)) { failure = new ProjectStorageConflict(); return }
         const previous = checkpointRead.result as ChatCheckpoint | undefined
         const paths = chatActionPaths(action, previous)
         const requests = paths.map(path => ({ path, request: store.get(['draft', ...key, path]) }))
@@ -772,7 +788,7 @@ export async function commitChatAction(database: IDBDatabase, key: WritingKey, r
                 if (source.draft) store.put(source.draft, keyPath)
                 else store.delete(keyPath)
             }
-            if (project !== original) store.put(project, key[0])
+            if (project !== original) project = putProject(store, key[0], project)
             store.put(checkpoint, entry)
             appendTaskStep(store, key, runId, { kind: checkpoint.state, at: Date.now(),
                 selected: action.kind === 'apply' || action.kind === 'apply-save' ? action.edits.length : undefined,
@@ -825,7 +841,7 @@ export async function commitChatAction(database: IDBDatabase, key: WritingKey, r
 }
 
 export async function commitManuscriptSave(database: IDBDatabase, key: WritingKey, taskId: string, runs: readonly string[],
-    report: ChatVerification) {
+    report: ChatVerification, expected: ProjectFileSystem) {
     const selection = report.manuscript
     if (report.status !== 'passed' || !selection || !runs.length) throw new Error('Verify the selected manuscript files before saving.')
     const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
@@ -841,6 +857,7 @@ export async function commitManuscriptSave(database: IDBDatabase, key: WritingKe
     let failure: unknown
     history.onsuccess = () => {
         const original = projectRead.result as ProjectFileSystem | undefined
+        if (!sameStoredProject(original, expected)) { failure = new ProjectStorageConflict(); return }
         const task = (history.result as ChatHistory | undefined)?.conversations.find(item => item.manuscript?.id === taskId)?.manuscript
         const stored = verified.result as ChatVerification | undefined
         if (!original || original.metadata.createdAt !== key[1] || original.metadata.mainFile !== report.main || !task
@@ -871,7 +888,7 @@ export async function commitManuscriptSave(database: IDBDatabase, key: WritingKe
                 function saveVerified() {
                     if (matches === undefined) { store.getKey(entry).onsuccess = saveVerified; return }
                     if (!matches) { failure = new Error('The verification is out of date. Verify the selected manuscript files again.'); return }
-                    store.put(snapshot.candidate, key[0])
+                    snapshot.candidate = putProject(store, key[0], snapshot.candidate)
                     for (const path of selection!.paths) store.delete(['draft', ...key, path])
                     store.put(snapshot.checkpoint, entry)
                     appendTaskStep(store, key, taskId, { kind: 'saved', at: Date.now(), paths: selection!.paths, detail: 'Saved the reviewed manuscript files together.' })
@@ -887,7 +904,7 @@ export async function commitManuscriptSave(database: IDBDatabase, key: WritingKe
     return result
 }
 
-export async function undoChatBatches(database: IDBDatabase, key: WritingKey, runIds: readonly string[]) {
+export async function undoChatBatches(database: IDBDatabase, key: WritingKey, runIds: readonly string[], expected: ProjectFileSystem) {
     const runs = [...new Set(runIds)].reverse()
     if (!runs.length || runs.length > 120) throw new Error('No valid task batches to undo.')
     const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
@@ -901,6 +918,7 @@ export async function undoChatBatches(database: IDBDatabase, key: WritingKey, ru
     reads.at(-1)!.onsuccess = () => {
         const original = projectRead.result as ProjectFileSystem | undefined
         if (!original || original.metadata.createdAt !== key[1]) return
+        if (!sameStoredProject(original, expected)) { failure = new ProjectStorageConflict(); return }
         const current: Record<string, ChatSource> = Object.create(null)
         const changed: Record<string, ChatSource> = Object.create(null)
         const local = new Map(keys.result.map((entry, index) => [(entry as [string, ...WritingKey, string])[3], drafts.result[index] as WritingDraft]))
@@ -929,7 +947,7 @@ export async function undoChatBatches(database: IDBDatabase, key: WritingKey, ru
             if (source.draft) store.put(source.draft, entry)
             else store.delete(entry)
         }
-        if (project !== original) store.put(project, key[0])
+        if (project !== original) project = putProject(store, key[0], project)
         for (const { id, value } of checkpoints) {
             store.put(value, ['ai-change', ...key, id])
             appendTaskStep(store, key, id, { kind: 'undone', at: Date.now(), paths: Object.keys(value.after), detail: 'Undone with manuscript task.' })
