@@ -2,6 +2,7 @@ import { legacyProjectId, legacyStorageKey, libraryStorageKey, type LibraryProje
 import type { BackupHistorySelection, PortableProjectHistory } from './backup-history'
 import type { SourceMove } from './writing-ai-evidence'
 import { verificationBaseline, verificationPatch, type ChatVerification } from './writing-chat-validation'
+import { buildManuscriptSnapshot } from './manuscript-review'
 import { chatActionPaths, nextChatCheckpoint, type ChatAction } from './writing-chat-actions'
 import type { ChatCheckpoint, ChatHistory, ChatReplyTarget, ChatSource, ChatTaskStep } from './writing-chat'
 import { updateFileContent } from './file-system'
@@ -650,6 +651,15 @@ export async function readChatCheckpoints(database: IDBDatabase, key: WritingKey
     return checkpoints
 }
 
+export async function readManuscriptBatches(database: IDBDatabase, key: WritingKey, runs: readonly string[]) {
+    const transaction = database.transaction(storeName)
+    const store = transaction.objectStore(storeName)
+    const requests = runs.map(run => store.get(['ai-change', ...key, run]))
+    await complete(transaction)
+    return requests.map(request => request.result as ChatCheckpoint | undefined)
+        .filter((checkpoint): checkpoint is ChatCheckpoint => Boolean(checkpoint))
+}
+
 export async function readChatVerifications(database: IDBDatabase, key: WritingKey) {
     const transaction = database.transaction(storeName)
     const range = IDBKeyRange.bound(['ai-verify', ...key], ['ai-verify', ...key, []], false, true)
@@ -688,6 +698,10 @@ export async function commitChatAction(database: IDBDatabase, key: WritingKey, r
         const paths = chatActionPaths(action, previous)
         const requests = paths.map(path => ({ path, request: store.get(['draft', ...key, path]) }))
         function mutate(project: ProjectFileSystem) {
+            if ((action.kind === 'apply' || action.kind === 'apply-save') && action.signal?.aborted) {
+                failure = new Error('Edit authorization was cancelled.')
+                return
+            }
             const current: Record<string, ChatSource> = Object.create(null)
             for (const { path, request } of requests) {
                 const saved = editableSource(project, path)
@@ -724,7 +738,8 @@ export async function commitChatAction(database: IDBDatabase, key: WritingKey, r
             const report = store.get(['ai-verify', ...key, runId])
             report.onsuccess = () => {
                 const verified = report.result as ChatVerification | undefined
-                if (verified?.status !== 'passed' || action.signal.aborted
+                if (verified?.status !== 'passed' || verified.working || action.signal.aborted
+                    || action.selection && action.selection.join(',') !== verified.selected.join(',')
                     || verified.currentSelection && verified.currentSelection.join(',') !== verified.selected.join(',')) {
                     failure = new Error('This turn needs a passing verification before saving.')
                     return
@@ -755,5 +770,123 @@ export async function commitChatAction(database: IDBDatabase, key: WritingKey, r
     await complete(transaction)
     if (failure) throw failure
     if (!result) throw new Error('The project or proposal is unavailable.')
+    return result
+}
+
+export async function commitManuscriptSave(database: IDBDatabase, key: WritingKey, taskId: string, runs: readonly string[],
+    report: ChatVerification) {
+    const selection = report.manuscript
+    if (report.status !== 'passed' || !selection || !runs.length) throw new Error('Verify the selected manuscript files before saving.')
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    const store = transaction.objectStore(storeName)
+    const entry = ['ai-change', ...key, taskId]
+    const projectRead = store.get(key[0])
+    const drafts = store.getAll(draftRange(key))
+    const keys = store.getAllKeys(draftRange(key))
+    const savedTask = store.get(entry)
+    const verified = store.get(['ai-verify', ...key, taskId])
+    const history = store.get(['ai-history', ...key])
+    let result: ReturnType<typeof buildManuscriptSnapshot> | undefined
+    let failure: unknown
+    history.onsuccess = () => {
+        const original = projectRead.result as ProjectFileSystem | undefined
+        const task = (history.result as ChatHistory | undefined)?.conversations.find(item => item.manuscript?.id === taskId)?.manuscript
+        const stored = verified.result as ChatVerification | undefined
+        if (!original || original.metadata.createdAt !== key[1] || original.metadata.mainFile !== report.main || !task
+            || savedTask.result?.state === 'saved' || stored?.status !== 'passed' || stored.baseline !== report.baseline
+            || stored.compiledBaseline !== report.compiledBaseline || JSON.stringify(stored.manuscript) !== JSON.stringify(selection)) {
+            failure = new Error('The manuscript task or its passing verification changed. Verify the current selection again.')
+            return
+        }
+        const batches = task.batches.map(batch => ({ run: batch.run, request: store.get(['ai-change', ...key, batch.run]) }))
+        const last = batches.at(-1)
+        if (!last) return
+        last.request.onsuccess = () => {
+            const active = batches.filter(({ request }) => request.result?.state === 'draft' || request.result?.state === 'saved')
+            if (active.length !== runs.length || active.some(batch => !runs.includes(batch.run))) {
+                failure = new Error('The task batches changed. Review the current manuscript files.')
+                return
+            }
+            const byRun = new Map(active.map(batch => [batch.run, batch.request.result as ChatCheckpoint]))
+            const currentDrafts = Object.fromEntries(keys.result.map((item, index) =>
+                [(item as [string, ...WritingKey, string])[3], drafts.result[index] as WritingDraft]))
+            try {
+                const snapshot = buildManuscriptSnapshot(original, currentDrafts, runs.map(run => byRun.get(run)!),
+                    selection.paths, selection.accepted)
+                let matches: boolean | undefined
+                void Promise.all([verificationBaseline(original, currentDrafts), verificationBaseline(snapshot.candidate, {})])
+                    .then(([baseline, compiled]) => { matches = baseline === report.baseline && compiled === report.compiledBaseline })
+                    .catch(() => { matches = false })
+                function saveVerified() {
+                    if (matches === undefined) { store.getKey(entry).onsuccess = saveVerified; return }
+                    if (!matches) { failure = new Error('The verification is out of date. Verify the selected manuscript files again.'); return }
+                    store.put(snapshot.candidate, key[0])
+                    for (const path of selection!.paths) store.delete(['draft', ...key, path])
+                    store.put(snapshot.checkpoint, entry)
+                    appendTaskStep(store, key, taskId, { kind: 'saved', at: Date.now(), paths: selection!.paths, detail: 'Saved the reviewed manuscript files together.' })
+                    result = snapshot
+                }
+                saveVerified()
+            } catch (cause) { failure = cause }
+        }
+    }
+    await complete(transaction)
+    if (failure) throw failure
+    if (!result) throw new Error('The manuscript task or its verification is unavailable.')
+    return result
+}
+
+export async function undoChatBatches(database: IDBDatabase, key: WritingKey, runIds: readonly string[]) {
+    const runs = [...new Set(runIds)].reverse()
+    if (!runs.length || runs.length > 120) throw new Error('No valid task batches to undo.')
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    const store = transaction.objectStore(storeName)
+    const projectRead = store.get(key[0])
+    const drafts = store.getAll(draftRange(key))
+    const keys = store.getAllKeys(draftRange(key))
+    const reads = runs.map(id => store.get(['ai-change', ...key, id]))
+    let result: { project: ProjectFileSystem; sources: Record<string, ChatSource>; undone: string[] } | undefined
+    let failure: unknown
+    reads.at(-1)!.onsuccess = () => {
+        const original = projectRead.result as ProjectFileSystem | undefined
+        if (!original || original.metadata.createdAt !== key[1]) return
+        const current: Record<string, ChatSource> = Object.create(null)
+        const changed: Record<string, ChatSource> = Object.create(null)
+        const local = new Map(keys.result.map((entry, index) => [(entry as [string, ...WritingKey, string])[3], drafts.result[index] as WritingDraft]))
+        const checkpoints: { id: string; value: ChatCheckpoint }[] = []
+        try {
+            for (const [index, request] of reads.entries()) {
+                const previous = request.result as ChatCheckpoint | undefined
+                if (!previous || (previous.state !== 'draft' && previous.state !== 'saved')) {
+                    throw new Error('A batch changed before undo. Review the task and try again.')
+                }
+                for (const path of Object.keys(previous.after)) {
+                    const saved = editableSource(original, path)
+                    if (!Object.hasOwn(current, path) && saved !== undefined) current[path] = { saved, draft: local.get(path) }
+                }
+                const undone = nextChatCheckpoint({ kind: 'undo' }, current, original.metadata.mainFile, previous)!
+                Object.assign(current, undone.after)
+                Object.assign(changed, undone.after)
+                checkpoints.push({ id: runs[index], value: undone })
+            }
+        } catch (cause) { failure = cause; return }
+
+        let project = original
+        for (const [path, source] of Object.entries(changed)) {
+            if (source.saved !== editableSource(project, path)) project = updateFileContent(project, path, source.saved)
+            const entry = ['draft', ...key, path]
+            if (source.draft) store.put(source.draft, entry)
+            else store.delete(entry)
+        }
+        if (project !== original) store.put(project, key[0])
+        for (const { id, value } of checkpoints) {
+            store.put(value, ['ai-change', ...key, id])
+            appendTaskStep(store, key, id, { kind: 'undone', at: Date.now(), paths: Object.keys(value.after), detail: 'Undone with manuscript task.' })
+        }
+        result = { project, sources: changed, undone: runs }
+    }
+    await complete(transaction)
+    if (failure) throw failure
+    if (!result) throw new Error('The writing task is unavailable.')
     return result
 }

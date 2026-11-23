@@ -5,7 +5,7 @@ import { basename, dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { gunzipSync } from 'node:zlib'
 import { importSourceArchive, isProjectPath } from '@/lib/project/source-archive'
-import { parseCompileDiagnostics, type CompileReport } from '@/lib/project/compile-diagnostics'
+import { compileFailureMessage, compileLog, parseCompileDiagnostics, type CompileReport } from '@/lib/project/compile-diagnostics'
 import { readSyncTex } from '@/lib/project/read-synctex'
 
 export const runtime = 'nodejs'
@@ -64,12 +64,13 @@ export async function POST(request: Request) {
 
     const job = basename(mainFile).replace(/\.tex$/i, '')
     const readLog = () => readFile(join(output, job + '.log'), 'utf8').catch(() => '')
+    const onlyCached = process.env.TECTONIC_ONLY_CACHED === '1'
     let outputText: string
     try {
       const { stdout, stderr } = await exec(process.env.TECTONIC_BIN || 'tectonic', [
         '--untrusted', '--keep-logs',
         ...(synchronize ? ['--synctex'] : []),
-        ...(process.env.TECTONIC_ONLY_CACHED === '1' ? ['--only-cached'] : []),
+        ...(onlyCached ? ['--only-cached'] : []),
         '--outdir', output, '--', basename(mainFile),
       ], {
         cwd: dirname(join(sources, mainFile)), windowsHide: true,
@@ -78,15 +79,15 @@ export async function POST(request: Request) {
       outputText = [stderr, stdout].filter(Boolean).join('\n')
     } catch (cause) {
       const failure = cause as NodeJS.ErrnoException & { killed?: boolean; stderr?: string; stdout?: string }
+      const outputText = [failure.stderr, failure.stdout].filter(Boolean).join('\n')
       const error = failure.code === 'ENOENT'
         ? 'Tectonic executable not found. Install it or set TECTONIC_BIN.'
-        : failure.killed ? 'LaTeX compilation timed out.' : 'LaTeX compilation failed.'
+        : failure.killed ? 'LaTeX compilation timed out.' : compileFailureMessage(outputText, onlyCached)
       const log = await readLog()
-      const outputText = [failure.stderr, failure.stdout].filter(Boolean).join('\n')
       return Response.json({
         error,
         diagnostics: parseCompileDiagnostics(outputText, mainFile, project.files.keys()),
-        log: (outputText + (log ? '\n\n' + log : '')).slice(-50_000),
+        log: compileLog(outputText, log, 50_000),
       }, { status: 422 })
     }
     const pdf = new Uint8Array(await readFile(join(output, job + '.pdf')))

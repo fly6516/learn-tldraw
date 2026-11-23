@@ -28,9 +28,15 @@ Test ZIPs, backups, traces, and reports belong in the ignored `test-results` fol
 To exercise the same workflows by hand, start a separate loopback server with
 `RESEARCH_TEST_MODE=1` and `LATEX_COMPILE_ENABLED=1` and open
 `/research-test?view=write`. Use **Download test project ZIP** to start over or test import.
-Open Methods, open **Writing AI**, and add Results to **Scope** for a two-file proposal.
-Send one of the test prompts shown on the page. The test workspace uses separate browser
+Open **Writing AI** in Auto and send one of the test prompts shown on the page.
+The test workspace uses separate browser
 storage from the main project. Keep test mode disabled in normal use.
+
+The optional live browser tests require the synthetic **Morning Walk Study** sources and the
+server's configured DeepSeek key. They send synthetic chapter excerpts, CSV data and reviewer
+comments to the configured model. Set `RESEARCH_LIVE_TEST_ZIP` to a local copy of the source ZIP
+or set `RESEARCH_LIVE_TEST_PATH` to a locally seeded demo route including `?view=write`.
+Build the app, then run `bun run test:e2e tests/e2e/live-writing.spec.ts`.
 
 Use `.env.example` as a reference for local environment options. Keep real credentials,
 private research, and local test outputs out of commits.

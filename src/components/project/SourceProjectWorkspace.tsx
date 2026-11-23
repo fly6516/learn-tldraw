@@ -33,7 +33,8 @@ import type { SourceProblem } from './MonacoSourceEditor'
 import type { CompileDiagnostic, CompileReport } from '@/lib/project/compile-diagnostics'
 import { findPdfRegion, type SyncRegion } from '@/lib/project/source-sync'
 import { applyWritingDrafts, draftConflicts, editableSource, sameDraft, type PortableWritingState, type WritingDrafts } from '@/lib/project/writing-drafts'
-import { clearWritingState, commitFileOperation, commitWritingDrafts, commitChatAction, readSourceMoves } from '@/lib/project/storage'
+import { clearWritingState, commitFileOperation, commitWritingDrafts, commitChatAction, commitManuscriptSave, readSourceMoves, undoChatBatches } from '@/lib/project/storage'
+import type { ChatVerification } from '@/lib/project/writing-chat-validation'
 import type { SourceMove } from '@/lib/project/writing-ai-evidence'
 import type { FileOperation } from '@/lib/project/file-refactor'
 import { FileOperationDialog, type FileOperationPlan } from './FileOperationDialog'
@@ -539,6 +540,47 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     }
   }
 
+  async function undoManuscriptBatches(runs: readonly string[]) {
+    if (!storage || !journal.key || journal.loadError || locked || writeInProgress.current) throw new Error('Local draft storage is unavailable.')
+    writeInProgress.current = true
+    setWriting(true)
+    try {
+      const persisted = await journal.storedDrafts()
+      if (journal.failed.size || Object.keys(drafts).some(path => !sameDraft(persisted[path], drafts[path]))) {
+        throw new Error('Local drafts are out of sync. Resolve them before undoing the batches.')
+      }
+      const result = await undoChatBatches(storage, journal.key, runs)
+      acceptStoredProject(result.project, project)
+      journal.acceptDraftBatch(Object.fromEntries(Object.entries(result.sources).map(([path, source]) =>
+        [path, source.draft ?? { base: source.saved, text: source.saved }])))
+      markSourceChanged()
+      return result.undone
+    } finally {
+      writeInProgress.current = false
+      setWriting(false)
+    }
+  }
+
+  async function saveManuscript(taskId: string, runs: readonly string[], report: ChatVerification) {
+    if (!storage || !journal.key || journal.loadError || locked || writeInProgress.current) throw new Error('Local draft storage is unavailable.')
+    writeInProgress.current = true
+    setWriting(true)
+    try {
+      const persisted = await journal.storedDrafts()
+      if (journal.failed.size || Object.keys(drafts).some(path => !sameDraft(persisted[path], drafts[path]))) {
+        throw new Error('Local drafts are out of sync. Resolve them before saving the task.')
+      }
+      const { candidate, checkpoint } = await commitManuscriptSave(storage, journal.key, taskId, runs, report)
+      acceptStoredProject(candidate, project)
+      journal.acceptDraftBatch(Object.fromEntries(Object.entries(checkpoint.after).map(([path, source]) =>
+        [path, { base: source.saved, text: source.saved }])))
+      markSourceChanged()
+    } finally {
+      writeInProgress.current = false
+      setWriting(false)
+    }
+  }
+
   function captureWritingState(): PortableWritingState | undefined {
     if (!journal.ready || journal.loadError) return
     const instance = editorRef.current
@@ -1015,7 +1057,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
           {storage && journal.key && <WritingAiWorkbench key={JSON.stringify(journal.key)} storage={storage} projectKey={journal.key}
             project={project} working={workingProject} saved={savedProject} drafts={drafts} selected={selected} main={main} active={active} sourceMoves={sourceMoves}
             disabled={locked || Boolean(conflicts.length)} compiler={aiCompiler} selection={aiSelection} onRevision={() => setRevision({})}
-            onAction={applyChatAction} onLocate={locateAiEvidence}
+            onAction={applyChatAction} onUndoBatches={undoManuscriptBatches} onSaveManuscript={saveManuscript} onLocate={locateAiEvidence}
             onCompile={signal => compile(undefined, signal)} onBuildSubmission={(selection, signal) => compile(selection, signal)}
             onExternalSubmission={(include, excluded) => {
               resetSubmissionBuild()

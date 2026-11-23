@@ -6,12 +6,13 @@ import { parseBibliography } from './references'
 import { searchProjectSources } from './source-search'
 import type { ProjectFileSystem } from './types'
 import { captureEvidenceQuote, type EvidenceQuote } from './writing-ai-evidence'
+import { readCsvRange, type AttachmentContext } from './ai-attachments'
 
 type Answer = z.infer<typeof chapterAnswerSchema>
 const query = z.string().trim().min(1).max(100)
 const pathName = z.string().min(1).max(500)
 
-export function createChapterTools(input: ChapterEditRequest) {
+export function createChapterTools(input: ChapterEditRequest, attachments?: AttachmentContext) {
   const sources = new Map([...input.context.map(file => [file.path, file] as const),
     [input.path, { path: input.path, source: input.source, truncated: false }]])
   const files: ProjectFileSystem['files'] = new Map([...sources].map(([path, file]) => [path,
@@ -20,6 +21,7 @@ export function createChapterTools(input: ChapterEditRequest) {
   const calls: Answer['tools'] = []
   const observed = new Set<string>()
   const readFiles = new Set<string>()
+  const csv = new Map(attachments?.csv.map(file => [file.path, file]))
   function record(kind: Answer['tools'][number], items: { path: string; line: number; text: string }[]) {
     if (calls.length === 80) return { error: 'Tool call limit reached.' }
     calls.push(kind)
@@ -27,7 +29,7 @@ export function createChapterTools(input: ChapterEditRequest) {
     for (const item of output) {
       observed.add(`${item.path}:${item.line}`)
       if (evidence.length < 40 && !evidence.some(found => found.path === item.path && found.line === item.line && found.kind === kind)) {
-        const source = sources.get(item.path)?.source
+        const source = sources.get(item.path)?.source ?? csv.get(item.path)?.text
         evidence.push({ ...item, kind, anchor: source === undefined ? undefined : captureEvidenceQuote(item.path, source, item.line) })
       }
     }
@@ -35,6 +37,27 @@ export function createChapterTools(input: ChapterEditRequest) {
   }
 
   return { calls, evidence, observed, readFiles, tools: {
+    ...(attachments ? {
+      list_attachments: tool({
+        description: 'List local project attachments by path, including figures and datasets. Only CSV files marked csv are readable. This does not inspect image contents.',
+        inputSchema: z.object({ query: z.string().max(100).optional() }),
+        execute: async ({ query }) => {
+          const found = attachments.entries.filter(entry => !query || entry.path.toLowerCase().includes(query.toLowerCase()))
+          return { files: found.slice(0, 40), truncated: attachments.truncated || found.length > 40 }
+        },
+      }),
+      read_csv_rows: tool({
+        description: 'Read CSV records by one-based row number, including row 1 for headers. Cite the returned project path and physical line numbers. Truncated data do not support whole-file claims.',
+        inputSchema: z.object({ path: pathName, startRow: z.number().int().min(1).max(24_000), rowCount: z.number().int().min(1).max(12) }),
+        execute: async ({ path, startRow, rowCount }) => {
+          const source = csv.get(path)
+          if (!source) return { unavailable: 'This CSV is outside the readable attachment snapshot.' }
+          const result = readCsvRange(source.text, startRow, rowCount, source.truncated)
+          const citations = record('read_csv_rows', result.rows.map(row => ({ path, line: row.line, text: JSON.stringify(row.cells) })))
+          return { path, header: readCsvRange(source.text, 1, 1, source.truncated).rows[0], ...result, ...citations }
+        },
+      }),
+    } : {}),
     search_source: tool({
       description: 'Find literal text across the allowed .tex and .bib files. Read the relevant lines with read_source after searching.',
       inputSchema: z.object({ query }),

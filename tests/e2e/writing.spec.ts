@@ -28,11 +28,95 @@ async function request(page: Page, text: string) {
 }
 
 async function selectSource(page: Page, name: string) {
-  await page.getByRole('button', { name, exact: true }).click()
+  await page.getByTitle(`sections/${name}`, { exact: true }).and(page.getByRole('button')).click()
   const source = page.getByRole('region', { name: 'Source editor' }).locator('.view-lines')
   await page.getByRole('textbox', { name: 'Project source editor' }).press('Control+Home')
   return source
 }
+
+test('reviews AI permission requests and revokes full draft access during a turn', async ({ page }) => {
+  await page.goto(workspace)
+  await openAi(page)
+  const requests = page.getByRole('region', { name: 'Draft permission request' })
+  const proposals = page.getByRole('region', { name: 'Source change proposal' })
+  await request(page, 'Test: request draft access')
+  await requests.last().getByRole('button', { name: 'Deny request' }).click()
+  await expect(requests.last().getByText('Request denied.')).toBeVisible()
+  await expect(proposals).toHaveCount(0)
+
+  await request(page, 'Test: request draft access')
+  await expect(requests).toHaveCount(2)
+  await expect(requests.last().getByText('sections/methods.tex', { exact: true })).toBeVisible()
+  await requests.last().getByRole('button', { name: 'Approve and continue' }).click()
+  await expect(proposals.last().getByText('Applied to local drafts', { exact: true })).toBeVisible()
+  await expect(await selectSource(page, 'methods.tex')).toContainText(testMethodEdit)
+  await expect(await selectSource(page, 'results.tex')).toContainText(testResultLine)
+  await proposals.last().getByRole('button', { name: 'Verify working drafts' }).click()
+  await expect(proposals.last().getByText(/^Verification passed\./)).toBeVisible()
+  await expect(proposals.last().getByText(/^Working snapshot/)).toBeVisible()
+  await proposals.last().getByRole('button', { name: 'Undo AI changes' }).click()
+  await expect(proposals.last().getByText('Undone', { exact: true })).toBeVisible()
+
+  const mode = page.getByRole('combobox', { name: 'Approval mode' })
+  await mode.selectOption('full')
+  await page.getByRole('button', { name: 'Grant full draft access', exact: true }).click()
+  await expect(mode).toHaveValue('full')
+  let arrived!: () => void
+  let release!: () => void
+  const intercepted = new Promise<void>(resolve => { arrived = resolve })
+  const proceed = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/api/latex/chat', async route => {
+    arrived()
+    await proceed
+    await route.continue()
+  }, { times: 1 })
+  try {
+    await request(page, testScenarios.pass)
+    await intercepted
+    await page.getByRole('button', { name: 'Revoke access' }).click()
+  } finally { release() }
+  await expect(proposals).toHaveCount(2)
+  await expect(proposals.last().getByRole('button', { name: 'Apply to drafts' })).toBeVisible()
+  await expect(await selectSource(page, 'methods.tex')).toContainText(testMethodLine)
+
+  await mode.selectOption('full')
+  await page.getByRole('button', { name: 'Grant full draft access', exact: true }).click()
+  await request(page, testScenarios.pass)
+  await expect(proposals.last().getByText('Applied to local drafts', { exact: true })).toBeVisible()
+  await expect(await selectSource(page, 'results.tex')).toContainText(testResultEdit)
+  await page.reload()
+  await openAi(page)
+  await expect(mode).toHaveValue('manual')
+  await expect(proposals.last().getByText('Applied to local drafts', { exact: true })).toBeVisible()
+})
+
+test('reuses the exact passing verification when saving a reviewed patch', async ({ page }) => {
+  await page.goto(workspace)
+  await openAi(page)
+  await request(page, testScenarios.pass)
+  const proposal = page.getByRole('region', { name: 'Source change proposal' })
+  let builds = 0
+  page.on('request', request => { if (request.url().includes('/api/latex/compile?')) builds++ })
+  await proposal.getByRole('button', { name: 'Verify selected changes' }).click()
+  await expect(proposal.getByText(/^Verification passed\./)).toBeVisible()
+  await proposal.getByRole('button', { name: 'Save verified changes' }).click()
+  await expect(proposal.getByText('Saved to project', { exact: true })).toBeVisible()
+  expect(builds).toBe(1)
+})
+
+test('repairs and reverifies the selected failed patch without saving it', async ({ page }) => {
+  await page.goto(workspace)
+  await openAi(page)
+  await request(page, testScenarios.fail)
+  const proposals = page.getByRole('region', { name: 'Source change proposal' })
+  await proposals.last().getByRole('button', { name: 'Verify selected changes' }).click()
+  await expect(proposals.last().getByText(/^Verification failed\./)).toBeVisible()
+  await proposals.last().getByRole('button', { name: 'Repair and reverify' }).click()
+  await expect(proposals).toHaveCount(2)
+  await expect(proposals.last().getByText(/^Verification passed\./)).toBeVisible()
+  await expect(proposals.last().getByRole('button', { name: 'Save verified changes' })).toBeEnabled()
+  await expect(await selectSource(page, 'results.tex')).toContainText(testResultLine)
+})
 
 test('runs writing, preview, submission and a grounded reviewer reply from one conversation', async ({ page }, info) => {
   test.setTimeout(120_000)
@@ -79,6 +163,7 @@ test('runs writing, preview, submission and a grounded reviewer reply from one c
   await expect(page.getByText(/The compiler result is available: failed/)).toBeVisible()
   await proposals.last().getByRole('button', { name: 'Use diagnostics in chat' }).click()
   await expect(proposals).toHaveCount(2)
+  await expect(page.getByRole('link', { name: 'Original proposal and compiler result' })).toBeVisible()
   await proposals.last().getByRole('button', { name: 'Save if verification passes' }).click()
   await expect(proposals.last().getByText('Saved to project', { exact: true })).toBeVisible()
   await expect(await selectSource(page, 'results.tex')).toContainText(testResultEdit)
@@ -89,11 +174,11 @@ test('runs writing, preview, submission and a grounded reviewer reply from one c
   await second.getByRole('button', { name: 'Confirm submission archive' }).click()
   await expect(second.getByText('Archived Submission v2.')).toBeVisible()
 
-  await request(page, '/newround Round 1 | Submission v1')
+  await request(page, 'Test: create Round 1 from Submission v1')
   const setup = page.getByRole('region', { name: 'Revision setup' })
   await setup.getByRole('button', { name: 'Confirm revision round' }).click()
   await expect(setup.getByText('Revision round created.')).toBeVisible()
-  await request(page, '/comment sections/results.tex | Clarify the reported results.')
+  await request(page, 'Test: add reviewer comment Clarify the reported results.')
   await setup.getByRole('button', { name: 'Confirm reviewer comment' }).click()
   await expect(setup.getByText('Reviewer comment added.')).toBeVisible()
 
@@ -110,6 +195,21 @@ test('runs writing, preview, submission and a grounded reviewer reply from one c
   const downloadedLetter = page.waitForEvent('download')
   await letter.getByRole('button', { name: 'Download response letter' }).click()
   expect((await downloadedLetter).suggestedFilename()).toBe('Round 1-response.md')
+
+  await request(page, 'Add the following reviewer comment to Round 1, targeting sections/methods.tex: "Clarify sampling."')
+  const nextComment = setup.filter({ hasText: 'Clarify sampling.' })
+  await expect(nextComment.getByText('sections/methods.tex', { exact: true })).toBeVisible()
+  await nextComment.getByRole('button', { name: 'Confirm reviewer comment' }).click()
+  await expect(nextComment.getByText('Reviewer comment added.')).toBeVisible()
+
+  await request(page, '/submission Submission v1')
+  const duplicate = page.getByRole('region', { name: 'Submission task' }).last()
+  await duplicate.getByRole('button', { name: 'Compile reviewed ZIP' }).click()
+  await duplicate.getByRole('button', { name: 'Confirm submission archive' }).click()
+  await expect(duplicate.getByText('Archived Submission v1.')).toBeVisible()
+  await request(page, 'Test: create Round 1 from Submission v1')
+  await expect(page.getByText('Choose the exact name of a unique archived submission.')).toBeVisible()
+  await expect(setup.getByRole('button', { name: 'Confirm revision round' })).toHaveCount(0)
 
   await page.reload()
   await openAi(page)

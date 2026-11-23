@@ -4,9 +4,11 @@ import { chapterAnswerSchema, editRequestSchema, projectSuggestionSchema } from 
 import { revisionDraftRequestSchema } from './ai-revision'
 import type { EvidenceQuote } from './writing-ai-evidence'
 import type { WritingDraft } from './writing-drafts'
+import { manuscriptContextSchema, type ManuscriptTask } from './manuscript-task'
+import { attachmentContextSchema } from './ai-attachments'
 
 export const writingWorkflows = {
-  auto: { name: 'Auto', instruction: 'Infer whether to review, compare, edit, compile, prepare a submission, or draft a reviewer reply from the current request. Search for relevant files when the file is unclear or the request spans files.' },
+  auto: { name: 'Auto', instruction: 'Infer whether to review, compare, edit, compile, prepare a submission, start a revision round, record a reviewer comment, or draft a reply. Search for relevant files when the file is unclear or the request spans files.' },
   chapter: { name: 'Chapter', instruction: 'Use read_source for the relevant chapter lines. Verify any new citations or labels with query_references.' },
   project: { name: 'Across files', instruction: 'Use search_source and read_source to verify consistency across relevant files. Identify any files you could not check.' },
   diagnostics: { name: 'Compiler problems', instruction: 'Call compile_diagnostics before diagnosing. If diagnostics are stale or unavailable, ask the author to compile again. Use read_source to inspect implicated lines.' },
@@ -17,6 +19,10 @@ export const chatWorkflowSchema = z.enum(['auto', 'chapter', 'project', 'diagnos
 export type ChatWorkflow = z.infer<typeof chatWorkflowSchema>
 export const workflowVersion = 1
 export const chatEditSchema = z.object({ summary: projectSuggestionSchema.shape.summary, edits: projectSuggestionSchema.shape.edits.min(1) })
+export const editPermissionRequestSchema = z.object({
+  paths: z.array(z.string().min(1).max(500)).min(1).max(6),
+  reason: z.string().trim().min(1).max(600),
+}).strict()
 export const submissionChatSchema = z.object({
   name: z.string().trim().min(1).max(100).optional(),
   includeDrafts: z.boolean().optional(),
@@ -43,6 +49,10 @@ export const revisionSetupSchema = z.discriminatedUnion('kind', [
     path: z.string().min(1).max(500), text: z.string().trim().min(1).max(12000) }),
 ])
 export type ChatRevisionSetup = z.infer<typeof revisionSetupSchema>
+export const revisionRoundRequestSchema = revisionSetupSchema.options[0].pick({ name: true, baseline: true })
+export const reviewerCommentRequestSchema = revisionSetupSchema.options[1].pick({ path: true, text: true }).extend({
+  round: z.string().trim().min(1).max(100).optional(),
+})
 
 export const chatRequestSchema = z.object({
   run: z.uuid(), workflow: chatWorkflowSchema, source: editRequestSchema.optional(),
@@ -50,12 +60,20 @@ export const chatRequestSchema = z.object({
   revision: revisionDraftRequestSchema.optional(),
   feedback: compileFeedbackSchema.optional(),
   previousProposal: chatEditSchema.optional(),
+  manuscript: manuscriptContextSchema.optional(),
+  attachments: attachmentContextSchema.optional(),
+  draftPermission: z.union([z.literal('all'), z.array(z.string().min(1).max(500)).max(6)]).optional(),
+  workspaceActivity: z.array(z.object({
+    action: z.enum(['draft', 'saved', 'undone', 'rejected', 'archived', 'revision-created', 'comment-added', 'reply-saved',
+      'permission-granted', 'permission-denied']),
+    paths: z.array(z.string().max(500)).max(6).optional(), detail: z.string().max(300).optional(),
+  })).max(12).optional(),
   selection: z.object({ path: z.string().max(500), start: z.number().int().positive(), end: z.number().int().positive() }).refine(range => range.start <= range.end).optional(),
   messages: z.array(z.object({
     role: z.enum(['user', 'assistant']), text: z.string().min(1).max(12_000),
   })).min(1).max(24),
 }).refine(value => value.workflow === 'revision' ? Boolean(value.revision) && value.scope.length === 0
-  : Boolean(value.source) && (value.workflow === 'auto' || value.scope.length <= 6))
+  : Boolean(value.source) && (value.workflow === 'auto' || value.draftPermission === 'all' || value.scope.length <= 6))
 
 export type WritingChatMessage = UIMessage<{
   run: string
@@ -67,8 +85,10 @@ export type WritingChatMessage = UIMessage<{
   submission?: SubmissionChatRequest
   letter?: string
   revisionSetup?: ChatRevisionSetup
+  actionError?: string
   evidence?: (z.infer<typeof chapterAnswerSchema>['evidence'][number] & { anchor?: EvidenceQuote })[]
   missing?: string[]
+  readPaths?: string[]
 }>
 export type ChatSource = { saved: string; draft?: WritingDraft }
 export type ChatReplyTarget = {
@@ -76,10 +96,11 @@ export type ChatReplyTarget = {
   previousRevisedId?: string
   previous?: import('./revision-rounds').RevisionResponse; paths: string[]; kind: 'changed' | 'retained'
 }
-export type ChatRun = { main?: string; pathRevision?: number; sources: Record<string, ChatSource>; reply?: ChatReplyTarget }
+export type ChatRun = { main?: string; pathRevision?: number; sources: Record<string, ChatSource>; reply?: ChatReplyTarget; revisionOf?: string;
+  manuscriptId?: string; replacesBatch?: string; verifyRepair?: boolean }
 export type ChatTaskStep = {
   kind: 'verify' | 'authorize-save' | 'passed' | 'failed' | 'cancelled' | 'blocked' | 'draft' | 'saved' | 'undone' | 'rejected'
-    | 'preview-compile' | 'archived' | 'reply-saved' | 'revision-created' | 'comment-added'
+    | 'preview-compile' | 'archived' | 'reply-saved' | 'revision-created' | 'comment-added' | 'permission-granted' | 'permission-denied'
   at: number
   selected?: number
   selection?: number[]
@@ -97,5 +118,6 @@ export type ChatConversation = {
   title: string
   messages: WritingChatMessage[]
   runs: Record<string, ChatRun>
+  manuscript?: ManuscriptTask
 }
 export type ChatHistory = { selected: string; conversations: ChatConversation[] }

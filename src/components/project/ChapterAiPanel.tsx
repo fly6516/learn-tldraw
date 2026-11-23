@@ -26,6 +26,7 @@ interface ChapterAiPanelProps {
 
 const toolLabels: Record<z.infer<typeof chapterAnswerSchema>['tools'][number], string> = {
   search_source: 'Cross-file search', read_source: 'Source read', query_references: 'Reference lookup', compile_diagnostics: 'Compiler diagnostics',
+  read_csv_rows: 'CSV evidence',
 }
 
 export function ChapterAiPanel({ project, path, main, source, draft, compiler, bibliography, disabled, onApply, onLocate }: ChapterAiPanelProps) {

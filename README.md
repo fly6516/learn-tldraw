@@ -190,8 +190,10 @@ Conversations are stored per project in this browser. The model receives recent 
 text, bounded project sources, and the evidence returned by its tools.
 
 In **Auto**, the assistant can propose changes across up to six available editable LaTeX
-files per turn. **Scope** can narrow the candidate files. Inspect **View diff** and select
-changes before approving verification or applying them to drafts.
+files per turn. **Scope** can narrow the candidate files. Inspect **View diff**, select the
+changes to keep, then choose **Apply to drafts**. The editor shows the changes immediately
+and keeps the drafts in this browser. The card can review applied diffs, verify the current
+working snapshot, and save the affected sources separately.
 The project checks the saved source and local draft before applying or saving. **Undo AI changes**
 restores the original source and draft for the affected files while protecting later edits.
 
@@ -202,22 +204,60 @@ intact. Changes to the source, compile entry, or selection make the result out o
 
 **Save if verification passes** authorizes that proposal and selection to save after a
 fresh passing build. A failed or outdated build leaves the project untouched. Unrelated
-local drafts can take part in verification and stay local afterward. **Auto draft** is
-available for the approved files in the current conversation. Refreshing or switching
-conversations clears that approval.
+local drafts can take part in verification and stay local afterward. After verifying a
+pending proposal, **Save verified changes** reuses the result while the sources, compile
+entry and selection still match. The submission workflow compiles its final ZIP separately.
+
+Writing AI can ask for draft-edit permission with a list of files and a reason. **Approve and
+continue** grants access to those files and resumes the request. **Deny request** leaves the
+work in review-first mode when no other access was granted. In **Approval mode**, choose
+**Auto draft** for the selected scope or **Full draft access** for all editable LaTeX
+drafts in the current project. **Revoke access** stops future automatic writes and keeps
+drafts already applied. Grants end on a scope change, when leaving Writing or changing
+conversations, or on reload. Saving to project sources and archiving require confirmation.
 
 From failed verification, **Use diagnostics in chat** sends the compiler report and the exact
 selected replacements back to the assistant for a new proposal. The new proposal has its own
 approval.
+
+**Repair and reverify** uses that same report and compiles the replacement automatically. If an
+active draft grant covers every replacement, a passing result can apply to working drafts.
+Compiler setup and missing-resource failures leave the patch available for retry.
+
+For larger edits, enter the goal and choose **Plan writing task**. Review the file list, then
+choose **Continue task**. The task processes files in batches of up to three, pausing for review
+when local draft permissions do not cover the proposal. The goal, author decisions, open
+questions, batch history, and remaining files survive reload independently of recent messages.
+Use **Undo latest batch** or **Undo task batches**. The undo checks for intervening edits before
+restoring any files. Reloading pauses the task and expires any automatic draft permission.
+
+When the drafts are ready, choose **Review and save task**, ask Writing AI to review the
+manuscript task, or send `/review`. The review compares saved source, task edits, and any
+existing author draft. Files containing an existing author draft are initially left unselected.
+If the current file has changed since a batch, compare the author version with the last task
+version and explicitly include it or leave the file out.
+
+**Verify manuscript** compiles the exact project that **Save verified files** will write.
+Unselected files use their saved project source, and their local drafts remain available.
+A changed source, compile entry, attachment, draft, or selection invalidates the current
+verification. From a failed verification, jump to a source diagnostic or choose
+**Repair affected files with AI**. Review the repair as a new draft and verify the manuscript
+again. **Undo manuscript save** restores the previous project sources and their pre-save drafts
+as one operation, with the same protection against later edits as batch undo.
+
+Writing AI can list attachment paths and cite line-linked CSV records from the current project.
+CSV reads are bounded to the available prefix and a requested row range. Figure filenames can
+be checked against the project inventory.
 
 Ask for submission preflight or use `/submission Submission v1`. Review file exclusions
 and the local-draft setting in the chat card before compiling the exact ZIP. The compiled
 PDF and ZIP can be downloaded and explicitly archived from the card. Templates that need
 an external engine can use the handoff in Prepare submission.
 
-Use `/newround Round 1 | Submission v1` to stage a new revision round.
-Use `/comment sections/results.tex | Clarify the results. | Round 1` to attach a reviewer
-comment to a source file in that round. Both cards require confirmation.
+Ask to create a named revision round from an archived submission or to add a reviewer
+comment for a specific source file. Both cards require confirmation, and ambiguous archive
+or round names must be resolved first. You can also use `/newround Round 1 | Submission v1`
+and `/comment sections/results.tex | Clarify the results. | Round 1`.
 Use `/revisions` to see reviewer comment numbers, then
 `/reply 1 | Round 1 | Submission v2` to draft a reply grounded in the archived ZIP differences.
 Omit the names when a unique round and linked archive are available. Review the reply and
@@ -225,7 +265,8 @@ confirm saving it in chat. Use `/letter` or `/letter Round 1` to preview and dow
 Markdown response letter.
 
 Each proposal has an **AI task record**. Expand **Task activity** to see its approvals,
-verification attempts, saves, and undo actions after reloading. Source evidence follows
+verification attempts, saves, and undo actions after reloading. Repair proposals link to
+the original proposal and compiler result. Source evidence follows
 tracked Writing file moves and uniquely identifiable lines. When it cannot be located
 reliably, **Find fresh evidence** prepares a follow-up request in the same conversation.
 

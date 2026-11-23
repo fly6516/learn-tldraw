@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import { testResultLine, testScenarios } from '../../src/lib/project/test-paper'
 
 const writing = '/research-test?view=write'
 const storage = 'research-canvas-projects'
@@ -20,6 +21,47 @@ async function backToProjects(page: Page) {
   await page.getByRole('link', { name: 'Back to projects' }).click()
   await expect(page.getByRole('heading', { name: 'Research projects', exact: true })).toBeVisible()
 }
+
+test('leaving a project revokes a pending AI save while keeping the proposal for review', async ({ page }) => {
+  await page.goto('/research')
+  const fixture = await page.request.get('/api/latex/test-fixture')
+  expect(fixture.ok()).toBe(true)
+  const input = page.getByLabel('Choose project ZIP or backup')
+  await input.setInputFiles({ name: 'Approval study.zip', mimeType: 'application/zip', buffer: await fixture.body() })
+  await expect(page.getByRole('heading', { name: 'Approval study', level: 1 })).toBeVisible()
+  await expect(page).toHaveURL(/\/research\?project=[a-f0-9-]+&view=write$/)
+  const approvalUrl = page.url()
+  await page.getByRole('button', { name: 'Writing AI', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Message Writing AI' }).fill(testScenarios.pass)
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  const proposal = page.getByRole('region', { name: 'Source change proposal' })
+  let started!: () => void
+  let release!: () => void
+  const intercepted = new Promise<void>(resolve => { started = resolve })
+  const proceed = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/api/latex/compile?*', async route => {
+    const built = await route.fetch()
+    started()
+    await proceed
+    await route.fulfill({ response: built }).catch(() => {})
+  }, { times: 1 })
+  try {
+    await proposal.getByRole('button', { name: 'Save if verification passes' }).click()
+    await intercepted
+    await backToProjects(page)
+    await input.setInputFiles({ name: 'Separate study.zip', mimeType: 'application/zip', buffer: await fixture.body() })
+    await expect(page.getByRole('heading', { name: 'Separate study' })).toBeVisible()
+  } finally { release() }
+  await backToProjects(page)
+  await page.goto(approvalUrl)
+  await expect(page.getByRole('heading', { name: 'Approval study', level: 1 })).toBeVisible()
+  await page.reload()
+  await page.getByRole('button', { name: 'Writing AI', exact: true }).click()
+  await expect(proposal.getByRole('button', { name: 'Save if verification passes' })).toBeVisible()
+  await expect(proposal.getByText('Saved to project', { exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: 'results.tex', exact: true }).click()
+  await expect(source(page).locator('.view-lines')).toContainText(testResultLine)
+})
 
 test('migrates the existing project and keeps imported copies, drafts and history isolated', async ({ page }, info) => {
   test.setTimeout(120_000)

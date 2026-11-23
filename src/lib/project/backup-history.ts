@@ -9,6 +9,7 @@ import type { SubmissionVersion } from './submission'
 import type { SourceMove } from './writing-ai-evidence'
 import { chatWorkflowSchema, compileFeedbackSchema, revisionSetupSchema, submissionChatSchema, type ChatCheckpoint, type ChatHistory, type ChatTaskStep, type WritingChatMessage } from './writing-chat'
 import type { ChatVerification } from './writing-chat-validation'
+import { manuscriptTaskSchema } from './manuscript-task'
 
 export type PortableProjectHistory = {
   publication?: { submissions: SubmissionVersion[]; rounds: RevisionRound[] }
@@ -56,28 +57,31 @@ const message = z.object({ id, role: z.enum(['user', 'assistant', 'system']),
     .refine(part => part.type !== 'text' || typeof part.text === 'string')).max(1000),
   metadata: z.object({ run: id, complete: z.boolean().optional(), workflow: chatWorkflowSchema.optional(),
     feedback: compileFeedbackSchema.optional(), local: z.boolean().optional(), submission: submissionChatSchema.optional(), letter: text.max(100).optional(),
-    revisionSetup: revisionSetupSchema.optional(),
+    revisionSetup: revisionSetupSchema.optional(), actionError: text.max(1000).optional(),
     selection: z.object({ path, start: positive, end: positive }).optional(), evidence: z.array(evidence).max(40).optional(),
-    missing: z.array(text).max(20).optional() }).optional(),
+    missing: z.array(text).max(20).optional(), readPaths: z.array(path).max(49).optional() }).optional(),
 }).transform(value => value as WritingChatMessage)
 const unique = (values: { id: string }[]) => new Set(values.map(value => value.id)).size === values.length
 const ai = z.object({
   history: z.object({ selected: id, conversations: z.array(z.object({
-    id, title: text, messages: z.array(message).max(30).refine(unique),
-    runs: z.record(id, z.object({ main: path.optional(), pathRevision: z.number().int().nonnegative().optional(), sources,
+    id, title: text, messages: z.array(message).max(30).refine(unique), manuscript: manuscriptTaskSchema.optional(),
+    runs: z.record(id, z.object({ main: path.optional(), pathRevision: z.number().int().nonnegative().optional(), sources, revisionOf: id.optional(),
+      manuscriptId: id.optional(), replacesBatch: id.optional(), verifyRepair: z.boolean().optional(),
       reply: z.object({ round: id, roundName: text, comment: id, commentText: text, originalId: id, revisedId: id,
         previousRevisedId: id.optional(), previous: response.optional(), paths: z.array(path), kind: z.enum(['changed', 'retained']) }).optional() })),
   })).max(12) }).refine(value => unique(value.conversations) && value.conversations.some(item => item.id === value.selected)).optional(),
   moves: z.array(z.object({ from: path, to: path })),
   tasks: z.record(id, z.array(z.object({ kind: z.enum(['verify', 'authorize-save', 'passed', 'failed', 'cancelled', 'blocked', 'draft', 'saved', 'undone', 'rejected',
-    'preview-compile', 'archived', 'reply-saved', 'revision-created', 'comment-added']),
+    'preview-compile', 'archived', 'reply-saved', 'revision-created', 'comment-added', 'permission-granted', 'permission-denied']),
     at: z.number().int().min(0).max(8.64e15), selected: z.number().int().nonnegative().optional(), selection: selection.optional(),
     paths: z.array(path).optional(), detail: text.optional() }))),
   checkpoints: z.record(id, z.object({ state: z.enum(['draft', 'saved', 'undone', 'rejected']),
     main: path.optional(), before: sources, after: sources }).refine(value =>
     Object.keys(value.before).length === Object.keys(value.after).length && Object.keys(value.before).every(key => Object.hasOwn(value.after, key)))),
   verifications: z.record(id, z.object({ baseline: hash, patch: hash, compiledBaseline: hash,
-    selected: selection, currentSelection: selection.optional(), main: path, status: z.enum(['passed', 'failed']),
+    selected: selection, currentSelection: selection.optional(), working: z.boolean().optional(),
+    manuscript: z.object({ paths: z.array(path).min(1).max(49), accepted: z.array(path).max(49) }).optional(),
+    main: path, status: z.enum(['passed', 'failed']),
     diagnostics: z.array(z.object({ path, line: positive, severity: z.enum(['error', 'warning']), message: text, sourceLine: positive.optional() })),
     message: text, log: text })),
 })

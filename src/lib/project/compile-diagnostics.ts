@@ -11,6 +11,25 @@ export interface CompileReport {
   log: string
 }
 
+export function compileFailureMessage(output: string, onlyCached: boolean) {
+  const font = /^warning: >> This font is mapped to a physical font "([^"\r\n]{1,150})"\./m.exec(output)?.[1]
+  if (/Cannot proceed without \.vf or "physical" font for PDF output/i.test(output)) {
+    return `Tectonic could not load a font${font ? ` (${font})` : ''} required to produce the PDF.${
+      onlyCached ? ' Allow Tectonic to download missing bundle resources and retry.' : ' Check the Tectonic bundle and font configuration.'}`
+  }
+  const error = /^error:[^\S\r\n]*(.+)$/m.exec(output)?.[1]?.trim()
+  return error ? `LaTeX compilation failed. ${error.slice(0, 600)}` : 'LaTeX compilation failed.'
+}
+
+export function compileLog(output: string, log: string, limit: number) {
+  if (!output) return log.slice(-limit)
+  if (!log) return output.slice(-limit)
+  if (output.length + log.length + 2 <= limit) return output + '\n\n' + log
+  const limitOutput = Math.floor(limit / 2)
+  const consoleOutput = output.length <= limitOutput ? output : output.slice(-limitOutput)
+  return consoleOutput + '\n\n' + log.slice(-(limit - consoleOutput.length - 2))
+}
+
 export function parseCompileDiagnostics(output: string, main: string, paths: Iterable<string>): CompileDiagnostic[] {
   const files = new Set(paths)
   const folder = main.slice(0, main.lastIndexOf('/') + 1)

@@ -2,10 +2,11 @@ import { applyProjectEdits, type ProjectSuggestion } from './ai-edit'
 import type { CompileDiagnostic, CompileReport } from './compile-diagnostics'
 import { updateFileContent } from './file-system'
 import { lineNumber, sourceOffsetAtPosition } from './latex-source'
+import { buildManuscriptSnapshot } from './manuscript-review'
 import { collectBibliography, findNewUnknownCitations } from './references'
 import { exportSourceArchive, sourceArchiveEntry } from './source-archive'
 import type { ProjectFileSystem } from './types'
-import type { ChatRun } from './writing-chat'
+import type { ChatCheckpoint, ChatRun } from './writing-chat'
 import { editableSource, sameDraft, type WritingDrafts } from './writing-drafts'
 
 type Edits = ProjectSuggestion['edits']
@@ -16,6 +17,8 @@ export type ChatVerification = {
   compiledBaseline: string
   selected: number[]
   currentSelection?: number[]
+  working?: boolean
+  manuscript?: { paths: string[]; accepted: string[] }
   main: string
   status: 'passed' | 'failed'
   diagnostics: VerificationDiagnostic[]
@@ -88,19 +91,59 @@ export function originalDiagnosticLine(original: string, patched: string, edits:
 
 export async function validateChatProposal(input: {
   project: ProjectFileSystem; working: ProjectFileSystem; drafts: WritingDrafts; run: ChatRun
-  edits: Edits; selected: number[]; main: string; signal: AbortSignal
+  edits: Edits; selected: number[]; main: string; signal: AbortSignal; verifyWorking?: boolean
 }): Promise<ChatVerification> {
-  const { project, working, drafts, run, edits, selected, main, signal } = input
+  const { project, working, drafts, run, edits, selected, main, signal, verifyWorking } = input
   signal.throwIfAborted()
   if (!main || !edits.length) throw new Error('Select at least one change and a compile entry.')
-  const { candidate, sources, changed } = buildValidationSnapshot(project, working, drafts, run, edits)
+  const { candidate, sources, changed } = verifyWorking ? {
+    candidate: working,
+    sources: new Map(Object.entries(run.sources).map(([path, source]) => [path, source.draft?.text ?? source.saved])),
+    changed: new Map([...new Set(edits.map(edit => edit.path))].flatMap(path => {
+      const source = editableSource(working, path)
+      return source === undefined ? [] : [[path, source] as const]
+    })),
+  } : buildValidationSnapshot(project, working, drafts, run, edits)
+  const result = await compileChatSnapshot(project, drafts, candidate, changed, sources, main, signal, verificationPatch(edits))
+  const diagnostics = result.diagnostics.map(issue => {
+    const file = working.files.get(issue.path)
+    const original = file && 'content' in file ? file.content : undefined
+    const patched = changed.get(issue.path) ?? original
+    return { ...issue, sourceLine: original === undefined || patched === undefined ? undefined : verifyWorking ? issue.line
+      : originalDiagnosticLine(original, patched, edits.filter(edit => edit.path === issue.path), issue.line) }
+  })
+  return { ...result, diagnostics, selected, working: verifyWorking }
+}
+
+export async function validateManuscript(input: {
+  project: ProjectFileSystem; working: ProjectFileSystem; drafts: WritingDrafts; checkpoints: ChatCheckpoint[]
+  paths: string[]; accepted: string[]; signal: AbortSignal
+}): Promise<ChatVerification> {
+  const { project, working, drafts, checkpoints, paths, accepted, signal } = input
+  const { candidate, checkpoint } = buildManuscriptSnapshot(project, drafts, checkpoints, paths, accepted)
+  const before = new Map(paths.map(path => [path, checkpoint.before[path].saved]))
+  const after = new Map(paths.map(path => [path, checkpoint.after[path].saved]))
+  const result = await compileChatSnapshot(project, drafts, candidate, after, before, checkpoint.main, signal, Promise.resolve(''))
+  const diagnostics = result.diagnostics.map(issue => {
+    const compiled = candidate.files.get(issue.path)
+    const live = working.files.get(issue.path)
+    const sourceLine = compiled && live && 'content' in compiled && 'content' in live && compiled.content === live.content
+      && compiled.content && issue.line <= compiled.content.split(/\r\n|\r|\n/).length ? issue.line : undefined
+    return { ...issue, sourceLine }
+  })
+  return { ...result, diagnostics, patch: result.compiledBaseline, selected: [], manuscript: { paths, accepted } }
+}
+
+async function compileChatSnapshot(project: ProjectFileSystem, drafts: WritingDrafts, candidate: ProjectFileSystem,
+  changed: Map<string, string>, sources: Map<string, string>, main: string, signal: AbortSignal, patchHash: Promise<string>) {
+  signal.throwIfAborted()
   const [baseline, patch, archive, compiledBaseline] = await Promise.all([
-    verificationBaseline(project, drafts), verificationPatch(edits), exportSourceArchive(candidate),
+    verificationBaseline(project, drafts), patchHash, exportSourceArchive(candidate),
     verificationBaseline(candidate, {}),
   ])
   signal.throwIfAborted()
   const bibliography = collectBibliography(candidate)
-  const citations = [...changed].flatMap(([path, text]) => findNewUnknownCitations(path, sources.get(path)!, text, bibliography)
+  const citations = [...changed].flatMap(([path, text]) => findNewUnknownCitations(path, sources.get(path) ?? '', text, bibliography)
     .map(({ line, key }): CompileDiagnostic => ({ path, line, severity: 'error', message: `New unknown citation: ${key}` })))
   const response = await fetch(`/api/latex/compile?main=${encodeURIComponent(main)}&sync=1`, { method: 'POST', body: archive, signal })
   let report: Partial<CompileReport> & { error?: string }
@@ -114,14 +157,8 @@ export async function validateChatProposal(input: {
   }
   const issues = [...citations, ...(report.diagnostics ?? [])]
   const passed = response.ok && !issues.some(issue => issue.severity === 'error')
-  const diagnostics = issues.slice(0, 50).map(issue => {
-    const file = working.files.get(issue.path)
-    const original = file && 'content' in file ? file.content : undefined
-    const patched = changed.get(issue.path) ?? original
-    return { ...issue, sourceLine: original === undefined || patched === undefined ? undefined
-      : originalDiagnosticLine(original, patched, edits.filter(edit => edit.path === issue.path), issue.line) }
-  })
-  return { baseline, patch, compiledBaseline, selected, main, diagnostics, status: passed ? 'passed' : 'failed',
+  const diagnostics = issues.slice(0, 50)
+  return { baseline, patch, compiledBaseline, main, diagnostics, status: passed ? 'passed' as const : 'failed' as const,
     message: passed ? report.hasWarnings || diagnostics.length ? 'Compiled with warnings.' : 'Compiled successfully.'
       : report.error ?? 'Validation found errors in the selected changes.',
     log: report.log?.slice(-8000) ?? '' }

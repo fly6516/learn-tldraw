@@ -38,7 +38,7 @@ export const suggestionSchema = z.object({
 
 export type ChapterEditRequest = z.infer<typeof editRequestSchema>
 export type ChapterSuggestion = z.infer<typeof suggestionSchema>
-export const chapterTools = ['search_source', 'read_source', 'query_references', 'compile_diagnostics'] as const
+export const chapterTools = ['search_source', 'read_source', 'query_references', 'compile_diagnostics', 'read_csv_rows'] as const
 export const chapterAnswerSchema = suggestionSchema.extend({
   tools: z.array(z.enum(chapterTools)).max(80),
   evidence: z.array(z.object({ path: z.string().max(500), line: z.number().int().positive(),

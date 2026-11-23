@@ -3,8 +3,8 @@ import type { ChatCheckpoint, ChatRun, ChatSource } from './writing-chat'
 import { sameDraft } from './writing-drafts'
 
 export type ChatAction =
-  | { kind: 'apply'; run: ChatRun; edits: ProjectSuggestion['edits']; selection?: number[]; automatic?: boolean }
-  | { kind: 'apply-save'; run: ChatRun; edits: ProjectSuggestion['edits']; signal: AbortSignal }
+  | { kind: 'apply'; run: ChatRun; edits: ProjectSuggestion['edits']; selection?: number[]; automatic?: boolean; signal?: AbortSignal }
+  | { kind: 'apply-save'; run: ChatRun; edits: ProjectSuggestion['edits']; signal: AbortSignal; selection?: number[] }
   | { kind: 'save' | 'undo' | 'reject' }
 
 export function chatActionPaths(action: ChatAction, checkpoint?: ChatCheckpoint) {

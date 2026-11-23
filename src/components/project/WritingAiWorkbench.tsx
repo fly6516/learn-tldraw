@@ -3,14 +3,14 @@
 import { useChat } from '@ai-sdk/react'
 import { DefaultChatTransport, type UIMessage } from 'ai'
 import dynamic from 'next/dynamic'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { Textarea } from '@/components/ui/textarea'
 import { applyProjectEdits, buildChapterContext, maxChapterLength, type ChapterEditRequest } from '@/lib/project/ai-edit'
 import { confirmChatReply, listRevisionRounds, readChatCheckpoints, readChatHistory, readChatTaskSteps, readChatVerifications, recordChatTaskStep, writeChatHistory, writeChatVerification } from '@/lib/project/storage'
-import { chatEditSchema, replyChatSchema, submissionChatSchema, writingWorkflows, type ChatCheckpoint, type ChatCompileFeedback, type ChatConversation, type ChatHistory, type ChatRevisionSetup, type ChatRun, type ChatTaskStep, type ChatWorkflow, type ReplyChatRequest, type SubmissionChatRequest, type WritingChatMessage } from '@/lib/project/writing-chat'
+import { chatEditSchema, editPermissionRequestSchema, replyChatSchema, revisionRoundRequestSchema, reviewerCommentRequestSchema, submissionChatSchema, writingWorkflows, type ChatCheckpoint, type ChatCompileFeedback, type ChatConversation, type ChatHistory, type ChatRevisionSetup, type ChatRun, type ChatTaskStep, type ChatWorkflow, type ReplyChatRequest, type SubmissionChatRequest, type WritingChatMessage } from '@/lib/project/writing-chat'
 import type { ChatAction } from '@/lib/project/writing-chat-actions'
 import { validateChatProposal, verificationBaseline, type ChatVerification } from '@/lib/project/writing-chat-validation'
 import { editableSource, type WritingDrafts, type WritingKey } from '@/lib/project/writing-drafts'
@@ -22,9 +22,14 @@ import { revisionDraftSchema } from '@/lib/project/ai-revision'
 import type { SubmissionBuild, SubmissionSelection } from '@/lib/project/submission'
 import { ChatSubmissionCard } from './ChatSubmissionCard'
 import { download, submissionFilename } from './SubmissionDialog'
+import { ManuscriptTaskCard } from './ManuscriptTaskCard'
+import { ManuscriptReviewDialog } from './ManuscriptReviewDialog'
+import { manuscriptPlanSchema, manuscriptProgress, type ManuscriptContext, type ManuscriptTask } from '@/lib/project/manuscript-task'
+import { buildAttachmentContext } from '@/lib/project/ai-attachments'
 
 const Diff = dynamic(() => import('./MonacoSourceEditor').then(module => module.WritingDraftComparison), { ssr: false })
-type Approval = 'manual' | 'draft'
+type DraftAccess = 'all' | string[]
+type DraftGrant = { id: string; access: DraftAccess; controller: AbortController }
 type SourceWorkflow = Exclude<ChatWorkflow, 'revision'>
 type Checkpoints = Record<string, ChatCheckpoint['state']>
 type WorkbenchProps = {
@@ -33,6 +38,8 @@ type WorkbenchProps = {
   compiler: ChapterEditRequest['compiler']; onLocate: (path: string, line: number) => void
   selection: () => { path: string; start: number; end: number } | undefined
   onAction: (run: string, action: ChatAction) => Promise<ChatCheckpoint['state']>
+  onUndoBatches: (runs: readonly string[]) => Promise<string[]>
+  onSaveManuscript: (taskId: string, runs: readonly string[], report: ChatVerification) => Promise<void>
   onCompile: (signal: AbortSignal) => Promise<{ feedback: ChatCompileFeedback } | undefined>
   onBuildSubmission: (selection: SubmissionSelection, signal: AbortSignal) => Promise<{ feedback: ChatCompileFeedback; submission?: SubmissionBuild } | undefined>
   onExternalSubmission: (include: boolean, excluded: string[]) => void
@@ -43,9 +50,15 @@ type WorkbenchProps = {
 const toolLabels: Record<string, string> = {
   search_source: 'Search source', read_source: 'Read source', query_references: 'Check references',
   compile_diagnostics: 'Read diagnostics', propose_edits: 'Validate edits', request_preview_compile: 'Request preview compile',
+  read_patch_verification: 'Read temporary patch diagnostics',
+  request_edit_permission: 'Request draft edit permission',
   read_archived_changes: 'Read archived ZIP changes', propose_reply: 'Stage reply',
   prepare_submission: 'Prepare submission checklist', request_reviewer_reply: 'Find archived reply evidence',
+  prepare_revision_round: 'Check revision baseline', prepare_reviewer_comment: 'Check reviewer comment target',
+  plan_manuscript: 'Plan manuscript changes', list_attachments: 'List project attachments', read_csv_rows: 'Read CSV evidence',
 }
+const receiptKinds = new Set(['draft', 'saved', 'undone', 'rejected', 'archived', 'revision-created', 'comment-added', 'reply-saved',
+  'permission-granted', 'permission-denied'])
 
 function newConversation(): ChatConversation {
   return { id: crypto.randomUUID(), title: 'New conversation', messages: [], runs: {} }
@@ -59,7 +72,8 @@ export const chatTransport = new DefaultChatTransport<WritingChatMessage>({
   api: '/api/latex/chat',
   prepareSendMessagesRequest: ({ messages, body }) => ({ body: {
     ...body, messages: messages.filter(message => message.role !== 'system' && !message.metadata?.local)
-      .map(message => ({ role: message.role, text: chatText(message).slice(0, 12_000) }))
+      .map(message => ({ role: message.role, text: [chatText(message),
+        message.metadata?.actionError && `Workspace validation: ${message.metadata.actionError}`].filter(Boolean).join('\n').slice(0, 12_000) }))
       .filter(message => message.text.trim()).slice(-24),
   } }),
 })
@@ -100,8 +114,15 @@ function toolResult<T>(message: WritingChatMessage, type: `tool-${string}`, sche
   }
 }
 
+function revisionSetupRequest(message: WritingChatMessage) {
+  const round = toolResult(message, 'tool-prepare_revision_round', revisionRoundRequestSchema)
+  if (round) return { action: 'newround' as const, args: [round.name, round.baseline] }
+  const comment = toolResult(message, 'tool-prepare_reviewer_comment', reviewerCommentRequestSchema)
+  if (comment) return { action: 'comment' as const, args: [comment.path, comment.text, comment.round ?? ''] }
+}
+
 export function WritingAiWorkbench(props: WorkbenchProps) {
-  const { storage, projectKey, onAction } = props
+  const { storage, projectKey, onAction, onUndoBatches } = props
   const workspace = projectKey[0], projectId = projectKey[1]
   const [history, setHistory] = useState<ChatHistory>()
   const [checkpoints, setCheckpoints] = useState<Checkpoints>({})
@@ -141,6 +162,19 @@ export function WritingAiWorkbench(props: WorkbenchProps) {
   const conversation = history?.conversations.find(item => item.id === history.selected)
   if (!conversation) return <p className="p-3 text-sm" role="status">{storageError || 'Loading local conversations…'}</p>
   return <Conversation key={conversation.id} {...props} conversation={conversation} checkpoints={checkpoints} storageError={storageError}
+    onManuscript={manuscript => persist(value => ({ ...value, conversations: value.conversations.map(item =>
+      item.id === conversation.id ? { ...item, manuscript } : item) }))}
+    onUndoBatches={async runs => {
+      const undone = await onUndoBatches(runs)
+      setCheckpoints(current => ({ ...current, ...Object.fromEntries(undone.map(id => [id, 'undone' as const])) }))
+      await refreshTasks().catch(() => setStorageError('Could not reload the task record.'))
+      return undone
+    }}
+    onSaveManuscript={async (id, runs, report) => {
+      await props.onSaveManuscript(id, runs, report)
+      setCheckpoints(current => ({ ...current, [id]: 'saved' }))
+      await refreshTasks().catch(() => setStorageError('Could not reload the task record.'))
+    }}
     tasks={tasks} onRefreshTasks={refreshTasks} onTaskStep={async (id, step) => {
       await recordChatTaskStep(storage, [workspace, projectId], id, { ...step, at: Date.now() })
       await refreshTasks()
@@ -162,7 +196,11 @@ export function WritingAiWorkbench(props: WorkbenchProps) {
     }, true)}
     onPersist={(messages, runs) => persist(value => ({ ...value, conversations: value.conversations.map(item => {
       if (item.id !== conversation.id) return item
-      const retained = messages.slice(-30)
+      const activeRuns = item.manuscript?.batches.filter(batch => !checkpoints[batch.run]).slice(-2).map(batch => batch.run) ?? []
+      const pinned = messages.filter(message => message.role === 'assistant' && message.metadata?.complete
+        && activeRuns.includes(message.metadata.run))
+      const retainedSet = new Set([...pinned, ...messages.slice(-(30 - pinned.length))])
+      const retained = messages.filter(message => retainedSet.has(message))
       const retainedRuns = retained.flatMap(message => {
         const id = message.metadata?.run
         const run = id && runs[id]
@@ -196,30 +234,40 @@ function Conversation(props: WorkbenchProps & {
   onRefreshTasks: () => Promise<void>
   onSelect: (id: string) => void; onNew: () => void; onDelete: () => void
   onPersist: (messages: WritingChatMessage[], runs: Record<string, ChatRun>) => void
+  onManuscript: (task: ManuscriptTask) => void
 }) {
   const [workflow, setWorkflow] = useState<SourceWorkflow>('auto')
-  const [approval, setApproval] = useState<Approval>('manual')
-  const [consent, setConsent] = useState<Approval | null>(null)
+  const [permission, setPermission] = useState<DraftAccess>()
+  const [consent, setConsent] = useState<DraftAccess>()
   const [scope, setScope] = useState<string[]>()
   const [prompt, setPrompt] = useState('')
   const [error, setError] = useState('')
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [mutating, setMutating] = useState(false)
   const [stopped, setStopped] = useState(false)
+  const [manuscript, setManuscript] = useState(props.conversation.manuscript)
+  const manuscriptRef = useRef(props.conversation.manuscript)
+  const [reviewManuscript, setReviewManuscript] = useState(false)
+  const [undoSave, setUndoSave] = useState(false)
+  const taskProgress = useMemo(() => manuscript && manuscriptProgress(manuscript, props.checkpoints, props.tasks),
+    [manuscript, props.checkpoints, props.tasks])
+  const [runningManuscript, setRunningManuscript] = useState(false)
+  const [undoBatches, setUndoBatches] = useState<string[]>()
+  const [undoError, setUndoError] = useState('')
+  const [repairBuild, setRepairBuild] = useState(false)
   const localOperation = useRef<AbortController>(null)
   const replyInProgress = useRef(false)
   const [letters, setLetters] = useState<Record<string, Awaited<ReturnType<typeof prepareChatLetter>>>>({})
   const files = [...props.project.files.keys()].filter(path => /\.tex$/i.test(path)
     && (editableSource(props.working, path)?.length ?? Infinity) <= maxChapterLength)
-  const targets = scope ? scope.filter(path => files.includes(path)) : files.includes(props.selected) ? [props.selected] : []
-  const grant = useRef<{ id: string; mode: Approval; paths: string[] } | null>(null)
-  const [granted, setGranted] = useState(false)
+  const targets = (scope ?? (Array.isArray(permission) ? permission : [props.selected])).filter(path => files.includes(path))
+  const grant = useRef<DraftGrant>(null)
   const [wasActive, setWasActive] = useState(props.active)
   if (wasActive !== props.active) {
     setWasActive(props.active)
-    if (!props.active) setGranted(false)
+    if (!props.active) { setPermission(undefined); setConsent(undefined); setRunningManuscript(false) }
   }
-  const pending = useRef<{ id: string; mode: Approval; grant?: string } | null>(null)
+  const pending = useRef<{ id: string; grant?: string; manuscriptId?: string } | null>(null)
   const [runSnapshots, setRunSnapshots] = useState(props.conversation.runs)
   const runs = useRef(props.conversation.runs)
   const latest = useRef(props)
@@ -237,23 +285,86 @@ function Conversation(props: WorkbenchProps & {
         setMessages(messages.map(item => item.id === message.id ? interrupted : item))
         latest.current.onPersist(messages.map(item => item.id === message.id ? interrupted : item), runs.current)
         pending.current = null
+        setRunningManuscript(false)
         return
       }
-      latest.current.onPersist(messages, runs.current)
+      if (revisionSetupRequest(message)) void resolveRevisionSetup(message)
       const task = pending.current
       pending.current = null
-      if (!task || message.metadata?.run !== task.id || task.mode === 'manual'
-        || grant.current?.id !== task.grant || grant.current?.mode !== task.mode || !latest.current.active) return
       const proposal = editProposal(message)
-      const run = runs.current[task.id]
-      const evidence = message.metadata.evidence ?? []
-      if (proposal && run && !message.metadata.missing?.length && proposal.edits.every(edit => grant.current?.paths.includes(edit.path)
-        && evidence.some(item => item.path === edit.path && item.kind === 'read_source'))) {
-        void mutate(task.id, { kind: 'apply', run, edits: proposal.edits, automatic: true })
+      const runId = message.metadata?.run
+      const run = runId ? runs.current[runId] : undefined
+      const plan = toolResult(message, 'tool-plan_manuscript', manuscriptPlanSchema)
+      const original = messages.find(item => item.role === 'user' && item.metadata?.run === runId)
+      if (plan && original && !manuscriptRef.current && latest.current.active) {
+        updateManuscript({ ...plan, id: crypto.randomUUID(), goal: chatText(original).slice(0, 12000), batches: [] })
       }
+      const projectTask = manuscriptRef.current
+      if (runId && projectTask && run?.manuscriptId === projectTask.id && task?.id === runId) {
+        if (proposal && projectTask.batches.length < 120) {
+          updateManuscript({ ...projectTask, batches: [...projectTask.batches, {
+            run: runId, files: [...new Set(proposal.edits.map(edit => edit.path))], replaces: run.replacesBatch,
+          }] })
+        } else {
+          setRunningManuscript(false)
+          if (!toolResult(message, 'tool-request_edit_permission', editPermissionRequestSchema)) {
+            setError('The task paused because this batch did not return an edit proposal.')
+          }
+        }
+      }
+      latest.current.onPersist(messages, runs.current)
+      const approved = grant.current
+      if (!task || !proposal || !run || runId !== task.id || !latest.current.active) return
+      const read = new Set(message.metadata?.readPaths)
+      const canApply = approved && !approved.controller.signal.aborted && approved.id === task.grant
+        && !message.metadata?.missing?.length && proposal.edits.every(edit =>
+          (approved.access === 'all' || approved.access.includes(edit.path)) && read.has(edit.path))
+      if (run.verifyRepair) void verifyRepairedProposal(task.id, run, proposal, canApply ? approved : undefined)
+      else if (canApply) void mutate(task.id, { kind: 'apply', run, edits: proposal.edits, automatic: true, signal: approved.controller.signal })
     },
   })
   const streaming = status === 'submitted' || status === 'streaming'
+  function updateManuscript(value: ManuscriptTask) {
+    manuscriptRef.current = value
+    setManuscript(value)
+    latest.current.onManuscript(value)
+  }
+
+  async function verifyRepairedProposal(id: string, run: ChatRun, proposal: NonNullable<ReturnType<typeof editProposal>>, approved?: DraftGrant) {
+    const work = latest.current
+    if (!work.main || localOperation.current) return
+    const controller = new AbortController()
+    localOperation.current = controller
+    setMutating(true)
+    setRepairBuild(true)
+    let recorded = false
+    try {
+      const selected = proposal.edits.map((_, index) => index)
+      await work.onTaskStep(id, { kind: 'verify', selected: selected.length, selection: selected })
+      const report = await validateChatProposal({ ...work, main: work.main, run, edits: proposal.edits, selected, signal: controller.signal })
+      if (controller.signal.aborted) return
+      await work.onVerification(id, report, true)
+      recorded = true
+      const current = latest.current
+      if (approved && report.status === 'passed' && current.active && grant.current?.id === approved.id
+        && !controller.signal.aborted && !approved.controller.signal.aborted
+        && current.project === work.project && current.drafts === work.drafts && current.main === work.main) {
+        await current.onAction(id, { kind: 'apply', run, edits: proposal.edits, automatic: true,
+          signal: AbortSignal.any([controller.signal, approved.controller.signal]) })
+      }
+    } catch (cause) {
+      if (!controller.signal.aborted) {
+        const detail = cause instanceof Error ? cause.message : 'Could not verify the repair.'
+        setError(detail)
+        await work.onTaskStep(id, { kind: 'blocked', detail }).catch(() => {})
+      }
+    } finally {
+      if (!recorded && controller.signal.aborted) await work.onTaskStep(id, { kind: 'cancelled' }).catch(() => {})
+      localOperation.current = null
+      setRepairBuild(false)
+      setMutating(false)
+    }
+  }
   const input = useMemo(() => ({ project: props.project, working: props.working, drafts: props.drafts, main: props.main ?? '' }),
     [props.project, props.working, props.drafts, props.main])
   const [baseline, setBaseline] = useState<{ input: typeof input; raw: string; working: string }>()
@@ -265,8 +376,8 @@ function Conversation(props: WorkbenchProps & {
     return () => { active = false }
   }, [input])
   useEffect(() => {
-    if (!props.active) grant.current = null
     return () => {
+      grant.current?.controller.abort()
       grant.current = null
       pending.current = null
       localOperation.current?.abort()
@@ -282,15 +393,30 @@ function Conversation(props: WorkbenchProps & {
   async function mutate(id: string, action: ChatAction) {
     setError('')
     setMutating(true)
+    if (runs.current[id]?.manuscriptId && (action.kind === 'reject' || action.kind === 'undo')) setRunningManuscript(false)
     try { await latest.current.onAction(id, action) }
-    catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not change the source.') }
+    catch (cause) {
+      if (runs.current[id]?.manuscriptId) setRunningManuscript(false)
+      setError(cause instanceof Error ? cause.message : 'Could not change the source.')
+    }
     finally { setMutating(false) }
   }
 
-  function updateScope(path: string, checked: boolean) {
+  function revokePermission() {
+    grant.current?.controller.abort()
     grant.current = null
-    setGranted(false)
-    setApproval('manual')
+    setPermission(undefined)
+  }
+
+  function approvePermission(access: DraftAccess) {
+    if (!latest.current.active) return
+    revokePermission()
+    grant.current = { id: crypto.randomUUID(), access, controller: new AbortController() }
+    setPermission(access)
+  }
+
+  function updateScope(path: string, checked: boolean) {
+    revokePermission()
     setScope(checked ? [...targets, path] : targets.filter(item => item !== path))
   }
 
@@ -377,6 +503,12 @@ function Conversation(props: WorkbenchProps & {
         localMessage('Review the submission preflight and ZIP manifest.', { submission: result.data })
         return
       }
+      case 'review':
+        if (!taskProgress?.active.length || taskProgress.pending || runningManuscript
+          || !manuscript || props.checkpoints[manuscript.id] === 'saved') {
+          setError('Apply or resolve the task batches before opening manuscript review.')
+        } else setReviewManuscript(true)
+        return
       case 'reply': {
         const [number, round, revised] = argument.split('|').map(value => value.trim())
         const result = replyChatSchema.safeParse({ comment: Number(number), round: round || undefined, revised: revised || undefined })
@@ -408,23 +540,47 @@ function Conversation(props: WorkbenchProps & {
         finally { setMutating(false) }
         return
       }
-      default: setError('Available commands: /layout, /submission, /newround, /comment, /revisions, /reply, /letter.')
+      default: setError('Available commands: /layout, /review, /submission, /newround, /comment, /revisions, /reply, /letter.')
     }
   }
 
-  function submit(value: string, repair?: { report: ChatVerification; proposal: NonNullable<ReturnType<typeof editProposal>> }) {
+  async function resolveRevisionSetup(message: WritingChatMessage) {
+    const request = revisionSetupRequest(message)
+    if (!request) return
+    let metadata: Pick<NonNullable<WritingChatMessage['metadata']>, 'revisionSetup' | 'actionError'>
+    try {
+      const setup = await prepareChatRevisionSetup(props.storage, props.projectKey, request.action, request.args)
+      if (setup.kind === 'comment' && editableSource(latest.current.project, setup.path) === undefined) {
+        throw new Error('Choose the exact path of an editable LaTeX source.')
+      }
+      metadata = { revisionSetup: setup, actionError: undefined }
+    } catch (cause) {
+      metadata = { actionError: (cause instanceof Error ? cause.message : 'Could not check the revision target.').slice(0, 1000) }
+    }
+    setMessages(previous => previous.map(item => item.id === message.id && item.metadata
+      ? { ...item, metadata: { ...item.metadata, ...metadata } } : item))
+  }
+
+  function submit(value: string, repair?: { id: string; report: ChatVerification; proposal?: NonNullable<ReturnType<typeof editProposal>>;
+    reverify?: boolean; manuscriptTask?: boolean },
+    approvedScope?: string[], taskMode?: 'plan' | 'batch') {
     const text = value.trim()
-    if (!text || streaming || props.disabled || mutating) return
+    if (!text || streaming || props.disabled || mutating || !props.active) return false
     setError('')
     atBottom.current = true
     const command = /^\/([a-z]+)(?:\s+([\s\S]*))?$/i.exec(text)
     const layout = /^(?:把\s*AI\s*面板切到|AI\s*面板切到)\s*(同层|浮层|上层)[。！]?$/i.exec(text)
+    const reviewRequest = /^(?:(?:please\s+)?(?:review|verify|save) (?:the )?manuscript task|(?:审阅|验证|保存)(?:当前)?(?:论文|写作)任务)[.。!！]?$/i.test(text)
     if (command) {
       void runLocalCommand(command[1].toLowerCase(), command[2]?.trim() ?? '')
       return
     }
     if (layout) {
       void runLocalCommand('layout', layout[1] === '同层' ? 'docked' : 'floating')
+      return
+    }
+    if (reviewRequest) {
+      void runLocalCommand('review', '')
       return
     }
     const current = props.working.files.get(props.selected)
@@ -440,26 +596,30 @@ function Conversation(props: WorkbenchProps & {
     setError('')
     setStopped(false)
     const id = crypto.randomUUID()
+    const access = grant.current?.access
+    const requested = approvedScope ?? scope ?? (taskMode !== 'plan' && Array.isArray(access) ? access : undefined)
     const context = buildChapterContext(props.working, primary, props.main, [
-      ...targets, ...files.filter(path => text.includes(path) || text.includes(path.split('/').at(-1)!)),
+      ...(requested ?? targets), ...files.filter(path => text.includes(path) || text.includes(path.split('/').at(-1)!)),
     ])
     const completeFiles = new Set([primary, ...context.filter(entry => !entry.truncated).map(entry => entry.path)])
-    const automaticScope = workflow === 'auto' && !scope && !grant.current
-    const editPaths = (automaticScope ? files : targets).filter(path => completeFiles.has(path))
+    const turnWorkflow = taskMode || repair?.reverify || repair?.manuscriptTask ? 'auto' : workflow
+    const automaticScope = !requested && (turnWorkflow === 'auto' || access === 'all')
+    const editPaths = (requested ?? (automaticScope ? files : targets)).filter(path => files.includes(path) && completeFiles.has(path))
     const sources = Object.fromEntries(editPaths.flatMap(path => {
       const saved = editableSource(props.project, path)
       return saved === undefined ? [] : [[path, { saved, draft: props.drafts[path] }] as const]
     }))
-    runs.current = { ...runs.current, [id]: { main: props.project.metadata.mainFile, pathRevision: props.sourceMoves?.length, sources } }
-    setRunSnapshots(runs.current)
-    const authorized = grant.current && targets.length && targets.every(path => grant.current?.paths.includes(path))
-    pending.current = { id, grant: grant.current?.id, mode: authorized ? approval : 'manual' }
+    const task = manuscriptRef.current
+    const manuscriptId = taskMode === 'batch' || repair?.manuscriptTask ? task?.id : repair ? runs.current[repair.id]?.manuscriptId : undefined
+    pending.current = { id, grant: repair?.manuscriptTask ? undefined : grant.current?.id, manuscriptId }
     const source: ChapterEditRequest = { mode: 'rewrite', path: primary, main: props.main, source: file.content,
       instruction: '', compiler: props.compiler, context }
     setPrompt('')
-    const selection = repair ? undefined : props.selection()
-    const resultMessage = [...messages].reverse().find(message => message.role === 'assistant' && message.metadata
+    const resultTime = (message: WritingChatMessage) => props.tasks[message.metadata!.run]?.findLast(step =>
+      step.kind === 'passed' || step.kind === 'failed')?.at ?? 0
+    const resultMessage = [...messages].reverse().filter(message => message.role === 'assistant' && message.metadata
       && (message.metadata.feedback || props.verifications[message.metadata.run]))
+      .sort((left, right) => resultTime(right) - resultTime(left))[0]
     const resultId = resultMessage?.metadata?.run
     const report = repair?.report ?? (resultId ? props.verifications[resultId] : undefined)
     const previousProposal = resultMessage && editProposal(resultMessage)
@@ -468,12 +628,85 @@ function Conversation(props: WorkbenchProps & {
     const feedback = report ? { status: report.status, message: (report.message + receipt).slice(0, 1000),
       diagnostics: report.diagnostics.slice(0, 40).map(issue => ({ ...issue, message: issue.message.slice(0, 500) })),
       log: report.log.slice(-4000) } : resultMessage?.metadata?.feedback
-    const failedProposal = repair?.proposal ?? (previousProposal && report?.status === 'failed' && !checkpoint
+    const failedProposal = (repair?.report.working ? undefined : repair?.proposal) ?? (!repair && previousProposal && report?.status === 'failed' && !checkpoint
+      && baseline?.input === input && baseline.raw === report.baseline && report.main === input.main
       ? { summary: previousProposal.summary, edits: report.selected.map(index => previousProposal.edits[index]).filter(Boolean) }
       : undefined)
+    const previousRun = repair?.id ?? (failedProposal && /repair|fix|error|修复|修正|报错/i.test(text) ? resultId : undefined)
+    const revisionOf = previousRun && (runs.current[previousRun]?.revisionOf ?? previousRun)
+    runs.current = { ...runs.current, [id]: { main: props.project.metadata.mainFile, pathRevision: props.sourceMoves?.length, sources, revisionOf,
+      manuscriptId, replacesBatch: repair && !repair.manuscriptTask && manuscriptId && !props.checkpoints[repair.id] ? repair.id : undefined,
+      verifyRepair: repair?.reverify } }
+    setRunSnapshots(runs.current)
+    const selection = revisionOf || taskMode ? undefined : props.selection()
+    const repairFiles = failedProposal ? [...new Set(failedProposal.edits.map(edit => edit.path))] : editPaths
+    const taskContext: ManuscriptContext | undefined = taskMode === 'plan' ? { mode: 'plan', goal: text, files: editPaths }
+      : repair?.reverify || previousRun ? { mode: 'repair', goal: task?.goal ?? text, files: repairFiles, decisions: task?.decisions, questions: task?.questions }
+      : task ? { mode: taskMode === 'batch' ? 'batch' : 'context', goal: task.goal, files: taskMode === 'batch' ? editPaths : task.files,
+        completed: [...manuscriptProgress(task, props.checkpoints, props.tasks).done], decisions: task.decisions, questions: task.questions } : undefined
+    const workspaceActivity = messages.flatMap(message => {
+      if (message.role !== 'assistant' || !message.metadata?.run) return []
+      const step = props.tasks[message.metadata.run]?.findLast(item => receiptKinds.has(item.kind))
+      return step ? [step] : []
+    }).sort((left, right) => left.at - right.at).slice(-12).map(step => ({
+      action: step.kind, paths: step.paths?.slice(0, 6), detail: step.detail?.slice(0, 300),
+    }))
     void sendMessage({ text, metadata: { run: id, selection } }, {
-      body: { run: id, workflow, scope: editPaths, source, selection, feedback, previousProposal: failedProposal },
+      body: { run: id, workflow: turnWorkflow, scope: editPaths, source, selection, feedback, previousProposal: failedProposal,
+        workspaceActivity, draftPermission: access, manuscript: taskContext, attachments: buildAttachmentContext(props.working, text) },
     })
+    return true
+  }
+
+  const runNextBatch = useEffectEvent(() => {
+    const task = manuscriptRef.current
+    if (!task || !props.active || props.disabled || streaming || mutating || pending.current) return
+    const progress = manuscriptProgress(task, props.checkpoints, props.tasks)
+    if (progress.pending) return
+    if (!progress.remaining.length) { setRunningManuscript(false); return }
+    if (task.batches.length >= 120 || progress.remaining.some(path => !files.includes(path))) {
+      setRunningManuscript(false)
+      setError('The task reached its batch limit or a remaining file changed. Review the remaining file list.')
+      return
+    }
+    const batch = progress.remaining.slice(0, 3)
+    if (!submit(`Continue the manuscript task with this batch. Read and edit only: ${batch.join(', ')}.`, undefined, batch, 'batch')) {
+      setRunningManuscript(false)
+    }
+  })
+
+  useEffect(() => {
+    if (runningManuscript) runNextBatch()
+  }, [runningManuscript, manuscript, props.checkpoints, props.tasks, props.working, props.disabled, props.active, streaming, mutating])
+
+  function pauseManuscript() {
+    setRunningManuscript(false)
+    if (pending.current?.manuscriptId) { pending.current = null; void stop() }
+    if (repairBuild) localOperation.current?.abort()
+  }
+
+  async function undoManuscript() {
+    if (!undoBatches || mutating) return
+    setUndoError('')
+    setMutating(true)
+    try {
+      await props.onUndoBatches(undoBatches)
+      setUndoBatches(undefined)
+    } catch (cause) {
+      setUndoError(cause instanceof Error ? cause.message : 'Could not undo the task batches.')
+    } finally { setMutating(false) }
+  }
+
+  async function undoManuscriptSave() {
+    if (!manuscript || mutating) return
+    setUndoError('')
+    setMutating(true)
+    try {
+      await props.onAction(manuscript.id, { kind: 'undo' })
+      setUndoSave(false)
+    } catch (cause) {
+      setUndoError(cause instanceof Error ? cause.message : 'Could not undo the manuscript save.')
+    } finally { setMutating(false) }
   }
 
   async function saveReply(id: string, reply: NonNullable<ChatRun['reply']>, draft: string) {
@@ -511,6 +744,38 @@ function Conversation(props: WorkbenchProps & {
       <Button size="sm" variant="ghost" disabled={streaming || mutating} onClick={props.onNew}>New</Button>
       <Button size="sm" variant="ghost" disabled={streaming || mutating} onClick={() => setDeleteOpen(true)}>Delete</Button>
     </div>
+    {manuscript && <ManuscriptTaskCard task={manuscript} states={props.checkpoints} receipts={props.tasks} messages={messages}
+        running={runningManuscript} busy={streaming || mutating || props.disabled || !props.active}
+        onRun={() => setRunningManuscript(true)} onPause={pauseManuscript}
+        onNotes={(field, notes) => updateManuscript({ ...manuscriptRef.current!, [field]: notes })}
+        onReview={() => setReviewManuscript(true)}
+        onUndoSave={() => { setUndoError(''); setUndoSave(true) }}
+        onUndo={ids => { setUndoBatches(ids); setUndoError('') }} />}
+    {manuscript && taskProgress && reviewManuscript && props.active && <ManuscriptReviewDialog
+      storage={props.storage} projectKey={props.projectKey} runs={taskProgress.active} project={props.project}
+      working={props.working} drafts={props.drafts} baseline={baseline?.input === input ? baseline.raw : undefined}
+      report={props.verifications[manuscript.id]} disabled={props.disabled || streaming || mutating}
+      generatedEntry={props.saved !== props.project}
+      onVerify={report => props.onVerification(manuscript.id, report, true)}
+      onSave={report => props.onSaveManuscript(manuscript.id, taskProgress.active, report)}
+      onClose={() => setReviewManuscript(false)}
+      onLocate={(path, line) => { setReviewManuscript(false); props.onLocate(path, line) }}
+      onRepair={(paths, report) => {
+        if (submit('Repair the errors in the manuscript verification report. Edit only the affected files and keep the existing manuscript changes.', {
+          id: manuscript.id, report, manuscriptTask: true,
+        }, paths)) setReviewManuscript(false)
+      }} />}
+    <Dialog open={undoSave} onOpenChange={open => { if (!mutating) setUndoSave(open) }}>
+      <DialogContent>
+        <DialogTitle>Undo manuscript save?</DialogTitle>
+        <DialogDescription>Restore the saved project sources and return the task files to their pre-save drafts.</DialogDescription>
+        {undoError && <p role="alert" className="text-sm text-red-800">{undoError}</p>}
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" disabled={mutating} onClick={() => setUndoSave(false)}>Cancel</Button>
+          <Button disabled={mutating || props.disabled} onClick={() => void undoManuscriptSave()}>Undo manuscript save</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
     <div ref={scroll} className="min-h-0 flex-1 space-y-3 overflow-auto px-3 py-2" onScroll={event => {
       const element = event.currentTarget
       atBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight < 48
@@ -524,20 +789,52 @@ function Conversation(props: WorkbenchProps & {
           && 'output' in part && part.output && typeof part.output === 'object' && 'requested' in part.output
           && part.output.requested === true)
         const submission = message.metadata?.submission ?? toolResult(message, 'tool-prepare_submission', submissionChatSchema)
+        const editPermission = toolResult(message, 'tool-request_edit_permission', editPermissionRequestSchema)
         const replyRequest = toolResult(message, 'tool-request_reviewer_reply', replyChatSchema)
         const reply = run?.reply && toolResult(message, 'tool-propose_reply', revisionDraftSchema)
         const steps = runId ? props.tasks[runId] : undefined
+        const permissionDecision = steps?.find(step => step.kind === 'permission-granted' || step.kind === 'permission-denied')
         const archived = steps?.find(step => step.kind === 'archived')?.detail
         const replySaved = steps?.some(step => step.kind === 'reply-saved')
         const setup = message.metadata?.revisionSetup
         const setupSaved = steps?.some(step => step.kind === 'revision-created' || step.kind === 'comment-added')
         const feedback = message.metadata?.feedback
         const letter = letters[message.id]
-        return <article key={message.id} aria-label={message.role === 'user' ? 'You' : 'Assistant'}
+        const original = run?.revisionOf && messages.find(item => item.role === 'assistant' && item.metadata?.run === run.revisionOf)
+        const revisions = runId && messages.filter(item => item.role === 'assistant' && item.metadata && runSnapshots[item.metadata.run]?.revisionOf === runId && editProposal(item))
+        return <article key={message.id} id={`writing-ai-message-${message.id}`} aria-label={message.role === 'user' ? 'You' : 'Assistant'}
           className={message.role === 'user' ? 'rounded-md bg-indigo-50 px-2 py-1.5' : 'space-y-2'}>
           <p className="mb-1 text-xs font-semibold">{message.role === 'user' ? 'You' : 'Assistant'}</p>
           <ChatToolProgress message={message} />
           <ChatMessageText text={chatText(message)} />
+          {runId && editPermission && <section aria-label="Draft permission request" className="space-y-2 rounded border border-indigo-200 p-2 text-xs">
+            <h3 className="font-semibold">AI requests permission to edit working drafts</h3>
+            <p className="break-words">{editPermission.reason}</p>
+            <ul className="max-h-28 list-inside list-disc overflow-auto break-all font-mono">
+              {editPermission.paths.map(path => <li key={path}>{path}</li>)}
+            </ul>
+            {permissionDecision ? <p role="status">{permissionDecision.kind === 'permission-granted'
+              ? 'Approved for this session. See the current permission below.' : 'Request denied.'}</p>
+              : <div className="flex flex-wrap gap-1">
+                <Button size="sm" disabled={streaming || mutating || !props.active || props.disabled || editPermission.paths.some(path => !files.includes(path))}
+                  onClick={() => {
+                    const original = messages.find(item => item.role === 'user' && item.metadata?.run === runId)
+                    approvePermission(editPermission.paths)
+                    setScope(undefined)
+                    void props.onTaskStep(runId, { kind: 'permission-granted', paths: editPermission.paths })
+                      .catch(() => setError('Could not record the permission decision.'))
+                    if (original) {
+                      const batch = run?.manuscriptId === manuscriptRef.current?.id && Boolean(run?.manuscriptId)
+                      if (batch) setRunningManuscript(true)
+                      submit(chatText(original), undefined, editPermission.paths, batch ? 'batch' : undefined)
+                    }
+                  }}>Approve and continue</Button>
+                <Button variant="outline" size="sm" disabled={streaming || mutating} onClick={() => void props.onTaskStep(runId,
+                  { kind: 'permission-denied', paths: editPermission.paths }).catch(() => setError('Could not record the permission decision.'))}>
+                  Deny request
+                </Button>
+              </div>}
+          </section>}
           {message.role === 'user' && message.metadata?.selection && <p className="break-all text-xs text-slate-600">
             {message.metadata.selection.path} · Lines {message.metadata.selection.start}–{message.metadata.selection.end}
           </p>}
@@ -564,6 +861,9 @@ function Conversation(props: WorkbenchProps & {
             onClick={() => void startReply(replyRequest, `Draft an evidence-based reply to comment ${replyRequest.comment}.`)}>
             Draft reply from archived changes
           </Button>}
+          {message.metadata?.actionError && <p role="alert" className="break-words text-xs text-amber-800">{message.metadata.actionError}</p>}
+          {!setup && !message.metadata?.actionError && !streaming && revisionSetupRequest(message) && <Button size="sm" variant="ghost"
+            onClick={() => void resolveRevisionSetup(message)}>Check revision details</Button>}
           {runId && setup && <section className="space-y-1 rounded border border-indigo-200 p-2 text-xs" aria-label="Revision setup">
             <h3 className="font-semibold">{setup.kind === 'round' ? setup.name : setup.roundName}</h3>
             {setup.kind === 'round' ? <p>Baseline · {setup.baseline}</p>
@@ -594,6 +894,9 @@ function Conversation(props: WorkbenchProps & {
           {runId && message.role === 'assistant' && message.metadata?.complete && !streaming && (proposal || message.metadata.evidence?.length || steps?.length) ? (
             <section aria-label="AI task record" className="space-y-2 rounded-md border border-indigo-200 bg-white p-2">
               <h3 className="text-xs font-semibold">AI task record</h3>
+              {original && <a className="text-xs text-indigo-700 underline" href={`#writing-ai-message-${original.id}`}>Original proposal and compiler result</a>}
+              {revisions && revisions.map((item, index) => <a key={item.id} className="block text-xs text-indigo-700 underline"
+                href={`#writing-ai-message-${item.id}`}>Revised proposal {index + 1}</a>)}
               {proposal && <p className="text-xs text-slate-600">
                 Proposed {proposal.edits.length} {proposal.edits.length === 1 ? 'change' : 'changes'} across {new Set(proposal.edits.map(edit => edit.path)).size} {new Set(proposal.edits.map(edit => edit.path)).size === 1 ? 'file' : 'files'}.
                 {!props.checkpoints[runId] && ' Awaiting a decision.'}
@@ -608,15 +911,22 @@ function Conversation(props: WorkbenchProps & {
               {proposal && run && runId && <Proposal proposal={proposal} run={run} state={props.checkpoints[runId]} project={props.working}
             disabled={props.disabled || mutating} onAction={action => mutate(runId, action)} active={props.active}
             input={input} baseline={baseline?.input === input ? baseline : undefined} verification={props.verifications[runId]}
+            appliedSelection={steps?.find(step => step.kind === 'draft')?.selection}
             onVerification={(report, record) => props.onVerification(runId, report, record)} onLocate={props.onLocate}
-            onUseDiagnostics={report => submit('Repair the selected changes in the previous proposal using the temporary compile diagnostics.',
-              { report, proposal: { summary: proposal.summary, edits: report.selected.map(index => proposal.edits[index]).filter(Boolean) } })}
+            onUseDiagnostics={(report, reverify) => {
+              const selected = report.selected.map(index => proposal.edits[index]).filter(Boolean)
+              submit(report.working ? 'Help repair the current working drafts using their latest verification diagnostics.'
+                : 'Repair the selected changes in the previous proposal using the temporary compile diagnostics.',
+              { id: runId, report, proposal: { summary: proposal.summary, edits: selected }, reverify },
+              reverify ? [...new Set(selected.map(edit => edit.path))] : undefined)
+            }}
             onTaskStep={step => props.onTaskStep(runId, step)} />}
             </section>
           ) : null}
         </article>
       })}
       {streaming && <p role="status" className="text-xs text-slate-600">{status === 'submitted' ? 'Sending request…' : 'Assistant is responding…'}</p>}
+      {repairBuild && <p role="status" className="text-xs text-slate-600">Verifying the repaired proposal…</p>}
       {mutating && !streaming && localOperation.current && <Button size="sm" variant="ghost"
         onClick={() => localOperation.current?.abort()}>Cancel local operation</Button>}
       {anyError && <p role="alert" className="text-xs text-red-800">{anyError}</p>}
@@ -636,11 +946,12 @@ function Conversation(props: WorkbenchProps & {
           <option value="revision">Reviewer reply…</option>
         </select>
         <details className="relative text-xs" title={targets.join(", ")}>
-          <summary className="cursor-pointer rounded border p-1">Scope · {workflow === 'auto' && !scope && !granted ? 'Automatic' : targets.length}</summary>
+          <summary className="cursor-pointer rounded border p-1">Scope · {!scope && Array.isArray(permission)
+            ? permission.length : !scope && (workflow === 'auto' || permission === 'all') ? 'Automatic' : targets.length}</summary>
           <div className="absolute bottom-full left-0 z-30 mb-1 max-h-36 w-56 max-w-[80vw] overflow-auto rounded border bg-white p-2 shadow">
             <p className="pb-1 text-slate-600">Limit proposals to these files. Automatic proposals show the actual files before approval.</p>
             {scope && <button type="button" className="underline" disabled={streaming} onClick={() => {
-              setScope(undefined); grant.current = null; setGranted(false); setApproval('manual')
+              setScope(undefined); revokePermission()
             }}>Reset scope</button>}
             {files.map(path => <label className="flex items-start gap-1 break-all py-1" key={path}>
               <Checkbox checked={targets.includes(path)} disabled={streaming || targets.length >= 6 && !targets.includes(path)}
@@ -648,38 +959,58 @@ function Conversation(props: WorkbenchProps & {
             </label>)}
           </div>
         </details>
-        <select aria-label="Approval mode" className="min-w-0 rounded border bg-white p-1 text-xs" value={props.active && granted ? approval : 'manual'}
+        <select aria-label="Approval mode" className="min-w-0 rounded border bg-white p-1 text-xs" value={permission === 'all' ? 'full' : permission ? 'draft' : 'manual'}
           onChange={event => {
-            const value = event.target.value as Approval
-            if (value === 'manual') { grant.current = null; setGranted(false); setApproval(value) }
-            else setConsent(value)
+            const value = event.target.value
+            if (value === 'manual') revokePermission()
+            else setConsent(value === 'full' ? 'all' : targets)
           }}>
           <option value="manual">Review first</option>
           <option value="draft" disabled={!targets.length}>Auto draft</option>
+          <option value="full" disabled={!files.length}>Full draft access</option>
         </select>
         {workflow === 'diagnostics' && <Button type="button" size="sm" variant="outline" disabled={props.disabled || streaming || mutating}
           onClick={() => { const id = localMessage('Preview compile requested.'); void compilePreview({ id, role: 'assistant', parts: [], metadata: { run: id } }) }}>Compile PDF</Button>}
         {streaming ? <Button className="ml-auto" type="button" size="sm" variant="outline" onClick={() => {
           pending.current = null
           setStopped(true)
+          setRunningManuscript(false)
           void stop()
         }}>Stop</Button> : <Button className="ml-auto" size="sm" type="submit" disabled={!prompt.trim() || props.disabled || mutating}>Send</Button>}
+        {!manuscript && !streaming && <Button size="sm" variant="outline" type="button" disabled={!prompt.trim() || props.disabled || mutating}
+          onClick={() => submit(prompt, undefined, undefined, 'plan')}>Plan writing task</Button>}
       </div>
+      {permission && <div className="flex items-center justify-between gap-2 rounded border border-indigo-200 px-2 text-xs">
+        <span role="status" className="min-w-0 break-words">{permission === 'all' ? 'Full draft access · This project and conversation'
+          : `Automatic edits · ${permission.length} approved ${permission.length === 1 ? 'file' : 'files'}`}</span>
+        <Button type="button" size="sm" variant="ghost" onClick={revokePermission}>Revoke access</Button>
+      </div>}
     </form>
-    <Dialog open={consent !== null} onOpenChange={open => { if (!open) setConsent(null) }}>
+    <Dialog open={Boolean(undoBatches)} onOpenChange={open => { if (!open && !mutating) setUndoBatches(undefined) }}>
       <DialogContent>
-        <DialogTitle>Allow automatic local drafts?</DialogTitle>
-        <DialogDescription>Applies to these files in this conversation until you change scope, switch conversations, leave Writing, or reload.</DialogDescription>
-        <ul className="max-h-48 list-inside list-disc overflow-auto break-all text-sm">{targets.map(path => <li key={path}>{path}</li>)}</ul>
+        <DialogTitle>Undo {undoBatches?.length === 1 ? 'this batch' : 'task batches'}?</DialogTitle>
+        <DialogDescription>Restores the files and drafts from before the selected batches, newest first. If a later edit conflicts, the entire undo stops.</DialogDescription>
+        {undoError && <p role="alert" className="break-words text-sm text-red-800">{undoError}</p>}
         <div className="flex justify-end gap-2">
-          <Button variant="outline" onClick={() => setConsent(null)}>Cancel</Button>
-          <Button disabled={!consent || !targets.length} onClick={() => {
+          <Button variant="outline" disabled={mutating} onClick={() => setUndoBatches(undefined)}>Cancel</Button>
+          <Button disabled={mutating || props.disabled} onClick={() => void undoManuscript()}>Confirm undo</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+    <Dialog open={consent !== undefined} onOpenChange={open => { if (!open) setConsent(undefined) }}>
+      <DialogContent>
+        <DialogTitle>{consent === 'all' ? 'Grant full draft access?' : 'Allow automatic local drafts?'}</DialogTitle>
+        <DialogDescription>AI can edit {consent === 'all' ? 'all editable LaTeX drafts in this project' : 'the listed working drafts'} in this conversation.
+          Saving to project files and archiving still require your confirmation. Access ends when revoked, on a scope change, when leaving Writing or changing conversations, or on reload.</DialogDescription>
+        {Array.isArray(consent) && <ul className="max-h-48 list-inside list-disc overflow-auto break-all text-sm">{consent.map(path => <li key={path}>{path}</li>)}</ul>}
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" onClick={() => setConsent(undefined)}>Cancel</Button>
+          <Button disabled={!consent || (Array.isArray(consent) && !consent.length)} onClick={() => {
             if (!consent) return
-            grant.current = { id: crypto.randomUUID(), mode: consent, paths: targets }
-            setGranted(true)
-            setApproval(consent)
-            setConsent(null)
-          }}>Approve this scope</Button>
+            if (consent === 'all') setScope(undefined)
+            approvePermission(consent)
+            setConsent(undefined)
+          }}>{consent === 'all' ? 'Grant full draft access' : 'Approve this scope'}</Button>
         </div>
       </DialogContent>
     </Dialog>
@@ -712,6 +1043,7 @@ const taskLabels: Record<ChatTaskStep['kind'], string> = {
   undone: 'Changes undone', rejected: 'Proposal rejected',
   'preview-compile': 'Preview compile approved', archived: 'Submission archived', 'reply-saved': 'Reviewer reply saved',
   'revision-created': 'Revision round created', 'comment-added': 'Reviewer comment added',
+  'permission-granted': 'Draft access approved', 'permission-denied': 'Draft access denied',
 }
 
 function TaskTimeline({ steps }: { steps?: ChatTaskStep[] }) {
@@ -756,17 +1088,18 @@ function EvidenceList({ evidence, project, moves, revision, onLocate, onRefresh 
   </details>
 }
 
-function Proposal({ proposal, run, state, disabled, onAction, project, input, verification, baseline, active, onVerification, onLocate, onUseDiagnostics, onTaskStep }: {
+function Proposal({ proposal, run, state, disabled, onAction, project, input, verification, baseline, active, appliedSelection, onVerification, onLocate, onUseDiagnostics, onTaskStep }: {
   proposal: NonNullable<ReturnType<typeof editProposal>>; run: ChatRun; state?: ChatCheckpoint['state']
   disabled: boolean; onAction: (action: ChatAction) => Promise<void>; project: ProjectFileSystem
   input: Pick<Parameters<typeof validateChatProposal>[0], 'project' | 'working' | 'drafts' | 'main'>
   verification?: ChatVerification; baseline?: { raw: string; working: string }; active: boolean
-  onUseDiagnostics: (report: ChatVerification) => void
+  appliedSelection?: number[]
+  onUseDiagnostics: (report: ChatVerification, reverify?: boolean) => void
   onVerification: (report: ChatVerification, record?: boolean) => Promise<void>
   onTaskStep: (step: Omit<ChatTaskStep, 'at'>) => Promise<void>
   onLocate: (path: string, line: number) => void
 }) {
-  const [checked, setChecked] = useState(() => new Set(verification?.currentSelection ?? verification?.selected ?? proposal.edits.map((_, index) => index)))
+  const [checked, setChecked] = useState(() => new Set(appliedSelection ?? verification?.currentSelection ?? verification?.selected ?? proposal.edits.map((_, index) => index)))
   const request = useRef<AbortController>(null)
   const current = useRef({ input, active })
   const [checking, setChecking] = useState(false)
@@ -795,9 +1128,13 @@ function Proposal({ proposal, run, state, disabled, onAction, project, input, ve
   const stale = verification && (verification.main !== input.main
     || verification.selected.join(',') !== selected.join(',') || (fingerprint !== undefined && verified !== fingerprint))
   const pendingBaseline = verification && !stale && baseline === undefined
+  const reuseVerification = !applied && verification?.status === 'passed' && !verification.working && !stale && !pendingBaseline
+  const dependencyFailure = verification?.status === 'failed' && !verification.diagnostics.some(issue => issue.severity === 'error')
+    && /could not load a font|physical.*font for PDF output|missing bundle|Tectonic executable not found|enable Tectonic|timed out|Another compile is in progress/i.test(
+      verification.message + '\n' + verification.log)
 
   async function verify(save: boolean) {
-    if (request.current || !input.main || !changes.length) return
+    if (request.current || !input.main || !changes.length || (save && applied)) return
     const controller = new AbortController()
     request.current = controller
     const { signal } = controller
@@ -807,9 +1144,10 @@ function Proposal({ proposal, run, state, disabled, onAction, project, input, ve
     try {
       await onTaskStep({ kind: save ? 'authorize-save' : 'verify', selected: selected.length, selection: selected,
         paths: [...new Set(changes.map(edit => edit.path))] })
-      const report = await validateChatProposal({ ...input, run, edits: changes, selected, signal })
+      const reusable = save && reuseVerification
+      const report = reusable ? verification : await validateChatProposal({ ...input, run, edits: changes, selected, signal, verifyWorking: applied })
       if (signal.aborted) return
-      await onVerification(report, true)
+      if (!reusable) await onVerification(report, true)
       recorded = true
       if (save && report.status === 'passed' && !signal.aborted && current.current.active) {
         const latest = current.current.input
@@ -818,7 +1156,7 @@ function Proposal({ proposal, run, state, disabled, onAction, project, input, ve
         }
         if (current.current.input !== latest) throw new Error('The source changed during verification. Verify the selected changes again.')
         if (!signal.aborted && current.current.active) {
-          await onAction({ kind: 'apply-save', run, edits: changes, signal })
+          await onAction({ kind: 'apply-save', run, edits: changes, signal, selection: selected })
         }
       }
     } catch (cause) {
@@ -845,7 +1183,14 @@ function Proposal({ proposal, run, state, disabled, onAction, project, input, ve
     <p className="break-words text-xs">{proposal.summary}</p>
     {state ? <div className="flex flex-wrap items-center gap-2">
       <span role="status" className="text-xs">{state === 'draft' ? 'Applied to local drafts' : state === 'saved' ? 'Saved to project' : state === 'undone' ? 'Undone' : 'Rejected'}</span>
-      {state === 'draft' && <Button size="sm" variant="outline" disabled={disabled} onClick={() => onAction({ kind: 'save' })}>Save to project</Button>}
+      {state === 'draft' && <p className="w-full text-xs text-slate-600">These working drafts are kept in this browser. Project save and PDF verification are separate actions.</p>}
+      {applied && [...after.keys()].map(path => <Button key={path} size="sm" variant="ghost" className="h-auto max-w-full whitespace-normal break-all"
+        onClick={() => setPreview(path)}>Review AI diff · {path}</Button>)}
+      {applied && <Button size="sm" variant="outline" disabled={disabled || checking || !input.main}
+        onClick={() => void verify(false)}>Verify working drafts</Button>}
+      {state === 'draft' && <Button size="sm" variant="outline" disabled={disabled || checking} onClick={() => onAction({ kind: 'save' })}>
+        {verification?.status === 'passed' && !stale && !pendingBaseline ? 'Save to project' : 'Save to project without verification'}
+      </Button>}
       {(state === 'draft' || state === 'saved') && <Button size="sm" variant="ghost" disabled={disabled} onClick={() => onAction({ kind: 'undo' })}>Undo AI changes</Button>}
     </div> : <>
       <div className="flex gap-1">
@@ -868,17 +1213,17 @@ function Proposal({ proposal, run, state, disabled, onAction, project, input, ve
       </div>)}
       {unknown.size > 0 && <p role="status" className="break-words text-xs text-amber-800">New unknown citations: {[...unknown].join(', ')}</p>}
       <div className="flex flex-wrap gap-1">
+        <Button size="sm" disabled={disabled || checking || !valid || !checked.size}
+          onClick={() => void onAction({ kind: 'apply', run, edits: changes, selection: selected })}>Apply to drafts</Button>
         <Button size="sm" variant="outline" disabled={disabled || checking || !valid || !checked.size || !input.main}
           onClick={() => void verify(false)}>Verify selected changes</Button>
-        <Button size="sm" disabled={disabled || checking || !valid || !checked.size || !input.main}
-          onClick={() => void verify(true)}>Save if verification passes</Button>
-        <Button size="sm" variant="outline" disabled={disabled || checking || !valid || !checked.size}
-          onClick={() => void onAction({ kind: 'apply', run, edits: changes, selection: selected })}>Apply to drafts</Button>
+        <Button size="sm" variant="outline" disabled={disabled || checking || !valid || !checked.size || !input.main}
+          onClick={() => void verify(true)}>{reuseVerification ? 'Save verified changes' : 'Save if verification passes'}</Button>
         <Button size="sm" variant="ghost" disabled={disabled || checking} onClick={() => void onAction({ kind: 'reject' })}>Reject proposal</Button>
       </div>
     </>}
     {checking && <div className="flex flex-wrap items-center gap-1">
-      <p className="text-xs" role="status">Compiling the temporary snapshot…</p>
+      <p className="text-xs" role="status">{reuseVerification ? 'Checking verified changes…' : applied ? 'Compiling working drafts…' : 'Compiling the temporary snapshot…'}</p>
       <Button size="sm" variant="ghost" onClick={() => request.current?.abort()}>Cancel verification</Button>
     </div>}
     {validationError && <p className="text-xs text-red-800" role="alert">{validationError}</p>}
@@ -887,7 +1232,7 @@ function Proposal({ proposal, run, state, disabled, onAction, project, input, ve
         {stale ? 'Verification is out of date.' : pendingBaseline ? 'Checking verification freshness…'
           : verification.status === 'passed' ? 'Verification passed.' : 'Verification failed.'} {!stale && !pendingBaseline && verification.message}
       </p>
-      <p className="break-all">Temporary snapshot · {verification.main} · {verification.selected.length} selected {verification.selected.length === 1 ? 'change' : 'changes'}</p>
+      <p className="break-all">{verification.working ? 'Working snapshot' : 'Temporary snapshot'} · {verification.main} · {verification.selected.length} selected {verification.selected.length === 1 ? 'change' : 'changes'}</p>
       {verification.diagnostics.map((issue, index) => <div key={index} className="break-words py-1">
         <p>{issue.severity === 'error' ? 'Error' : 'Warning'} · {issue.message}</p>
         {issue.sourceLine && !stale && !pendingBaseline
@@ -896,8 +1241,12 @@ function Proposal({ proposal, run, state, disabled, onAction, project, input, ve
             {issue.path}:{issue.line}
           </button> : <p className="break-all text-slate-600">{issue.path}:{issue.line}</p>}
       </div>)}
-      {verification.status === 'failed' && !stale && !pendingBaseline && <Button size="sm" variant="ghost"
-        onClick={() => onUseDiagnostics(verification)}>Use diagnostics in chat</Button>}
+      {verification.status === 'failed' && !stale && !pendingBaseline && (dependencyFailure
+        ? <p className="text-amber-800">Resolve the compiler or resource issue and verify the same sources again.</p>
+        : <div className="flex flex-wrap gap-1">
+          <Button size="sm" disabled={disabled || checking} onClick={() => onUseDiagnostics(verification, true)}>Repair and reverify</Button>
+          <Button size="sm" variant="ghost" disabled={disabled || checking} onClick={() => onUseDiagnostics(verification)}>Use diagnostics in chat</Button>
+        </div>)}
       {verification.log && <details><summary>Compiler log</summary><pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all">{verification.log}</pre></details>}
     </section>}
     <Dialog open={Boolean(previewText !== undefined)} onOpenChange={open => { if (!open) setPreview('') }}>
