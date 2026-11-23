@@ -158,10 +158,9 @@ Set `DEEPSEEK_API_KEY` on the local Next.js server to use the official DeepSeek 
 and `OPENAI_MODEL`. `OPENAI_BASE_URL` optionally points to a compatible Responses server.
 Keep the key on the server and run the workbench on loopback.
 
-Open **Writing AI** from the Writing tools bar. The panel sits on the right beside the
-editor and PDF on wide windows and opens as a right-side drawer on smaller windows.
-Use **Expand** to make it wider or close it to reclaim the full work area. Canvas node and
-connection details use the same controls.
+Open **Writing AI** from the project bar. Use **Dock panel** to place it beside the editor and
+PDF, then drag the separator to set its width. Use **Float panel** to overlay the right side.
+Switching layouts keeps the conversation and restores the last docked width.
 
 The assistant streams its replies and tool activity. The Chapter, Across files and Compiler
 problems workflows guide it through bounded source excerpts, project search, reference lookup,

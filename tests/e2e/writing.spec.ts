@@ -9,7 +9,7 @@ async function menu(page: Page, item: string) {
 }
 
 async function openAi(page: Page) {
-  await page.getByRole('button', { name: 'AI', exact: true }).click()
+  await page.getByRole('button', { name: 'Writing AI', exact: true }).click()
   await expect(page.getByRole('textbox', { name: 'Message Writing AI' })).toBeVisible()
 }
 
@@ -187,4 +187,45 @@ test('cancelling an approved verification revokes the pending save', async ({ pa
   await expect(task.getByRole('status').filter({ hasText: /^Saved to project$/ })).toHaveCount(0)
   await expect(await selectSource(page, 'methods.tex')).toContainText(testMethodLine)
   await expect(await selectSource(page, 'results.tex')).toContainText(testResultLine)
+})
+
+test('Writing AI has one entry and keeps its state when resized, floated, or docked', async ({ page }) => {
+  await page.goto(workspace)
+  const entry = page.getByRole('button', { name: 'Writing AI', exact: true })
+  await expect(entry).toHaveCount(1)
+  await openAi(page)
+  const ai = page.getByRole('complementary', { name: 'Writing AI' })
+  const composer = ai.getByRole('textbox', { name: 'Message Writing AI' })
+  const handle = page.getByRole('separator', { name: 'Resize Writing AI' })
+  const source = page.locator('#writing-work-area')
+  await composer.fill('Keep this message while switching layouts.')
+  await expect(handle).toBeVisible()
+  await expect.poll(async () => (await ai.boundingBox())?.width ?? 0).toBeGreaterThan(300)
+  const divider = (await handle.boundingBox())!
+  const previous = (await ai.boundingBox())!.width
+  await page.mouse.move(divider.x + divider.width / 2, divider.y + divider.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(divider.x - 96, divider.y + divider.height / 2, { steps: 8 })
+  await page.mouse.up()
+  await expect.poll(async () => (await ai.boundingBox())?.width ?? 0).toBeGreaterThan(previous + 50)
+  const resized = (await ai.boundingBox())!.width
+  await ai.getByRole('button', { name: 'Float panel' }).click()
+  await expect(handle).toBeHidden()
+  await expect.poll(async () => (await source.boundingBox())?.width ?? 0).toBeGreaterThan(1300)
+  await expect(composer).toHaveValue('Keep this message while switching layouts.')
+  await ai.getByRole('button', { name: 'Dock panel' }).click()
+  await expect(handle).toBeVisible()
+  await expect.poll(async () => Math.abs(((await ai.boundingBox())?.width ?? 0) - resized)).toBeLessThan(5)
+  await expect(composer).toHaveValue('Keep this message while switching layouts.')
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(entry).toHaveCount(1)
+  await expect(handle).toBeVisible()
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBe(390)
+  await ai.getByRole('button', { name: 'Float panel' }).click()
+  await expect(handle).toBeHidden()
+  await expect(ai.getByRole('button', { name: 'Dock panel' })).toBeVisible()
+  await composer.press('Escape')
+  await expect(ai).toBeHidden()
+  await expect(entry).toBeFocused()
 })

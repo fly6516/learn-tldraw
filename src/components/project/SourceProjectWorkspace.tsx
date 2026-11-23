@@ -10,7 +10,7 @@ import { RightToolPanel, useRightToolPanelWide } from '@/components/ui/right-too
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
-import type { ImperativePanelHandle } from 'react-resizable-panels'
+import type { ImperativePanelGroupHandle, ImperativePanelHandle } from 'react-resizable-panels'
 import { useProjectFileSystem } from '@/contexts/ProjectFileSystemContext'
 import { getFileTree, updateFileContent, type FileTreeNode } from '@/lib/project/file-system'
 import { exportSourceArchive } from '@/lib/project/source-archive'
@@ -221,7 +221,18 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     return () => { active = false }
   }, [storage, writingKey])
   const wideTools = useRightToolPanelWide()
-  const [aiExpanded, setAiExpanded] = useState(false)
+  const [aiPlacement, setAiPlacement] = useState<'docked' | 'floating'>()
+  const aiLayout = aiPlacement ?? (wideTools ? 'docked' : 'floating')
+  const aiDocked = aiOpen && aiLayout === 'docked'
+  const writingSplit = useRef<ImperativePanelGroupHandle>(null)
+  const aiWidth = useRef(30)
+  const aiTrigger = useRef<HTMLButtonElement>(null)
+  useLayoutEffect(() => {
+    const split = writingSplit.current
+    if (split?.getLayout().length !== 2) return
+    const width = aiDocked ? aiWidth.current : 0
+    split.setLayout([100 - width, width])
+  }, [aiDocked])
   const [reviewCursor, setReviewCursor] = useState<{ path: string; line: number }>()
   const [navigation, setNavigation] = useState<'files' | 'outline' | 'search'>('files')
   const [searchQuery, setSearchQuery] = useState('')
@@ -459,11 +470,11 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   function toggleChapterAi() {
     setAiOpen(!aiOpen)
     setMobileFiles(false)
-    if (!aiOpen && (!wideTools)) setPanel(null)
+    if (!aiOpen && aiLayout === 'floating' && !wideTools) setPanel(null)
   }
 
   function locateAiEvidence(path: string, line: number) {
-    if (!wideTools) setAiOpen(false)
+    if (aiLayout === 'floating') setAiOpen(false)
     openFile(path, line, undefined, true)
   }
 
@@ -711,7 +722,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
           setLog(failure.log ?? '')
           setDiagnostics(failure.diagnostics ?? [])
           setDiagnosticSnapshot(snapshot)
-          if (!wideTools) setAiOpen(false)
+          if (!aiDocked && !wideTools) setAiOpen(false)
           setPanel('problems')
         }
         return
@@ -823,6 +834,10 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         <Button size="sm" className="bg-indigo-700 text-white hover:bg-indigo-800" onClick={() => void compile()} disabled={!main || locked}>
           <Play /> {busy ? 'Compiling…' : 'Compile PDF'}
         </Button>
+        <Button ref={aiTrigger} size="sm" variant={aiOpen ? 'secondary' : 'outline'} aria-expanded={aiOpen} aria-controls="writing-ai"
+          aria-label="Writing AI" title="Writing AI" className="shrink-0 px-2 sm:px-3" onClick={toggleChapterAi}>
+          <Sparkles /><span className="hidden sm:inline">Writing AI</span>
+        </Button>
       </>, actions)}
       {conflicts.length > 0 && <div className="max-h-24 shrink-0 overflow-auto border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-sm text-amber-950">
         <p role="status" className="font-medium">Project source changed since these drafts were created. Compare before saving or compiling.</p>
@@ -835,18 +850,17 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       {saveError && <p role="alert" className="shrink-0 border-b bg-red-50 px-3 py-1.5 text-sm text-red-900">{saveError}</p>}
       <div className="flex shrink-0 items-center gap-2 border-b bg-white px-2 py-1.5 lg:hidden">
         <Button ref={fileToggle} size="sm" variant="outline" aria-expanded={mobileFiles} aria-controls="writing-files"
-          onClick={() => { if (!wideTools) setAiOpen(false); setMobileFiles(open => !open) }}><PanelLeft /> Files</Button>
+          onClick={() => { if (!aiDocked && !wideTools) setAiOpen(false); setMobileFiles(open => !open) }}><PanelLeft /> Files</Button>
         <div className="ml-auto flex gap-1 rounded-lg bg-slate-100 p-0.5" aria-label="Writing pane" role="group">
           {(['source', 'pdf'] as const).map(pane => <Button key={pane} size="sm"
             variant={narrowView === pane ? 'outline' : 'ghost'} aria-pressed={narrowView === pane}
-            onClick={() => { setNarrowView(pane); setMobileFiles(false); if (!wideTools) setAiOpen(false) }}>{pane === 'source' ? 'Source' : 'PDF'}</Button>)}
+            onClick={() => { setNarrowView(pane); setMobileFiles(false); if (!aiDocked && !wideTools) setAiOpen(false) }}>{pane === 'source' ? 'Source' : 'PDF'}</Button>)}
         </div>
-        <Button size="sm" variant={aiOpen ? 'secondary' : 'outline'} aria-expanded={aiOpen} aria-controls="writing-ai"
-          onClick={toggleChapterAi}><Sparkles /> Writing AI</Button>
       </div>
-      <div className="relative flex min-h-0 flex-1">
+      <ResizablePanelGroup ref={writingSplit} direction="horizontal" className="relative min-h-0 flex-1">
         {mobileFiles && <div className="absolute inset-0 z-10 bg-slate-900/25 lg:hidden" onClick={() => closeMobileFiles(true)} />}
-        <ResizablePanelGroup direction="horizontal" className="min-w-0 flex-1">
+        <ResizablePanel id="writing-work-area" order={1} minSize={52}>
+        <ResizablePanelGroup direction="horizontal" className="min-w-0">
           <ResizablePanel id="writing-navigation" order={1} ref={navPanel} defaultSize={19} minSize={13} maxSize={35} collapsible
             onCollapse={() => setDesktopFiles(false)} onExpand={() => setDesktopFiles(true)}
             className={mobileFiles
@@ -920,8 +934,6 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
               <div className="flex min-w-0 shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 border-b bg-white px-3 py-1.5 text-xs">
                 <h2 className="flex items-center gap-2 font-semibold"><FileText className="size-4 text-indigo-600" /> PDF Preview</h2>
                 {pdfUrl && <Button size="sm" variant="outline" asChild><a href={pdfUrl} download={pdfFilename}><Download /> Download PDF</a></Button>}
-                <Button size="sm" variant={aiOpen ? 'secondary' : 'outline'} aria-expanded={aiOpen} aria-controls="writing-ai"
-                  className="hidden lg:inline-flex" onClick={toggleChapterAi}><Sparkles /> Writing AI</Button>
               </div>
               {pdfUrl ? <>
                 <div className="shrink-0 border-b bg-white px-3 py-1.5 text-xs">
@@ -944,15 +956,23 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
             </section>
           </ResizablePanel>
         </ResizablePanelGroup>
-        <RightToolPanel id="writing-ai" title="Writing AI" open={aiOpen} expanded={aiExpanded}
-          onResize={() => setAiExpanded(value => !value)} onClose={() => setAiOpen(false)}
+        </ResizablePanel>
+        <ResizableHandle withHandle disabled={!aiDocked} aria-label="Resize Writing AI"
+          className={aiDocked ? 'z-10 bg-indigo-200 hover:bg-indigo-500' : 'hidden'} />
+        <ResizablePanel id="writing-ai-pane" order={2} defaultSize={0} minSize={22} maxSize={48} collapsible
+          onResize={size => { if (size >= 22) aiWidth.current = size }}
+          className={aiDocked ? 'min-w-0 border-l' : aiOpen ? 'absolute inset-y-0 right-0 z-30 w-[min(90%,26rem)] !flex-none border-l shadow-lg' : 'hidden'}>
+        <RightToolPanel id="writing-ai" title="Writing AI" open={aiOpen} layout={aiLayout}
+          onToggleLayout={() => setAiPlacement(aiLayout === 'docked' ? 'floating' : 'docked')}
+          onClose={() => { setAiOpen(false); aiTrigger.current?.focus() }}
           icon={<Sparkles className="size-4 shrink-0 text-indigo-600" />}>
           {storage && journal.key && <WritingAiWorkbench key={JSON.stringify(journal.key)} storage={storage} projectKey={journal.key}
             project={project} working={workingProject} drafts={drafts} selected={selected} main={main} active={active} sourceMoves={sourceMoves}
             disabled={locked || Boolean(conflicts.length)} compiler={aiCompiler} selection={aiSelection} onRevision={() => setRevision({})}
             onAction={applyChatAction} onLocate={locateAiEvidence} onCompile={() => void compile()} />}
         </RightToolPanel>
-      </div>
+        </ResizablePanel>
+      </ResizablePanelGroup>
 
       <section aria-label="Writing tools" className="flex min-h-0 max-h-[42%] shrink-0 flex-col border-t bg-white [@media(max-height:550px)]:max-h-[32%]">
         <div className="flex shrink-0 flex-wrap items-center gap-0.5 px-1.5 py-1 sm:gap-1 sm:px-2">
@@ -963,7 +983,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
             className="gap-1 px-1.5 text-xs sm:gap-1.5 sm:px-3 sm:text-sm" aria-expanded={panel === tab} aria-controls="writing-tools-content"
             onClick={() => {
               if (tab === 'review') setReviewCursor({ path: selected, line: editorRef.current?.getPosition()?.lineNumber ?? 1 })
-              if (!wideTools) setAiOpen(false)
+              if (!aiDocked && !wideTools) setAiOpen(false)
               setPanel(current => current === tab ? null : tab)
             }}>
             <Icon className="hidden sm:block" /> {label}
@@ -972,7 +992,6 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
               {problems.length || (error ? 'Failed' : 'Warnings')}
             </span>}
           </Button>)}
-          <Button size="sm" variant={aiOpen ? 'secondary' : 'ghost'} aria-expanded={aiOpen} aria-controls="writing-ai" onClick={toggleChapterAi} className="gap-1 px-1.5 text-xs sm:px-3 sm:text-sm"><Sparkles className="hidden sm:block" /> AI</Button>
           {panel && <Button size="icon-sm" variant="ghost" aria-label="Collapse writing tools" className="ml-auto"
             onClick={() => setPanel(null)}><X /></Button>}
         </div>
