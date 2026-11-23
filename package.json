@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "package:trial": "node scripts/package-trial.mjs",
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",

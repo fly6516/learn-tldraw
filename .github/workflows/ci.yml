@@ -56,7 +56,17 @@ jobs:
       - run: bun run build
       - run: bunx playwright install --with-deps chromium firefox
       - run: bun run test:e2e
-      - name: Verify the writing sample without a model provider
-        run: bun run test:e2e tests/e2e/writing-sample.spec.ts
+      - name: Verify the local trial without a model provider
+        run: |
+          bun run package:trial "$(command -v tectonic)"
+          bundle="$(find build -mindepth 1 -maxdepth 1 -type d -name 'research-canvas-*' -print -quit)"
+          "$bundle/start-research-canvas.sh" &
+          workbench=$!
+          trap 'kill "$workbench" 2>/dev/null || true' EXIT
+          curl --fail --silent --retry-all-errors --retry 15 --retry-delay 1 "$RESEARCH_TRIAL_E2E_URL/research" --output /dev/null
+          bun run test:e2e tests/e2e/workbench-setup.spec.ts tests/e2e/writing-sample.spec.ts
         env:
           RESEARCH_SAMPLE_NO_KEY: "1"
+          RESEARCH_TRIAL_E2E_URL: "http://127.0.0.1:3179"
+          RESEARCH_TRIAL_PORT: "3179"
+          RESEARCH_TRIAL_NO_BROWSER: "1"

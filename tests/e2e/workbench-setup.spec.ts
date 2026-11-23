@@ -13,6 +13,7 @@ test('shows actionable local setup status before a compile or model call', async
   expect((await request.post('/api/latex/status')).status()).toBe(403)
   await setup.getByRole('button', { name: 'Close', exact: true }).click()
   await page.getByRole('button', { name: 'Try a writing sample' }).click()
+  await expect(page.getByRole('heading', { name: 'Practice Paper', exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Workbench setup' }).click()
   await expect(setup.getByText('Local project storage ready')).toBeVisible()
 })

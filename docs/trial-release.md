@@ -24,3 +24,26 @@ Projects and drafts are stored by browser and site address. A backup is the tran
 format for a different browser or machine. The optional model runs through the local
 server and sends the shared context to the configured provider. For external builds,
 the author confirms that the returned PDF came from the displayed source ZIP.
+
+## Build a local trial bundle
+
+On the target OS and architecture, use Node.js 24, run `bun install --frozen-lockfile`
+in a clean checkout, then run:
+
+```sh
+bun run package:trial /path/to/tectonic /path/to/tectonic-notice
+```
+
+The build prints the folder created under `build/`. The bundle includes the Node
+and Tectonic executables for that platform and serves the workbench on loopback.
+Keep the notices from the original runtime distributions and distribute the whole
+folder with **START HERE.txt**. The application runs without Bun, developer tools
+or a model key on the recipient's machine. The first compile may fetch LaTeX resources.
+
+For a fresh participant, start the timer at extraction. Ask them to launch the
+workbench, start the sample, compile the first PDF and download a recovery backup.
+Record OS, browser, time to first PDF, steps requiring help and any compiler error.
+Use synthetic data for trial feedback.
+
+To test a running bundle, set `RESEARCH_TRIAL_E2E_URL` to its loopback origin and run
+`bun run test:e2e tests/e2e/workbench-setup.spec.ts tests/e2e/writing-sample.spec.ts`.
