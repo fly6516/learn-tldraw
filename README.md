@@ -1,9 +1,27 @@
 # Research Canvas
 
-Install dependencies with `bun install --frozen-lockfile` and start the app with `bun run dev`.
-Open http://localhost:3000 to choose a workspace.
+Research Canvas is a local workbench for mapping a paper, editing multi-file LaTeX,
+reviewing changes, and preparing a submission.
 
-See [Contributing](CONTRIBUTING.md) for CI checks and the key-free test workspace.
+## Quick start
+
+Use Node.js 24 and Bun 1.3.6, the versions used by CI.
+
+```sh
+bun install --frozen-lockfile
+bun run dev --hostname 127.0.0.1
+```
+
+Open [Research projects](http://127.0.0.1:3000/research). Import a LaTeX ZIP, or choose
+**Try a writing sample** to start with a small synthetic manuscript. **Workbench setup**
+shows the state of browser storage, Tectonic, and the configured model. To compile the
+sample, install Tectonic, set `LATEX_COMPILE_ENABLED=1` in `.env.local`, and restart.
+The sample's **Use example edits** runs without a model key.
+
+See [the trial release notes](docs/trial-release.md) for the acceptance checklist and
+[Contributing](CONTRIBUTING.md) for test commands.
+
+## Workflows
 
 - `/research` lists projects stored in the current browser. Create a project, import a LaTeX
   ZIP or Research Canvas backup, or open an existing project. Project links identify one
@@ -18,6 +36,8 @@ projects or move them to Trash. **Restore** returns either to the active list.
 Use **Add node** to create a card. **Select** moves nodes and box-selects them, **Pan** moves
 the viewport, and **Connect** links two cards in click order or by dragging from an outgoing
 handle. The toolbar offers **Undo**, **Redo**, **Delete selection**, and **Fit View**.
+In the Canvas page list, the trash button deletes a page and its cards after confirmation.
+Undo restores the page and its connections. Canvas keeps at least one page.
 Undo and redo apply to edits on the current canvas page, including moves, node edits, and
 connections. Use Ctrl/Cmd+Z or Ctrl/Cmd+Shift+Z when the canvas has focus. **Add Page** creates
 another graph in the project. Canvas exports use the selected page and its directed connections.
