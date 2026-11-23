@@ -32,7 +32,8 @@ import type { SourceProblem } from './MonacoSourceEditor'
 import type { CompileDiagnostic, CompileReport } from '@/lib/project/compile-diagnostics'
 import { findPdfRegion, type SyncRegion } from '@/lib/project/source-sync'
 import { applyWritingDrafts, draftConflicts, editableSource, sameDraft, type PortableWritingState, type WritingDrafts } from '@/lib/project/writing-drafts'
-import { clearWritingState, commitFileOperation, commitWritingDrafts, commitChatAction } from '@/lib/project/storage'
+import { clearWritingState, commitFileOperation, commitWritingDrafts, commitChatAction, readSourceMoves } from '@/lib/project/storage'
+import type { SourceMove } from '@/lib/project/writing-ai-evidence'
 import type { FileOperation } from '@/lib/project/file-refactor'
 import { FileOperationDialog, type FileOperationPlan } from './FileOperationDialog'
 import { SubmissionDialog } from './SubmissionDialog'
@@ -193,7 +194,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const [submissionCompilerIssues, setSubmissionCompilerIssues] = useState<SubmissionIssue[]>([])
   const [saveError, setSaveError] = useState('')
   const [fileOperation, setFileOperation] = useState<{ request: FileOperation; view?: PortableWritingState['view'] }>()
-  const [fileUndo, setFileUndo] = useState<{ before: ProjectFileSystem; writing: PortableWritingState; after: FileOperationPlan }>()
+  const [fileUndo, setFileUndo] = useState<{ before: ProjectFileSystem; writing: PortableWritingState; after: FileOperationPlan; move?: SourceMove }>()
   const [comparison, setComparison] = useState<string>()
   const [error, setError] = useState('')
   const [log, setLog] = useState('')
@@ -209,6 +210,16 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const [syncMessage, setSyncMessage] = useState('')
   const [panel, setPanel] = useState<'problems' | 'references' | 'cross-references' | 'review' | null>(null)
   const [aiOpen, setAiOpen] = useState(false)
+  const [sourceMoves, setSourceMoves] = useState<SourceMove[]>()
+  const writingKey = journal.key
+  useEffect(() => {
+    if (!storage || !writingKey) return
+    let active = true
+    void readSourceMoves(storage, writingKey).then(moves => {
+      if (active) setSourceMoves(current => current ?? moves)
+    }).catch(() => {})
+    return () => { active = false }
+  }, [storage, writingKey])
   const wideTools = useRightToolPanelWide()
   const [aiExpanded, setAiExpanded] = useState(false)
   const [reviewCursor, setReviewCursor] = useState<{ path: string; line: number }>()
@@ -499,7 +510,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     setFileOperation({ request, view: captureWritingState()?.view })
   }
 
-  async function writeFileOperation(before: ProjectFileSystem, after: ProjectFileSystem, writingState: PortableWritingState) {
+  async function writeFileOperation(before: ProjectFileSystem, after: ProjectFileSystem, writingState: PortableWritingState, move?: SourceMove) {
     if (locked || writeInProgress.current || !storage || !journal.key || journal.loadError) throw new Error('Writing storage is not ready.')
     writeInProgress.current = true
     setWriting(true)
@@ -508,7 +519,8 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       if (JSON.stringify(Object.entries(stored).sort()) !== JSON.stringify(Object.entries(drafts).sort())) {
         throw new Error('Some drafts are not synchronized with local storage.')
       }
-      await commitFileOperation(storage, journal.key, before, stored, after, writingState)
+      const moves = await commitFileOperation(storage, journal.key, before, stored, after, writingState, move)
+      if (moves) setSourceMoves(moves)
       acceptStoredProject(after)
       journal.acceptWritingState(writingState)
       setSelected(writingState.view?.path)
@@ -528,8 +540,9 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     const writingState = plan.project.files.get(destination)?.type === 'editable'
       ? { ...plan.writing, view: movedCurrent ? plan.writing.view : { path: destination, lineNumber: 1, column: 1 } }
       : plan.writing
-    await writeFileOperation(before, plan.project, writingState)
-    setFileUndo({ before, writing: prior, after: plan })
+    const move = fileOperation?.request.kind === 'move' ? { from: fileOperation.request.from, to: destination } : undefined
+    await writeFileOperation(before, plan.project, writingState, move)
+    setFileUndo({ before, writing: prior, after: plan, move })
   }
 
   async function undoFileOperation() {
@@ -551,7 +564,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         display: current.display, overviewViewport: current.overviewViewport,
         pages: before.canvas.pages.map(page => ({ ...page, viewport: current.pages.find(item => item.id === page.id)?.viewport ?? page.viewport })),
       } : before.canvas
-      await writeFileOperation(project, { ...before, canvas }, fileUndo.writing)
+      await writeFileOperation(project, { ...before, canvas }, fileUndo.writing, fileUndo.move && { from: fileUndo.move.to, to: fileUndo.move.from })
       setFileUndo(undefined)
     } catch (cause) {
       setSaveError(cause instanceof Error ? cause.message : 'Could not undo the file changes.')
@@ -933,8 +946,9 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         </ResizablePanelGroup>
         <RightToolPanel id="writing-ai" title="Writing AI" open={aiOpen} expanded={aiExpanded}
           onResize={() => setAiExpanded(value => !value)} onClose={() => setAiOpen(false)}
-          icon={<Sparkles className="size-4 shrink-0 text-indigo-600" />}>          {storage && journal.key && <WritingAiWorkbench key={JSON.stringify(journal.key)} storage={storage} projectKey={journal.key}
-            project={project} working={workingProject} drafts={drafts} selected={selected} main={main} active={active}
+          icon={<Sparkles className="size-4 shrink-0 text-indigo-600" />}>
+          {storage && journal.key && <WritingAiWorkbench key={JSON.stringify(journal.key)} storage={storage} projectKey={journal.key}
+            project={project} working={workingProject} drafts={drafts} selected={selected} main={main} active={active} sourceMoves={sourceMoves}
             disabled={locked || Boolean(conflicts.length)} compiler={aiCompiler} selection={aiSelection} onRevision={() => setRevision({})}
             onAction={applyChatAction} onLocate={locateAiEvidence} onCompile={() => void compile()} />}
         </RightToolPanel>

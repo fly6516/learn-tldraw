@@ -2,6 +2,7 @@ import type { UIMessage } from 'ai'
 import { z } from 'zod'
 import { chapterAnswerSchema, editRequestSchema, projectSuggestionSchema } from './ai-edit'
 import { revisionDraftRequestSchema } from './ai-revision'
+import type { EvidenceQuote } from './writing-ai-evidence'
 import type { WritingDraft } from './writing-drafts'
 
 export const writingWorkflows = {
@@ -30,11 +31,19 @@ export type WritingChatMessage = UIMessage<{
   complete?: boolean
   selection?: { path: string; start: number; end: number }
   workflow?: ChatWorkflow
-  evidence?: z.infer<typeof chapterAnswerSchema>['evidence']
+  evidence?: (z.infer<typeof chapterAnswerSchema>['evidence'][number] & { anchor?: EvidenceQuote })[]
   missing?: string[]
 }>
 export type ChatSource = { saved: string; draft?: WritingDraft }
-export type ChatRun = { main?: string; sources: Record<string, ChatSource> }
+export type ChatRun = { main?: string; pathRevision?: number; sources: Record<string, ChatSource> }
+export type ChatTaskStep = {
+  kind: 'verify' | 'authorize-save' | 'passed' | 'failed' | 'cancelled' | 'blocked' | 'draft' | 'saved' | 'undone' | 'rejected'
+  at: number
+  selected?: number
+  selection?: number[]
+  paths?: string[]
+  detail?: string
+}
 export type ChatCheckpoint = {
   state: 'draft' | 'saved' | 'undone' | 'rejected'
   main?: string

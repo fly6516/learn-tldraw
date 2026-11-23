@@ -1,6 +1,7 @@
+import type { SourceMove } from './writing-ai-evidence'
 import { verificationBaseline, verificationPatch, type ChatVerification } from './writing-chat-validation'
 import { chatActionPaths, nextChatCheckpoint, type ChatAction } from './writing-chat-actions'
-import type { ChatCheckpoint, ChatHistory, ChatSource } from './writing-chat'
+import type { ChatCheckpoint, ChatHistory, ChatSource, ChatTaskStep } from './writing-chat'
 import { updateFileContent } from './file-system'
 import type { ProjectFileSystem } from './types'
 import type { ProjectSnapshot, ProjectSnapshotInfo } from './snapshots'
@@ -354,14 +355,16 @@ export async function restoreProjectBackup(database: IDBDatabase, current: Writi
 }
 
 export async function commitFileOperation(database: IDBDatabase, key: WritingKey,
-    before: ProjectFileSystem, expectedDrafts: WritingDrafts, after: ProjectFileSystem, writing: PortableWritingState) {
+    before: ProjectFileSystem, expectedDrafts: WritingDrafts, after: ProjectFileSystem, writing: PortableWritingState, move?: SourceMove) {
     const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
     const store = transaction.objectStore(storeName)
     const project = store.get(key[0])
     const values = store.getAll(draftRange(key))
     const keys = store.getAllKeys(draftRange(key))
+    const moves = store.get(['source-moves', ...key])
+    let committedMoves: SourceMove[] | undefined
     let applied = false
-    keys.onsuccess = () => {
+    moves.onsuccess = () => {
         const current = project.result as ProjectFileSystem | undefined
         if (current?.metadata.createdAt !== key[1] || JSON.stringify(current.metadata) !== JSON.stringify(before.metadata)
             || JSON.stringify(current.canvas) !== JSON.stringify(before.canvas) || current.files.size !== before.files.size) return
@@ -373,6 +376,10 @@ export async function commitFileOperation(database: IDBDatabase, key: WritingKey
         if (keys.result.length !== Object.keys(expectedDrafts).length || keys.result.some((entry, index) =>
             !sameDraft(values.result[index], expectedDrafts[(entry as [string, ...WritingKey, string])[3]]))) return
         store.put(after, key[0])
+        if (move) {
+            committedMoves = [...(moves.result ?? []), move]
+            store.put(committedMoves, ['source-moves', ...key])
+        }
         store.delete(draftRange(key))
         for (const [path, draft] of Object.entries(writing.drafts)) store.put(draft, ['draft', ...key, path])
         if (writing.view) store.put(writing.view, ['view', ...key])
@@ -381,6 +388,7 @@ export async function commitFileOperation(database: IDBDatabase, key: WritingKey
     }
     await complete(transaction)
     if (!applied) throw new Error('The saved project or local drafts changed. Reopen the preview and try again.')
+    return committedMoves
 }
 
 export function readProject(database: IDBDatabase, key: string): Promise<ProjectFileSystem | undefined> {
@@ -398,6 +406,44 @@ export function writeProject(database: IDBDatabase, key: string, project: Projec
         transaction.onabort = () => reject(transaction.error)
         transaction.objectStore(storeName).put(project, key)
     })
+}
+
+export async function readSourceMoves(database: IDBDatabase, key: WritingKey) {
+    const transaction = database.transaction(storeName)
+    const request = transaction.objectStore(storeName).get(['source-moves', ...key])
+    await complete(transaction)
+    return (request.result ?? []) as SourceMove[]
+}
+
+function taskKey(key: WritingKey, run: string) {
+    return ['ai-task', ...key, run]
+}
+
+function appendTaskStep(store: IDBObjectStore, key: WritingKey, run: string, step: ChatTaskStep) {
+    const entry = taskKey(key, run)
+    const current = store.get(entry)
+    current.onsuccess = () => store.put([...(current.result ?? []), step], entry)
+}
+
+export async function recordChatTaskStep(database: IDBDatabase, key: WritingKey, run: string, step: ChatTaskStep) {
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    appendTaskStep(transaction.objectStore(storeName), key, run, step)
+    await complete(transaction)
+}
+
+export async function readChatTaskSteps(database: IDBDatabase, key: WritingKey) {
+    const transaction = database.transaction(storeName)
+    const range = IDBKeyRange.bound(['ai-task', ...key], ['ai-task', ...key, []], false, true)
+    const tasks: Record<string, ChatTaskStep[]> = Object.create(null)
+    const request = transaction.objectStore(storeName).openCursor(range)
+    request.onsuccess = () => {
+        const cursor = request.result
+        if (!cursor) return
+        tasks[(cursor.key as [string, ...WritingKey, string])[3]] = cursor.value
+        cursor.continue()
+    }
+    await complete(transaction)
+    return tasks
 }
 
 export async function readChatHistory(database: IDBDatabase, key: WritingKey) {
@@ -443,9 +489,11 @@ export async function readChatVerifications(database: IDBDatabase, key: WritingK
     return verifications
 }
 
-export async function writeChatVerification(database: IDBDatabase, key: WritingKey, run: string, result: ChatVerification) {
+export async function writeChatVerification(database: IDBDatabase, key: WritingKey, run: string, result: ChatVerification, record = false) {
     const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
-    transaction.objectStore(storeName).put(result, ['ai-verify', ...key, run])
+    const store = transaction.objectStore(storeName)
+    store.put(result, ['ai-verify', ...key, run])
+    if (record) appendTaskStep(store, key, run, { kind: result.status, at: Date.now(), selected: result.selected.length, selection: result.selected, detail: result.message })
     await complete(transaction)
 }
 
@@ -485,6 +533,12 @@ export async function commitChatAction(database: IDBDatabase, key: WritingKey, r
             }
             if (project !== original) store.put(project, key[0])
             store.put(checkpoint, entry)
+            appendTaskStep(store, key, runId, { kind: checkpoint.state, at: Date.now(),
+                selected: action.kind === 'apply' || action.kind === 'apply-save' ? action.edits.length : undefined,
+                selection: action.kind === 'apply' ? action.selection : undefined,
+                paths: Object.keys(checkpoint.after),
+                detail: action.kind === 'apply-save' ? 'Saved after passing verification.'
+                    : action.kind === 'apply' ? action.automatic ? 'Session approval used.' : 'Author approved the selected changes.' : undefined })
             result = { project, checkpoint, changed: true }
         }
         const last = requests.at(-1)

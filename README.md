@@ -184,6 +184,11 @@ local drafts can take part in verification and stay local afterward. **Auto draf
 available for the approved files in the current conversation. Refreshing or switching
 conversations clears that approval.
 
+Each proposal has an **AI task record**. Expand **Task activity** to see its approvals,
+verification attempts, saves, and undo actions after reloading. Source evidence follows
+tracked Writing file moves and uniquely identifiable lines. When it cannot be located
+reliably, **Find fresh evidence** prepares a follow-up request in the same conversation.
+
 Choose **Reviewer reply** to open Revision rounds. Select a revised submission and the files
 that support the response before choosing **Draft response with AI**. This workflow reads bounded
 excerpts from the archived ZIPs. **Use AI draft** copies the streamed proposal into the response

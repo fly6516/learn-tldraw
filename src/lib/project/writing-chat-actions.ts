@@ -3,7 +3,7 @@ import type { ChatCheckpoint, ChatRun, ChatSource } from './writing-chat'
 import { sameDraft } from './writing-drafts'
 
 export type ChatAction =
-  | { kind: 'apply'; run: ChatRun; edits: ProjectSuggestion['edits'] }
+  | { kind: 'apply'; run: ChatRun; edits: ProjectSuggestion['edits']; selection?: number[]; automatic?: boolean }
   | { kind: 'apply-save'; run: ChatRun; edits: ProjectSuggestion['edits']; signal: AbortSignal }
   | { kind: 'save' | 'undo' | 'reject' }
 

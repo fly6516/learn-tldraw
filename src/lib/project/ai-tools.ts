@@ -5,6 +5,7 @@ import { indexLatexLabels } from './latex-source'
 import { parseBibliography } from './references'
 import { searchProjectSources } from './source-search'
 import type { ProjectFileSystem } from './types'
+import { captureEvidenceQuote, type EvidenceQuote } from './writing-ai-evidence'
 
 type Answer = z.infer<typeof chapterAnswerSchema>
 const query = z.string().trim().min(1).max(100)
@@ -15,7 +16,7 @@ export function createChapterTools(input: ChapterEditRequest) {
     [input.path, { path: input.path, source: input.source, truncated: false }]])
   const files: ProjectFileSystem['files'] = new Map([...sources].map(([path, file]) => [path,
     { path, name: path.split('/').at(-1) ?? path, type: 'editable', content: file.source }]))
-  const evidence: Answer['evidence'] = []
+  const evidence: (Answer['evidence'][number] & { anchor?: EvidenceQuote })[] = []
   const calls: Answer['tools'] = []
   const observed = new Set<string>()
   function record(kind: Answer['tools'][number], items: { path: string; line: number; text: string }[]) {
@@ -24,7 +25,10 @@ export function createChapterTools(input: ChapterEditRequest) {
     const output = items.map(item => ({ ...item, text: item.text.slice(0, 500) }))
     for (const item of output) {
       observed.add(`${item.path}:${item.line}`)
-      if (evidence.length < 40 && !evidence.some(found => found.path === item.path && found.line === item.line && found.kind === kind)) evidence.push({ ...item, kind })
+      if (evidence.length < 40 && !evidence.some(found => found.path === item.path && found.line === item.line && found.kind === kind)) {
+        const source = sources.get(item.path)?.source
+        evidence.push({ ...item, kind, anchor: source === undefined ? undefined : captureEvidenceQuote(item.path, source, item.line) })
+      }
     }
     return { items: output }
   }

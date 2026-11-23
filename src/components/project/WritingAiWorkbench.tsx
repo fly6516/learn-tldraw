@@ -9,12 +9,13 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { Textarea } from '@/components/ui/textarea'
 import { applyProjectEdits, buildChapterContext, maxChapterLength, type ChapterEditRequest } from '@/lib/project/ai-edit'
-import { readChatCheckpoints, readChatHistory, readChatVerifications, writeChatHistory, writeChatVerification } from '@/lib/project/storage'
-import { chatEditSchema, writingWorkflows, type ChatCheckpoint, type ChatConversation, type ChatHistory, type ChatRun, type ChatWorkflow, type WritingChatMessage } from '@/lib/project/writing-chat'
+import { readChatCheckpoints, readChatHistory, readChatTaskSteps, readChatVerifications, recordChatTaskStep, writeChatHistory, writeChatVerification } from '@/lib/project/storage'
+import { chatEditSchema, writingWorkflows, type ChatCheckpoint, type ChatConversation, type ChatHistory, type ChatRun, type ChatTaskStep, type ChatWorkflow, type WritingChatMessage } from '@/lib/project/writing-chat'
 import type { ChatAction } from '@/lib/project/writing-chat-actions'
 import { validateChatProposal, verificationBaseline, type ChatVerification } from '@/lib/project/writing-chat-validation'
 import { editableSource, type WritingDrafts, type WritingKey } from '@/lib/project/writing-drafts'
 import type { ProjectFileSystem } from '@/lib/project/types'
+import { locateEvidence, type SourceMove } from '@/lib/project/writing-ai-evidence'
 import { collectBibliography, findNewUnknownCitations } from '@/lib/project/references'
 
 const Diff = dynamic(() => import('./MonacoSourceEditor').then(module => module.WritingDraftComparison), { ssr: false })
@@ -23,7 +24,7 @@ type SourceWorkflow = Exclude<ChatWorkflow, 'revision'>
 type Checkpoints = Record<string, ChatCheckpoint['state']>
 type WorkbenchProps = {
   storage: IDBDatabase; projectKey: WritingKey; project: ProjectFileSystem; working: ProjectFileSystem
-  drafts: WritingDrafts; selected: string; main?: string; active: boolean; disabled: boolean
+  drafts: WritingDrafts; sourceMoves?: SourceMove[]; selected: string; main?: string; active: boolean; disabled: boolean
   compiler: ChapterEditRequest['compiler']; onLocate: (path: string, line: number) => void
   selection: () => { path: string; start: number; end: number } | undefined
   onAction: (run: string, action: ChatAction) => Promise<ChatCheckpoint['state']>
@@ -87,19 +88,21 @@ export function WritingAiWorkbench(props: WorkbenchProps) {
   const [history, setHistory] = useState<ChatHistory>()
   const [checkpoints, setCheckpoints] = useState<Checkpoints>({})
   const [verifications, setVerifications] = useState<Record<string, ChatVerification>>({})
+  const [tasks, setTasks] = useState<Record<string, ChatTaskStep[]>>({})
   const [storageError, setStorageError] = useState('')
   const historyRef = useRef<ChatHistory | undefined>(undefined)
   const persistence = useRef(Promise.resolve())
 
   useEffect(() => {
     let active = true
-    Promise.all([readChatHistory(storage, [workspace, projectId]), readChatCheckpoints(storage, [workspace, projectId]), readChatVerifications(storage, [workspace, projectId])]).then(([saved, states, reports]) => {
+    Promise.all([readChatHistory(storage, [workspace, projectId]), readChatCheckpoints(storage, [workspace, projectId]), readChatVerifications(storage, [workspace, projectId]), readChatTaskSteps(storage, [workspace, projectId])]).then(([saved, states, reports, steps]) => {
       if (!active) return
       const initial = newConversation()
       historyRef.current = saved ?? { selected: initial.id, conversations: [initial] }
       setHistory(historyRef.current)
       setCheckpoints(states)
       setVerifications(reports)
+      setTasks(steps)
     }).catch(() => { if (active) setStorageError('Local AI conversations could not be loaded.') })
     return () => { active = false }
   }, [projectId, storage, workspace])
@@ -113,12 +116,21 @@ export function WritingAiWorkbench(props: WorkbenchProps) {
     void persistence.current.catch(() => setStorageError('The conversation could not be saved locally.'))
   }, [projectId, storage, workspace])
 
+  async function refreshTasks() {
+    setTasks(await readChatTaskSteps(storage, [workspace, projectId]))
+  }
+
   const conversation = history?.conversations.find(item => item.id === history.selected)
   if (!conversation) return <p className="p-3 text-sm" role="status">{storageError || 'Loading local conversations…'}</p>
   return <Conversation key={conversation.id} {...props} conversation={conversation} checkpoints={checkpoints} storageError={storageError}
-    verifications={verifications} onVerification={async (id, report) => {
-      await writeChatVerification(storage, [workspace, projectId], id, report)
+    tasks={tasks} onTaskStep={async (id, step) => {
+      await recordChatTaskStep(storage, [workspace, projectId], id, { ...step, at: Date.now() })
+      await refreshTasks()
+    }}
+    verifications={verifications} onVerification={async (id, report, record) => {
+      await writeChatVerification(storage, [workspace, projectId], id, report, record)
       setVerifications(current => ({ ...current, [id]: report }))
+      if (record) await refreshTasks()
     }}
     conversations={history!.conversations} onSelect={id => persist(value => ({ ...value, selected: id }), true)}
     onNew={() => persist(value => {
@@ -138,15 +150,24 @@ export function WritingAiWorkbench(props: WorkbenchProps) {
         messages: retained, runs: Object.fromEntries(Object.entries(runs).filter(([id]) => ids.has(id))) }
     }) }))}
     onAction={async (run, action) => {
-      const state = await onAction(run, action)
-      setCheckpoints(current => ({ ...current, [run]: state }))
-      return state
+      try {
+        const state = await onAction(run, action)
+        setCheckpoints(current => ({ ...current, [run]: state }))
+        return state
+      } catch (cause) {
+        await recordChatTaskStep(storage, [workspace, projectId], run, { kind: 'blocked', at: Date.now(),
+          detail: cause instanceof Error ? cause.message : 'Could not change the source.' }).catch(() => {})
+        throw cause
+      } finally {
+        await refreshTasks().catch(() => setStorageError('Could not reload the task record.'))
+      }
     }} />
 }
 
 function Conversation(props: WorkbenchProps & {
   conversation: ChatConversation; conversations: ChatConversation[]; storageError: string; checkpoints: Checkpoints
-  verifications: Record<string, ChatVerification>; onVerification: (id: string, report: ChatVerification) => Promise<void>
+  verifications: Record<string, ChatVerification>; onVerification: (id: string, report: ChatVerification, record?: boolean) => Promise<void>
+  tasks: Record<string, ChatTaskStep[]>; onTaskStep: (id: string, step: Omit<ChatTaskStep, 'at'>) => Promise<void>
   onSelect: (id: string) => void; onNew: () => void; onDelete: () => void
   onPersist: (messages: WritingChatMessage[], runs: Record<string, ChatRun>) => void
 }) {
@@ -199,7 +220,7 @@ function Conversation(props: WorkbenchProps & {
       const evidence = message.metadata.evidence ?? []
       if (proposal && run && !message.metadata.missing?.length && proposal.edits.every(edit => grant.current?.paths.includes(edit.path)
         && evidence.some(item => item.path === edit.path && item.kind === 'read_source'))) {
-        void mutate(task.id, { kind: 'apply', run, edits: proposal.edits })
+        void mutate(task.id, { kind: 'apply', run, edits: proposal.edits, automatic: true })
       }
     },
   })
@@ -259,7 +280,7 @@ function Conversation(props: WorkbenchProps & {
       const saved = editableSource(props.project, path)
       return saved === undefined ? [] : [[path, { saved, draft: props.drafts[path] }] as const]
     }))
-    runs.current = { ...runs.current, [id]: { main: props.project.metadata.mainFile, sources } }
+    runs.current = { ...runs.current, [id]: { main: props.project.metadata.mainFile, pathRevision: props.sourceMoves?.length, sources } }
     setRunSnapshots(runs.current)
     const authorized = grant.current && targets.length && targets.every(path => grant.current?.paths.includes(path))
     pending.current = { id, grant: grant.current?.id, mode: authorized ? approval : 'manual' }
@@ -304,26 +325,35 @@ function Conversation(props: WorkbenchProps & {
           </p>}
           {message.metadata?.missing?.length ? <p className="text-xs text-amber-800">Checks not completed: {message.metadata.missing.map(name => toolLabels[name] ?? name).join(', ')}.</p> : null}
           {!streaming && message.role === 'assistant' && !message.metadata?.complete && <p className="text-xs text-amber-800">This response did not finish. Any edits from it are unavailable.</p>}
-          {message.metadata?.evidence?.length ? <details className="rounded border px-2 py-1">
-            <summary>Source evidence · {message.metadata.evidence.length}</summary>
-            {message.metadata.evidence.map(item => <button key={`${item.kind}:${item.path}:${item.line}`} type="button"
-              onClick={() => props.onLocate(item.path, item.line)} className="block w-full break-all py-1 text-left text-xs text-indigo-700 hover:underline">
-              {item.path}:{item.line} · {item.text}
-            </button>)}
-          </details> : null}
           {compileRequest && !streaming && <Button size="sm" variant="outline" disabled={props.disabled || !props.main}
             onClick={props.onCompile}>Approve preview compile</Button>}
-          {proposal && run && runId && !streaming && <Proposal proposal={proposal} run={run} state={props.checkpoints[runId]} project={props.working}
+          {runId && message.role === 'assistant' && message.metadata?.complete && !streaming && (proposal || message.metadata.evidence?.length) ? (
+            <section aria-label="AI task record" className="space-y-2 rounded-md border border-indigo-200 bg-white p-2">
+              <h3 className="text-xs font-semibold">AI task record</h3>
+              {proposal && <p className="text-xs text-slate-600">
+                Proposed {proposal.edits.length} {proposal.edits.length === 1 ? 'change' : 'changes'} across {new Set(proposal.edits.map(edit => edit.path)).size} {new Set(proposal.edits.map(edit => edit.path)).size === 1 ? 'file' : 'files'}.
+                {!props.checkpoints[runId] && ' Awaiting a decision.'}
+              </p>}
+              <TaskTimeline steps={props.tasks[runId]} />
+              {message.metadata.evidence?.length ? <EvidenceList evidence={message.metadata.evidence} project={props.working}
+                moves={props.sourceMoves} revision={run?.pathRevision} onLocate={props.onLocate}
+                onRefresh={path => {
+                  setPrompt(previous => [previous, `Find fresh source evidence in the current project for the earlier reference to ${path}. Report reliable file and line locations.`].filter(Boolean).join('\n\n').slice(0, 12_000))
+                  composer.current?.focus()
+                }} /> : null}
+              {proposal && run && runId && <Proposal proposal={proposal} run={run} state={props.checkpoints[runId]} project={props.working}
             disabled={props.disabled || mutating} onAction={action => mutate(runId, action)} active={props.active}
             input={input} baseline={baseline?.input === input ? baseline : undefined} verification={props.verifications[runId]}
-            onVerification={report => props.onVerification(runId, report)} onLocate={props.onLocate}
+            onVerification={(report, record) => props.onVerification(runId, report, record)} onLocate={props.onLocate}
             onUseDiagnostics={report => {
               const locations = report.diagnostics.slice(0, 12).map(issue => `${issue.path}:${issue.line} · ${issue.message.slice(0, 240)}`)
               const notes = ['Help fix this proposal using the following diagnostics from its temporary LaTeX snapshot.',
                 report.message, ...locations].join('\n')
               setPrompt(previous => [previous, notes].filter(Boolean).join('\n\n').slice(0, 12_000))
               composer.current?.focus()
-            }} />}
+            }} onTaskStep={step => props.onTaskStep(runId, step)} />}
+            </section>
+          ) : null}
         </article>
       })}
       {streaming && <p role="status" className="text-xs text-slate-600">{status === 'submitted' ? 'Sending request…' : 'Assistant is responding…'}</p>}
@@ -409,13 +439,63 @@ function ChatMessageText({ text }: { text: string }) {
   </div>
 }
 
-function Proposal({ proposal, run, state, disabled, onAction, project, input, verification, baseline, active, onVerification, onLocate, onUseDiagnostics }: {
+const taskLabels: Record<ChatTaskStep['kind'], string> = {
+  verify: 'Verification requested', 'authorize-save': 'Save after verification approved',
+  passed: 'Verification passed', failed: 'Verification failed', cancelled: 'Verification cancelled',
+  blocked: 'Action blocked', draft: 'Applied to local drafts', saved: 'Saved to project',
+  undone: 'Changes undone', rejected: 'Proposal rejected',
+}
+
+function TaskTimeline({ steps }: { steps?: ChatTaskStep[] }) {
+  if (!steps?.length) return null
+  return <details className="rounded border px-2 py-1 text-xs">
+    <summary className="cursor-pointer">Task activity · {steps.length}</summary>
+    <ol className="mt-1 space-y-1">
+      {steps.map((step, index) => <li key={index} className="break-words border-l pl-2">
+        <span className="font-medium">{taskLabels[step.kind]}</span>
+        {step.selected !== undefined && ` · ${step.selected} selected`}
+        <time className="ml-1 text-slate-600" dateTime={new Date(step.at).toISOString()}>{new Date(step.at).toLocaleString()}</time>
+        {step.selection && <p>Changes {step.selection.map(index => index + 1).join(', ')}</p>}
+        {Boolean(step.paths?.length) && <p className="break-all font-mono">{step.paths?.join(', ')}</p>}
+        {step.detail && <p>{step.detail}</p>}
+      </li>)}
+    </ol>
+  </details>
+}
+
+function EvidenceList({ evidence, project, moves, revision, onLocate, onRefresh }: {
+  evidence: NonNullable<NonNullable<WritingChatMessage['metadata']>['evidence']>
+  project: ProjectFileSystem; moves?: SourceMove[]; revision?: number
+  onLocate: WorkbenchProps['onLocate']; onRefresh: (path: string) => void
+}) {
+  const locations = useMemo(() => evidence.map(item => moves ? locateEvidence(project, item, moves, revision) : undefined),
+    [evidence, project, moves, revision])
+  return <details className="rounded border px-2 py-1 text-xs">
+    <summary className="cursor-pointer">Source evidence · {evidence.length}</summary>
+    <ul className="divide-y">
+      {evidence.map((item, index) => {
+        const location = locations[index]
+        return <li key={`${item.kind}:${item.path}:${item.line}`} className="break-all py-1">
+          {location ? <button type="button" onClick={() => onLocate(location.path, location.line)}
+            className="block w-full text-left text-indigo-700 hover:underline">{location.path}:{location.line} · {item.text}</button>
+            : <><p>{item.path}:{item.line} · {item.text}</p>
+              <button type="button" className="text-amber-800 underline" onClick={() => onRefresh(item.path)}>
+                Location unverified. Find fresh evidence
+              </button></>}
+        </li>
+      })}
+    </ul>
+  </details>
+}
+
+function Proposal({ proposal, run, state, disabled, onAction, project, input, verification, baseline, active, onVerification, onLocate, onUseDiagnostics, onTaskStep }: {
   proposal: NonNullable<ReturnType<typeof editProposal>>; run: ChatRun; state?: ChatCheckpoint['state']
   disabled: boolean; onAction: (action: ChatAction) => Promise<void>; project: ProjectFileSystem
   input: Pick<Parameters<typeof validateChatProposal>[0], 'project' | 'working' | 'drafts' | 'main'>
   verification?: ChatVerification; baseline?: { raw: string; working: string }; active: boolean
   onUseDiagnostics: (report: ChatVerification) => void
-  onVerification: (report: ChatVerification) => Promise<void>
+  onVerification: (report: ChatVerification, record?: boolean) => Promise<void>
+  onTaskStep: (step: Omit<ChatTaskStep, 'at'>) => Promise<void>
   onLocate: (path: string, line: number) => void
 }) {
   const [checked, setChecked] = useState(() => new Set(verification?.currentSelection ?? verification?.selected ?? proposal.edits.map((_, index) => index)))
@@ -455,10 +535,14 @@ function Proposal({ proposal, run, state, disabled, onAction, project, input, ve
     const { signal } = controller
     setValidationError('')
     setChecking(true)
+    let recorded = false
     try {
+      await onTaskStep({ kind: save ? 'authorize-save' : 'verify', selected: selected.length, selection: selected,
+        paths: [...new Set(changes.map(edit => edit.path))] })
       const report = await validateChatProposal({ ...input, run, edits: changes, selected, signal })
       if (signal.aborted) return
-      await onVerification(report)
+      await onVerification(report, true)
+      recorded = true
       if (save && report.status === 'passed' && !signal.aborted && current.current.active) {
         const latest = current.current.input
         if (latest.main !== report.main || await verificationBaseline(latest.project, latest.drafts) !== report.baseline) {
@@ -470,8 +554,13 @@ function Proposal({ proposal, run, state, disabled, onAction, project, input, ve
         }
       }
     } catch (cause) {
-      if (!signal.aborted) setValidationError(cause instanceof Error ? cause.message : 'Could not verify the selected changes.')
+      if (!signal.aborted) {
+        const detail = cause instanceof Error ? cause.message : 'Could not verify the selected changes.'
+        setValidationError(detail)
+        await onTaskStep({ kind: 'blocked', detail }).catch(() => {})
+      }
     } finally {
+      if (!recorded && signal.aborted) await onTaskStep({ kind: 'cancelled' }).catch(() => {})
       request.current = null
       setChecking(false)
     }
@@ -506,7 +595,7 @@ function Proposal({ proposal, run, state, disabled, onAction, project, input, ve
             if (value === true) next.add(index)
             else next.delete(index)
             select(next)
-          }} /><span className="min-w-0 truncate">{edit.before.trim().slice(0, 100)}</span>
+          }} /><span className="min-w-0 truncate">{index + 1}. {edit.before.trim().slice(0, 100)}</span>
         </label>)}
       </div>)}
       {unknown.size > 0 && <p role="status" className="break-words text-xs text-amber-800">New unknown citations: {[...unknown].join(', ')}</p>}
@@ -516,7 +605,7 @@ function Proposal({ proposal, run, state, disabled, onAction, project, input, ve
         <Button size="sm" disabled={disabled || checking || !valid || !checked.size || !input.main}
           onClick={() => void verify(true)}>Save if verification passes</Button>
         <Button size="sm" variant="outline" disabled={disabled || checking || !valid || !checked.size}
-          onClick={() => void onAction({ kind: 'apply', run, edits: changes })}>Apply to drafts</Button>
+          onClick={() => void onAction({ kind: 'apply', run, edits: changes, selection: selected })}>Apply to drafts</Button>
         <Button size="sm" variant="ghost" disabled={disabled || checking} onClick={() => void onAction({ kind: 'reject' })}>Reject proposal</Button>
       </div>
     </>}
