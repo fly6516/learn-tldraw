@@ -8,7 +8,7 @@ import { sourceOffsetAtPosition } from '@/lib/project/latex-source'
 import { isProjectPath } from '@/lib/project/source-archive'
 import { manuscriptPlanSchema } from '@/lib/project/manuscript-task'
 import { claimEvidenceFor, claimSuggestionSchema, collectWritingClaims } from '@/lib/project/writing-claims'
-import { writingSampleFiles, writingSamplePrompt, writingSampleSubmission } from '@/lib/project/writing-sample'
+import { writingSampleArchiveName, writingSampleFiles } from '@/lib/project/writing-sample'
 import { chatEditSchema, chatRequestSchema, editPermissionRequestSchema, replyChatSchema, revisionRoundRequestSchema, reviewerCommentRequestSchema,
   submissionChatSchema, workflowVersion, writingWorkflows } from '@/lib/project/writing-chat'
 
@@ -26,7 +26,7 @@ export async function POST(request: Request) {
   const parsed = chatRequestSchema.safeParse(json)
   if (!parsed.success) return error('Open a valid project source file or archived revision before sending.', 400)
   const input = parsed.data
-  if (input.writingExample && (input.workflow !== 'auto' || input.manuscript?.goal !== writingSamplePrompt
+  if (input.writingExample && (input.workflow !== 'auto' || !input.manuscript || !writingSampleArchiveName(input.manuscript.goal)
     || !['plan', 'batch'].includes(input.manuscript.mode) || !input.scope.length
     || input.scope.some(path => !writingSampleFiles.includes(path)))) {
     return error('The example mode only supports the built-in sample task.', 400)
@@ -104,7 +104,7 @@ export async function POST(request: Request) {
             data.push({ path: file.path, startRow: 1, rowCount: 12 })
           }
           const submissionName = deliveryRequested
-            ? latestRequest === writingSamplePrompt ? writingSampleSubmission : plan.delivery?.submissionName || 'Manuscript submission'
+            ? writingSampleArchiveName(latestRequest) ?? plan.delivery?.submissionName ?? 'Manuscript submission'
             : undefined
           const delivery = deliveryRequested || plan.delivery ? { data, submissionName } : undefined
           return stageWorkflow({ ...plan, files, delivery })

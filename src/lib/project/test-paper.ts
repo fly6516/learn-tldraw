@@ -1,5 +1,6 @@
 import JSZip from 'jszip'
 import { importSourceArchive } from './source-archive'
+import { writingExerciseData } from './writing-sample'
 
 export const testPaperName = 'Practice Paper'
 export const testMethods = 'sections/methods.tex'
@@ -15,7 +16,7 @@ export const testScenarios = {
   interrupted: 'Test: interrupted proposal',
 }
 
-export async function testPaperZip() {
+export async function testPaperZip(practiceExercise = false) {
   const zip = new JSZip()
   zip.file('main.tex', String.raw`\documentclass{article}
 \makeatletter
@@ -32,6 +33,7 @@ Practice Paper
   zip.file(testResults, `\\section{Results}\n${testResultLine}\nThe readings are illustrative and are kept separate from any actual measurements.\n${testEvidence}\nThe same reporting unit was used for all entries in the sample.\n`)
   zip.file('references.bib', '@misc{fixture, title={Synthetic test reference}, year={2026}}\n')
   zip.file('figures/plot.png', 'iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAEElEQVR4nGNQaLgDRwzEcQBeEhfB+KME1gAAAABJRU5ErkJggg==', { base64: true })
+  if (practiceExercise) zip.file(writingExerciseData, 'sample,temp_c\na,19\nb,21\n')
   return zip.generateAsync({ type: 'blob' })
 }
 

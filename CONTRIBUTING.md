@@ -38,6 +38,10 @@ compile and archive approvals still apply. It needs the local LaTeX compiler. Fo
 acceptance outside simulated server mode, set `RESEARCH_SAMPLE_NO_KEY=1` and run
 `bun run test:e2e tests/e2e/writing-sample.spec.ts`. To exercise **Use configured model**,
 set `RESEARCH_LIVE_TEST=1` with a configured DeepSeek key and run the same file.
+Choose **Practice with review issues** to produce a sample draft with a compiler error.
+The exercise walks through the review queue, duplicate CSV keys, a changed calculation,
+resuming after refresh, and archiving the repaired manuscript. CI runs the normal browser
+suite and runs the sample again with both model credentials explicitly empty.
 
 The optional live browser tests generate the synthetic **Morning Walk Study** ZIP from the
 checked-in fixture. Configure `DEEPSEEK_API_KEY` for the loopback test server. The test

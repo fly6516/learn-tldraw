@@ -30,7 +30,7 @@ import { ClaimEvidence, type ReviewedClaim } from './ClaimEvidence'
 import { WritingMarkdown } from './WritingMarkdown'
 import { csvCalculationSchema } from '@/lib/project/csv-calculation'
 import { CalculationEvidence } from './CalculationEvidence'
-import { writingSampleFiles, writingSamplePrompt } from '@/lib/project/writing-sample'
+import { writingExerciseCommand, writingExerciseData, writingExercisePrompt, writingSampleFiles, writingSamplePrompt } from '@/lib/project/writing-sample'
 import { writingClaimsSchema, type ClaimReview } from '@/lib/project/writing-claims'
 
 const Diff = dynamic(() => import('./MonacoSourceEditor').then(module => module.WritingDraftComparison), { ssr: false })
@@ -839,11 +839,22 @@ function Conversation(props: WorkbenchProps & {
             onClick={() => submit(writingSamplePrompt, undefined, writingSampleFiles, 'plan', undefined, true)}>Use example edits</Button>
           <Button size="sm" variant="ghost" disabled={props.disabled || !props.active || streaming || mutating}
             onClick={() => submit(writingSamplePrompt, undefined, writingSampleFiles, 'plan')}>Use configured model</Button>
+          {props.project.files.has(writingExerciseData) && <Button size="sm" variant="ghost"
+            disabled={props.disabled || !props.active || streaming || mutating}
+            onClick={() => submit(writingExercisePrompt, undefined, writingSampleFiles, 'plan', undefined, true)}>Practice with review issues</Button>}
         </div>
       </> : <p>{deliveryArchive ? 'Sample complete. The archive keeps both the verified PDF and the source ZIP.'
         : props.checkpoints[manuscript.id] === 'saved' ? 'Review the final ZIP and confirm its archive below.'
           : taskProgress?.remaining.length ? 'Review the plan and apply each draft proposal to continue.'
             : 'Verify the selected drafts and confirm the project save.'}</p>}
+      {manuscript?.goal === writingExercisePrompt && !deliveryArchive && <details>
+        <summary className="cursor-pointer font-medium">Recovery exercise steps</summary>
+        <ol className="max-h-28 list-decimal space-y-1 overflow-auto pl-4">
+          <li>Apply the two chapter drafts. Use the review queue to open the Results compiler error, remove <code>{writingExerciseCommand}</code>, then return and include the current author version.</li>
+          <li>Confirm the Results claim. Open its CSV evidence and add a second <code>a,19</code> row to make the first input ambiguous. Try replacing the original <code>19</code> with <code>20</code> after removing the duplicate, then inspect the recalculated result.</li>
+          <li>Refresh and reopen the review to find the same claim. Restore the original CSV rows, verify the selected drafts, save them, then confirm the archive.</li>
+        </ol>
+      </details>}
     </section>}
     {manuscript && <ManuscriptTaskCard task={manuscript} states={props.checkpoints} receipts={props.tasks} messages={messages}
         running={runningManuscript} busy={streaming || mutating || props.disabled || !props.active}

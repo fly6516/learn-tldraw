@@ -2,6 +2,7 @@ import { type LanguageModel } from 'ai'
 import { MockLanguageModelV4, simulateReadableStream } from 'ai/test'
 import { testEvidence, testMethodEdit, testMethodLine, testMethods, testResultEdit, testResultLine, testResults, testScenarios } from './test-paper'
 import type { ManuscriptContext } from './manuscript-task'
+import { writingExerciseClaim, writingExerciseCommand, writingExerciseData, writingExercisePrompt, writingExerciseSubmission } from './writing-sample'
 
 type Stream = Awaited<ReturnType<MockLanguageModelV4['doStream']>>['stream']
 type Part = Stream extends ReadableStream<infer Chunk> ? Chunk : never
@@ -28,6 +29,7 @@ export function testWritingModel(selected: string[], text: string, feedback?: 'p
   const access = scenario === 'test: request draft access'
   const citeCsv = scenario === 'test: read manuscript csv'
   const batch = manuscript?.mode === 'batch'
+  const exercise = writingExample && manuscript?.goal === writingExercisePrompt
   const plannedData = batch && Boolean(manuscript.data?.length)
   const workflowFixture = scenario.includes('workflow acceptance') || scenario.includes('river publication') || scenario.includes('morning claim review')
   const morning = manuscript?.goal.toLowerCase().includes('morning claim review')
@@ -74,7 +76,8 @@ export function testWritingModel(selected: string[], text: string, feedback?: 'p
       const calculated = 'The mean of the second and third sessions was 27.25 degrees.'
       const unsupported = 'Follow-up sessions improved by 12.9 degrees.'
       const documentedResult = 'The first recorded value was 28.1 degrees.'
-      const statedResult = plannedData ? `${testResultEdit}\n${documentedResult}\nA follow-up measured 31.7 degrees.${river ? ' \\cite{syntheticGauge}' : ''}` : testResultEdit
+      const statedResult = exercise ? `${testResultEdit}\n${writingExerciseClaim}\n${writingExerciseCommand}`
+        : plannedData ? `${testResultEdit}\n${documentedResult}\nA follow-up measured 31.7 degrees.${river ? ' \\cite{syntheticGauge}' : ''}` : testResultEdit
       const edits = (morning && batch ? [
         { path: testMethods, before: 'Observers traversed the shaded and exposed routes at the same planned departure time.',
           after: 'The paired routes were surveyed at the same planned departure time.' },
@@ -90,6 +93,9 @@ export function testWritingModel(selected: string[], text: string, feedback?: 'p
         })) : []),
       ]).filter(edit => selected.includes(edit.path))
       const requestedTool = revision ? ['read_archived_changes', {}] as const
+        : exercise && manuscript?.mode === 'plan' ? ['plan_manuscript', { title: 'Practice manuscript recovery',
+          files: [testMethods, testResults], decisions: ['Use the synthetic readings for the exercise.'], questions: [],
+          delivery: { data: [{ path: writingExerciseData, startRow: 1, rowCount: 3 }], submissionName: writingExerciseSubmission } }] as const
         : writingExample && manuscript?.mode === 'plan' ? ['plan_manuscript', { title: 'Revise and submit Practice Paper',
           files: [testMethods, testResults], decisions: ['Keep the measurements synthetic.'], questions: [],
           delivery: { data: [], submissionName: 'Practice submission' } }] as const
@@ -126,14 +132,18 @@ export function testWritingModel(selected: string[], text: string, feedback?: 'p
         ] : turn === 0 && plannedData ? [toolCall('read_manuscript_data', {}), finish('tool-calls')]
         : (turn === Number(plannedData) && batch) || (turn === 1 && scopedRepair) ? [
           ...edits.map(edit => toolCall('read_source', { path: edit.path, startLine: 1, lineCount: 4 })), finish('tool-calls'),
+        ] : exercise && batch && turn === 2 ? [
+          toolCall('calculate_csv', { path: writingExerciseData, operation: 'mean', decimals: 2,
+            cells: [{ row: 2, column: 'temp_c' }, { row: 3, column: 'temp_c' }] }), finish('tool-calls'),
         ] : turn === 0 ? [
         toolCall('search_source', { query: testEvidence }),
         toolCall('read_source', { path: testMethods, startLine: 2, lineCount: 2 }),
         toolCall('read_source', { path: testResults, startLine: 2, lineCount: 4 }),
         finish('tool-calls'),
-      ] : turn === (scopedRepair || plannedData ? 2 : 1) && suggested && edits.length ? [
+      ] : turn === (exercise ? 3 : scopedRepair || plannedData ? 2 : 1) && suggested && edits.length ? [
         toolCall('propose_edits', { summary: 'Fixture wording changes for review.', edits,
-          claims: plannedData && selected.includes(testResults) ? [
+          claims: exercise ? [{ path: testResults, quote: writingExerciseClaim, references: [], calculationIds: ['calc-1'] }]
+            : plannedData && selected.includes(testResults) ? [
             { path: testResults, quote: documentedResult, references: [{ path: 'data/sessions.csv', line: 2 }] },
             ...(morning ? [{ path: testResults, quote: calculated, references: [] }, { path: testResults, quote: unsupported, references: [] }] : []),
           ] : undefined }), finish('tool-calls'),

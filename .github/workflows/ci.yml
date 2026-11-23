@@ -56,3 +56,7 @@ jobs:
       - run: bun run build
       - run: bunx playwright install --with-deps chromium firefox
       - run: bun run test:e2e
+      - name: Verify the writing sample without a model provider
+        run: bun run test:e2e tests/e2e/writing-sample.spec.ts
+        env:
+          RESEARCH_SAMPLE_NO_KEY: "1"

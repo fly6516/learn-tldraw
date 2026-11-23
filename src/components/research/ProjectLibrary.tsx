@@ -108,7 +108,7 @@ export function ProjectLibrary() {
         <Button variant="outline" disabled={!catalog || busy} onClick={() => fileInput.current?.click()}><FileUp /> Import project</Button>
         <Button variant="outline" disabled={!catalog || busy} onClick={() => void run(async () => {
           const { testPaperZip, testPaperName } = await import('@/lib/project/test-paper')
-          const sample = await importSourceArchive(new File([await testPaperZip()], `${testPaperName}.zip`))
+          const sample = await importSourceArchive(new File([await testPaperZip(true)], `${testPaperName}.zip`))
           await openCopy({ ...sample, metadata: { ...sample.metadata, writingSample: true } }, 'write')
         })}>Try a writing sample</Button>
         <Button disabled={!catalog || busy} onClick={() => setNameDialog({ value: '' })}><Plus /> New project</Button>
