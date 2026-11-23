@@ -6,6 +6,7 @@ import dynamic from 'next/dynamic'
 import type { editor, IPosition } from 'monaco-editor'
 import { BookOpen, ChevronRight, CircleAlert, Download, Ellipsis, FileCode2, FileText, Folder, Link2, ListChecks, LocateFixed, PanelLeft, Play, Save, Sparkles, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { RightToolPanel, useRightToolPanelWide } from '@/components/ui/right-tool-panel'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
@@ -14,8 +15,8 @@ import { useProjectFileSystem } from '@/contexts/ProjectFileSystemContext'
 import { getFileTree, updateFileContent, type FileTreeNode } from '@/lib/project/file-system'
 import { exportSourceArchive } from '@/lib/project/source-archive'
 import type { ProjectFile, ProjectFileSystem, ResearchNodeData } from '@/lib/project/types'
-import { ChapterAiPanel } from './ChapterAiPanel'
-import { ProjectAiPanel } from './ProjectAiPanel'
+import { WritingAiWorkbench } from './WritingAiWorkbench'
+import type { ChatAction } from '@/lib/project/writing-chat-actions'
 import type { ChapterEditRequest } from '@/lib/project/ai-edit'
 import { ReferencesPanel } from './ReferencesPanel'
 import { CrossReferencesPanel } from './CrossReferencesPanel'
@@ -31,7 +32,7 @@ import type { SourceProblem } from './MonacoSourceEditor'
 import type { CompileDiagnostic, CompileReport } from '@/lib/project/compile-diagnostics'
 import { findPdfRegion, type SyncRegion } from '@/lib/project/source-sync'
 import { applyWritingDrafts, draftConflicts, editableSource, sameDraft, type PortableWritingState, type WritingDrafts } from '@/lib/project/writing-drafts'
-import { clearWritingState, commitFileOperation, commitWritingDrafts, writeWritingDraftBatch } from '@/lib/project/storage'
+import { clearWritingState, commitFileOperation, commitWritingDrafts, commitChatAction } from '@/lib/project/storage'
 import type { FileOperation } from '@/lib/project/file-refactor'
 import { FileOperationDialog, type FileOperationPlan } from './FileOperationDialog'
 import { SubmissionDialog } from './SubmissionDialog'
@@ -208,8 +209,8 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const [syncMessage, setSyncMessage] = useState('')
   const [panel, setPanel] = useState<'problems' | 'references' | 'cross-references' | 'review' | null>(null)
   const [aiOpen, setAiOpen] = useState(false)
-  const [aiScope, setAiScope] = useState<'chapter' | 'project'>('chapter')
-  const [aiTarget, setAiTarget] = useState('')
+  const wideTools = useRightToolPanelWide()
+  const [aiExpanded, setAiExpanded] = useState(false)
   const [reviewCursor, setReviewCursor] = useState<{ path: string; line: number }>()
   const [navigation, setNavigation] = useState<'files' | 'outline' | 'search'>('files')
   const [searchQuery, setSearchQuery] = useState('')
@@ -241,8 +242,6 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   }, [generateSource])
   const workingProject = useMemo(() => withGeneratedSource(applyWritingDrafts(project, drafts)), [drafts, project, withGeneratedSource])
   const workingFiles = workingProject.files
-  const aiSource = editableSource(project, aiTarget)
-  const aiDraft = editableSource(workingProject, aiTarget)
   const { headings, blocks, index, crossReferences, labelTitles } = useMemo(() => {
     const source = { files: workingFiles }
     const documents = new Map<string, string>()
@@ -447,29 +446,45 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   }
 
   function toggleChapterAi() {
-    if (!aiTarget && isTex && !readOnly) setAiTarget(selected)
     setAiOpen(!aiOpen)
     setMobileFiles(false)
+    if (!aiOpen && (!wideTools)) setPanel(null)
   }
 
   function locateAiEvidence(path: string, line: number) {
+    if (!wideTools) setAiOpen(false)
     openFile(path, line, undefined, true)
-    if (window.matchMedia('(max-width: 1023px)').matches) setAiOpen(false)
   }
 
-  async function applyAiBatch(entries: WritingDrafts) {
+  function aiSelection() {
+    const instance = editorRef.current
+    const range = instance?.getSelection()
+    if (!range || range.isEmpty() || editorSourcePath(instance?.getModel() ?? null) !== selected) return
+    return { path: selected, start: range.startLineNumber, end: range.endLineNumber }
+  }
+
+  async function applyChatAction(run: string, action: ChatAction) {
     if (!storage || !journal.key || journal.loadError || locked || writeInProgress.current) throw new Error('Local draft storage is unavailable.')
     writeInProgress.current = true
     setWriting(true)
     try {
       const persisted = await journal.storedDrafts()
-      for (const path of Object.keys(entries)) {
-        if (!sameDraft(persisted[path], drafts[path])) throw new Error('A local draft could not be synchronized. Resolve it before applying.')
+      if (journal.failed.size || Object.keys(drafts).some(path => !sameDraft(persisted[path], drafts[path]))) {
+        throw new Error('Local drafts are out of sync. Resolve them before applying.')
       }
-      await writeWritingDraftBatch(storage, journal.key, entries, drafts, project.metadata.mainFile)
-      journal.acceptDraftBatch(entries)
-      markSourceChanged()
-    } finally { writeInProgress.current = false; setWriting(false) }
+      const result = await commitChatAction(storage, journal.key, run, action)
+      if (result.changed && action.kind !== 'reject') {
+        const entries = Object.fromEntries(Object.entries(result.checkpoint.after).map(([path, source]) =>
+          [path, source.draft ?? { base: source.saved, text: source.saved }]))
+        acceptStoredProject(result.project, project)
+        journal.acceptDraftBatch(entries)
+        markSourceChanged()
+      }
+      return result.checkpoint.state
+    } finally {
+      writeInProgress.current = false
+      setWriting(false)
+    }
   }
 
   function captureWritingState(): PortableWritingState | undefined {
@@ -683,6 +698,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
           setLog(failure.log ?? '')
           setDiagnostics(failure.diagnostics ?? [])
           setDiagnosticSnapshot(snapshot)
+          if (!wideTools) setAiOpen(false)
           setPanel('problems')
         }
         return
@@ -806,14 +822,14 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       {saveError && <p role="alert" className="shrink-0 border-b bg-red-50 px-3 py-1.5 text-sm text-red-900">{saveError}</p>}
       <div className="flex shrink-0 items-center gap-2 border-b bg-white px-2 py-1.5 lg:hidden">
         <Button ref={fileToggle} size="sm" variant="outline" aria-expanded={mobileFiles} aria-controls="writing-files"
-          onClick={() => setMobileFiles(open => !open)}><PanelLeft /> Files</Button>
+          onClick={() => { if (!wideTools) setAiOpen(false); setMobileFiles(open => !open) }}><PanelLeft /> Files</Button>
         <div className="ml-auto flex gap-1 rounded-lg bg-slate-100 p-0.5" aria-label="Writing pane" role="group">
           {(['source', 'pdf'] as const).map(pane => <Button key={pane} size="sm"
             variant={narrowView === pane ? 'outline' : 'ghost'} aria-pressed={narrowView === pane}
-            onClick={() => { setNarrowView(pane); setMobileFiles(false) }}>{pane === 'source' ? 'Source' : 'PDF'}</Button>)}
+            onClick={() => { setNarrowView(pane); setMobileFiles(false); if (!wideTools) setAiOpen(false) }}>{pane === 'source' ? 'Source' : 'PDF'}</Button>)}
         </div>
         <Button size="sm" variant={aiOpen ? 'secondary' : 'outline'} aria-expanded={aiOpen} aria-controls="writing-ai"
-          onClick={toggleChapterAi}><Sparkles /> Chapter AI</Button>
+          onClick={toggleChapterAi}><Sparkles /> Writing AI</Button>
       </div>
       <div className="relative flex min-h-0 flex-1">
         {mobileFiles && <div className="absolute inset-0 z-10 bg-slate-900/25 lg:hidden" onClick={() => closeMobileFiles(true)} />}
@@ -892,7 +908,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
                 <h2 className="flex items-center gap-2 font-semibold"><FileText className="size-4 text-indigo-600" /> PDF Preview</h2>
                 {pdfUrl && <Button size="sm" variant="outline" asChild><a href={pdfUrl} download={pdfFilename}><Download /> Download PDF</a></Button>}
                 <Button size="sm" variant={aiOpen ? 'secondary' : 'outline'} aria-expanded={aiOpen} aria-controls="writing-ai"
-                  className="hidden lg:inline-flex" onClick={toggleChapterAi}><Sparkles /> Chapter AI</Button>
+                  className="hidden lg:inline-flex" onClick={toggleChapterAi}><Sparkles /> Writing AI</Button>
               </div>
               {pdfUrl ? <>
                 <div className="shrink-0 border-b bg-white px-3 py-1.5 text-xs">
@@ -915,38 +931,13 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
             </section>
           </ResizablePanel>
         </ResizablePanelGroup>
-        <aside id="writing-ai" aria-label="Chapter AI" hidden={!aiOpen}
-          className="absolute inset-y-0 right-0 z-20 flex w-[min(100%,23rem)] min-h-0 shrink-0 flex-col border-l bg-white shadow-lg max-lg:max-w-full lg:relative lg:z-auto lg:w-[clamp(16rem,24vw,23rem)] lg:shadow-none"
-          style={aiOpen ? undefined : { display: 'none' }} onKeyDown={event => { if (event.key === 'Escape') setAiOpen(false) }}>
-          <div className="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-1.5">
-            <h2 className="flex items-center gap-2 text-sm font-semibold"><Sparkles className="size-4 text-indigo-600" /> Chapter AI</h2>
-            <Button size="icon-sm" variant="ghost" aria-label="Close Chapter AI" onClick={() => setAiOpen(false)}><X /></Button>
-          </div>
-          <div className="flex shrink-0 gap-1 border-b px-2 py-1" role="group" aria-label="AI scope">
-            <Button size="sm" variant={aiScope === 'chapter' ? 'secondary' : 'ghost'} aria-pressed={aiScope === 'chapter'} onClick={() => setAiScope('chapter')}>Chapter</Button>
-            <Button size="sm" variant={aiScope === 'project' ? 'secondary' : 'ghost'} aria-pressed={aiScope === 'project'} onClick={() => setAiScope('project')}>Multiple files</Button>
-          </div>
-          <div className="min-h-0 flex-1 overflow-auto">
-            <div hidden={aiScope !== 'chapter'}>
-            {selected !== aiTarget && isTex && !readOnly && <div className="border-b px-3 py-2">
-              <Button size="sm" variant="outline" onClick={() => setAiTarget(selected)}>Use current chapter</Button>
-            </div>}
-            {aiSource !== undefined && aiDraft !== undefined && /\.tex$/i.test(aiTarget) ?
-              <ChapterAiPanel key={aiTarget} project={workingProject} path={aiTarget} main={main} source={aiSource} draft={aiDraft}
-                compiler={aiCompiler}
-                bibliography={bibliography} disabled={locked || conflicts.includes(aiTarget)}
-                onLocate={locateAiEvidence}
-                onApply={text => {
-                  const entry = { base: aiSource, text }
-                  journal.change(aiTarget, entry)
-                  void commitDrafts({ [aiTarget]: entry })
-                  markSourceChanged()
-                }} /> : <p className="p-3 text-sm text-slate-600">Open an editable LaTeX chapter to review or rewrite it.</p>}
-            </div>
-            <div hidden={aiScope !== 'project'}><ProjectAiPanel project={workingProject} saved={project} main={main} compiler={aiCompiler}
-              conflicts={conflicts} disabled={locked} onLocate={locateAiEvidence} onApply={applyAiBatch} /></div>
-          </div>
-        </aside>
+        <RightToolPanel id="writing-ai" title="Writing AI" open={aiOpen} expanded={aiExpanded}
+          onResize={() => setAiExpanded(value => !value)} onClose={() => setAiOpen(false)}
+          icon={<Sparkles className="size-4 shrink-0 text-indigo-600" />}>          {storage && journal.key && <WritingAiWorkbench key={JSON.stringify(journal.key)} storage={storage} projectKey={journal.key}
+            project={project} working={workingProject} drafts={drafts} selected={selected} main={main} active={active}
+            disabled={locked || Boolean(conflicts.length)} compiler={aiCompiler} selection={aiSelection} onRevision={() => setRevision({})}
+            onAction={applyChatAction} onLocate={locateAiEvidence} onCompile={() => void compile()} />}
+        </RightToolPanel>
       </div>
 
       <section aria-label="Writing tools" className="flex min-h-0 max-h-[42%] shrink-0 flex-col border-t bg-white [@media(max-height:550px)]:max-h-[32%]">
@@ -958,6 +949,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
             className="gap-1 px-1.5 text-xs sm:gap-1.5 sm:px-3 sm:text-sm" aria-expanded={panel === tab} aria-controls="writing-tools-content"
             onClick={() => {
               if (tab === 'review') setReviewCursor({ path: selected, line: editorRef.current?.getPosition()?.lineNumber ?? 1 })
+              if (!wideTools) setAiOpen(false)
               setPanel(current => current === tab ? null : tab)
             }}>
             <Icon className="hidden sm:block" /> {label}
@@ -966,6 +958,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
               {problems.length || (error ? 'Failed' : 'Warnings')}
             </span>}
           </Button>)}
+          <Button size="sm" variant={aiOpen ? 'secondary' : 'ghost'} aria-expanded={aiOpen} aria-controls="writing-ai" onClick={toggleChapterAi} className="gap-1 px-1.5 text-xs sm:px-3 sm:text-sm"><Sparkles className="hidden sm:block" /> AI</Button>
           {panel && <Button size="icon-sm" variant="ghost" aria-label="Collapse writing tools" className="ml-auto"
             onClick={() => setPanel(null)}><X /></Button>}
         </div>

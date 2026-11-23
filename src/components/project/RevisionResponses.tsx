@@ -1,6 +1,8 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
+import { useChat } from '@ai-sdk/react'
+import { chatText, chatTransport, ChatToolProgress } from './WritingAiWorkbench'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { buildRevisionLetter, type RevisionResponse, type RevisionRound, type RevisionFile } from '@/lib/project/revision-rounds'
@@ -72,11 +74,22 @@ function ResponseForm({ initial, paths, files, busy, onSave, archive, comment }:
   const [selected, setSelected] = useState(initial?.paths ?? [])
   const [saved, setSaved] = useState(false)
   const [query, setQuery] = useState('')
-  const [aiBusy, setAiBusy] = useState(false)
   const [aiError, setAiError] = useState('')
   const [proposal, setProposal] = useState<{ key: string; draft: string }>()
-  const aiRequest = useRef<AbortController | null>(null)
-  useEffect(() => () => aiRequest.current?.abort(), [])
+  const [preparing, setPreparing] = useState(false)
+  const { messages, sendMessage, stop, status, setMessages, clearError } = useChat({
+    transport: chatTransport, onFinish: ({ message, isAbort, isDisconnect, isError }) => {
+      if (isAbort || isDisconnect || isError || !message.metadata?.complete) return
+      for (const part of message.parts) {
+        if (part.type !== 'tool-propose_reply' || !('output' in part)) continue
+        const parsed = revisionDraftSchema.safeParse(part.output)
+        if (parsed.success) setProposal({ key, ...parsed.data })
+      }
+    },
+    onError: () => setAiError('Could not stream a draft response. Retry the request.'),
+  })
+  const aiBusy = preparing || status === 'submitted' || status === 'streaming'
+  const streamingReply = messages.at(-1)?.role === 'assistant' ? messages.at(-1) : undefined
   const states = new Map(files?.map(file => [file.path, file.status]))
   const options = [...new Set([...selected, ...paths])].sort().filter(path => selected.includes(path) || path.toLowerCase().includes(query.toLowerCase().trim()))
   const key = JSON.stringify([archive?.id, kind, text, selected, comment])
@@ -89,29 +102,27 @@ function ResponseForm({ initial, paths, files, busy, onSave, archive, comment }:
 
   async function generateReply() {
     if (!eligible || !files || !archive || aiBusy) return
-    const controller = new AbortController()
-    aiRequest.current = controller
-    setAiBusy(true); setAiError(''); setProposal(undefined)
+    setPreparing(true)
+    setAiError('')
+    clearError()
+    setMessages([])
+    setProposal(undefined)
     try {
       const changes = kind === 'changed' ? await archiveReplyEvidence(files, selected) : []
-      const response = await fetch('/api/latex/revision-response', { method: 'POST', signal: controller.signal,
-        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind, comment, original: archive.original,
-          revised: archive.revised, changes, authorNote: text.slice(0, 1500) }) })
-      const data = await response.json()
-      if (!response.ok) throw new Error(data.error || 'Could not draft a response.')
-      if (!controller.signal.aborted) setProposal({ key, ...revisionDraftSchema.parse(data) })
+      await sendMessage({ text: 'Draft a reply to this reviewer using only the attached archive evidence and author note.' }, {
+        body: { run: crypto.randomUUID(), workflow: 'revision', scope: [], revision: { kind, comment,
+          original: archive.original, revised: archive.revised, changes, authorNote: text.slice(0, 1500) } },
+      })
     } catch (cause) {
-      if (!controller.signal.aborted) setAiError(cause instanceof Error ? cause.message : 'Could not draft a response.')
-    } finally {
-      if (aiRequest.current === controller) { aiRequest.current = null; setAiBusy(false) }
-    }
+      setAiError(cause instanceof Error ? cause.message : 'Could not draft a response.')
+    } finally { setPreparing(false) }
   }
   return <form className="space-y-2 rounded border p-2" onSubmit={async event => {
     event.preventDefault()
     if (busy || !text.trim() || (kind === 'changed' && !selected.length)) return
     if (await onSave({ kind, text: text.trim(), paths: kind === 'changed' ? selected : [] })) setSaved(true)
   }}>
-    <fieldset disabled={busy} className="space-y-2">
+    <fieldset disabled={busy || aiBusy} className="space-y-2">
       <label className="grid gap-1 text-sm font-medium">Disposition
         <select className="rounded border p-1.5" value={kind} onChange={event => { setKind(event.target.value === 'retained' ? 'retained' : 'changed'); setSaved(false) }}>
           <option value="changed">Manuscript revised</option><option value="retained">Text retained</option>
@@ -135,12 +146,16 @@ function ResponseForm({ initial, paths, files, busy, onSave, archive, comment }:
       <Button type="button" size="sm" variant="outline" disabled={busy || aiBusy || !eligible} onClick={() => void generateReply()}>
         {aiBusy ? 'Drafting with AI…' : 'Draft response with AI'}
       </Button>
-      {aiBusy && <Button type="button" size="sm" variant="ghost" onClick={() => aiRequest.current?.abort()}>Cancel draft</Button>}
+      {aiBusy && <Button type="button" size="sm" variant="ghost" disabled={status !== 'streaming' && status !== 'submitted'} onClick={() => void stop()}>Cancel draft</Button>}
       {initial && <Button type="button" size="sm" variant="outline" disabled={busy} onClick={async () => {
         if (await onSave()) { setText(''); setSelected([]); setSaved(false) }
       }}>Mark awaiting response</Button>}
       {saved && <span role="status" className="text-sm">Response saved.</span>}
     </div>
+    {streamingReply && aiBusy && <div aria-label="Reply progress" className="space-y-1 rounded border p-2 text-sm">
+      <ChatToolProgress message={streamingReply} />
+      <p className="whitespace-pre-wrap break-words">{chatText(streamingReply)}</p>
+    </div>}
     {aiError && <p role="alert" className="text-sm text-red-800">{aiError}</p>}
     {proposal?.key === key && <section aria-label="AI response draft" className="space-y-2 rounded border bg-slate-50 p-2 text-sm">
       <p className="whitespace-pre-wrap break-words">{proposal.draft}</p>

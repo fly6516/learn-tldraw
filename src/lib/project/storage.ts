@@ -1,3 +1,6 @@
+import { chatActionPaths, nextChatCheckpoint, type ChatAction } from './writing-chat-actions'
+import type { ChatCheckpoint, ChatHistory, ChatSource } from './writing-chat'
+import { updateFileContent } from './file-system'
 import type { ProjectFileSystem } from './types'
 import type { ProjectSnapshot, ProjectSnapshotInfo } from './snapshots'
 import { restoreSnapshotFiles } from './snapshots'
@@ -394,4 +397,80 @@ export function writeProject(database: IDBDatabase, key: string, project: Projec
         transaction.onabort = () => reject(transaction.error)
         transaction.objectStore(storeName).put(project, key)
     })
+}
+
+export async function readChatHistory(database: IDBDatabase, key: WritingKey) {
+    const transaction = database.transaction(storeName)
+    const read = transaction.objectStore(storeName).get(['ai-history', ...key])
+    await complete(transaction)
+    return read.result as ChatHistory | undefined
+}
+
+export async function writeChatHistory(database: IDBDatabase, key: WritingKey, history: ChatHistory) {
+    const transaction = database.transaction(storeName, 'readwrite')
+    transaction.objectStore(storeName).put(history, ['ai-history', ...key])
+    await complete(transaction)
+}
+
+export async function readChatCheckpoints(database: IDBDatabase, key: WritingKey) {
+    const transaction = database.transaction(storeName)
+    const range = IDBKeyRange.bound(['ai-change', ...key], ['ai-change', ...key, []], false, true)
+    const checkpoints: Record<string, ChatCheckpoint['state']> = Object.create(null)
+    const request = transaction.objectStore(storeName).openCursor(range)
+    request.onsuccess = () => {
+        const cursor = request.result
+        if (!cursor) return
+        checkpoints[(cursor.key as [string, ...WritingKey, string])[3]] = (cursor.value as ChatCheckpoint).state
+        cursor.continue()
+    }
+    await complete(transaction)
+    return checkpoints
+}
+
+export async function commitChatAction(database: IDBDatabase, key: WritingKey, runId: string, action: ChatAction) {
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    const store = transaction.objectStore(storeName)
+    const entry = ['ai-change', ...key, runId]
+    const projectRead = store.get(key[0])
+    const checkpointRead = store.get(entry)
+    let result: { project: ProjectFileSystem; checkpoint: ChatCheckpoint; changed: boolean } | undefined
+    let failure: unknown
+    checkpointRead.onsuccess = () => {
+        const original = projectRead.result as ProjectFileSystem | undefined
+        if (!original || original.metadata.createdAt !== key[1]) return
+        const previous = checkpointRead.result as ChatCheckpoint | undefined
+        const paths = chatActionPaths(action, previous)
+        const requests = paths.map(path => ({ path, request: store.get(['draft', ...key, path]) }))
+        function mutate(project: ProjectFileSystem) {
+            const current: Record<string, ChatSource> = Object.create(null)
+            for (const { path, request } of requests) {
+                const saved = editableSource(project, path)
+                if (saved !== undefined) current[path] = { saved, draft: request.result }
+            }
+            let checkpoint
+            try { checkpoint = nextChatCheckpoint(action, current, project.metadata.mainFile, previous) }
+            catch (cause) { failure = cause; return }
+            if (!checkpoint) {
+                if (previous) result = { project, checkpoint: previous, changed: false }
+                return
+            }
+            const original = project
+            for (const [path, source] of Object.entries(checkpoint.after)) {
+                if (source.saved !== current[path].saved) project = updateFileContent(project, path, source.saved)
+                const keyPath = ['draft', ...key, path]
+                if (source.draft) store.put(source.draft, keyPath)
+                else store.delete(keyPath)
+            }
+            if (project !== original) store.put(project, key[0])
+            store.put(checkpoint, entry)
+            result = { project, checkpoint, changed: true }
+        }
+        const last = requests.at(-1)
+        if (last) last.request.onsuccess = () => mutate(original)
+        else mutate(original)
+    }
+    await complete(transaction)
+    if (failure) throw failure
+    if (!result) throw new Error('The project or proposal is unavailable.')
+    return result
 }

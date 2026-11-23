@@ -2,7 +2,7 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
-import { Cable, ChevronDown, Hand, Maximize, MousePointer2, PanelRight, Plus, Redo2, Trash2, Undo2, X } from 'lucide-react'
+import { Cable, ChevronDown, Hand, Maximize, MousePointer2, PanelRight, Plus, Redo2, Trash2, Undo2 } from 'lucide-react'
 import {
   Background, Controls, getViewportForBounds, Handle, MarkerType, Position, ReactFlow, ViewportPortal,
   type Connection, type EdgeChangeset, type Node, type NodeChangeset, type NodeProps,
@@ -10,6 +10,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { Button } from '@/components/ui/button'
+import { RightToolPanel, useRightToolPanelWide } from '@/components/ui/right-tool-panel'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
@@ -267,7 +268,10 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
   const [flow, setFlow] = useState<ReactFlowInstance<FlowNode>>()
   const [error, setError] = useState('')
   const [tool, setTool] = useState<CanvasTool>('select')
-  const [propertiesOpen, setPropertiesOpen] = useState(false)
+  const wideProperties = useRightToolPanelWide()
+  const [showProperties, setShowProperties] = useState<boolean>()
+  const propertiesOpen = showProperties ?? wideProperties
+  const [propertiesExpanded, setPropertiesExpanded] = useState(false)
   const overviewDrag = useRef(false)
   const fittedOnOpen = useRef(false)
   const [connectionStart, setConnectionStart] = useState<string>()
@@ -518,8 +522,12 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
                 aria-label={label} title={`${label} (${shortcut})`} onClick={() => pickTool(mode)}><Icon /><span className="hidden sm:inline">{label}</span></Button>
             ))}
           </div>
-          {(activeNode || activeEdge) && <Button size="icon-sm" variant="ghost" className="lg:hidden" aria-label="Open Canvas properties"
-            onClick={() => setPropertiesOpen(open => !open)}><PanelRight /></Button>}
+          <Button size="sm" variant={propertiesOpen && (activeNode || activeEdge) ? 'secondary' : 'ghost'}
+            aria-label={activeEdge ? 'Connection details' : 'Node details'} aria-controls="canvas-properties"
+            aria-expanded={Boolean(propertiesOpen && (activeNode || activeEdge))}
+            disabled={!activeNode && !activeEdge} onClick={() => setShowProperties(!propertiesOpen)}>
+            <PanelRight /><span className="hidden sm:inline">{activeEdge ? 'Connection details' : 'Node details'}</span>
+          </Button>
           <div className="flex gap-0.5">
             <Button size="icon-sm" variant="ghost" aria-label="Undo" title="Undo (Ctrl / Cmd + Z)" disabled={!canUndo}
               onClick={() => moveHistory('undo')}><Undo2 /></Button>
@@ -575,11 +583,10 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
             Add a research node to organize your paper.
           </p>}
         </div>
-        {(activeNode || activeEdge) && <div className={`min-h-0 w-72 max-w-[90vw] overflow-auto border-l bg-background lg:relative lg:block ${propertiesOpen
-          ? 'absolute inset-y-0 right-0 z-20 shadow-lg' : 'hidden'}`}>
-          <Button size="icon-sm" variant="ghost" className="float-right m-1 lg:hidden" aria-label="Close Canvas properties"
-            onClick={() => setPropertiesOpen(false)}><X /></Button>
-          {activeNode ? (
+        {(activeNode || activeEdge) && <RightToolPanel id="canvas-properties" title={activeEdge ? 'Connection details' : 'Node details'}
+          open={propertiesOpen} expanded={propertiesExpanded} onResize={() => setPropertiesExpanded(value => !value)}
+          onClose={() => setShowProperties(false)}>
+          <div className="min-h-0 flex-1 overflow-auto">          {activeNode ? (
           <NodeDetails key={activeNode.id} node={activeNode} page={page}
             onOpenSource={sourceStatus(activeNode.data) === 'available' ? () => onOpenSource(activeNode.data) : undefined}
             sourceUnavailable={sourceStatus(activeNode.data) === 'unavailable'}
@@ -599,7 +606,8 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
               .map(id => page.nodes.find(node => node.id === id)).flatMap(node => node ? [nodeTitle(node.data)] : []).join(' → ')}</p>}
             <Button size="sm" variant="outline" onClick={deleteSelection}>Remove connection</Button>
           </aside>}
-        </div>}
+          </div>
+        </RightToolPanel>}
       </div>
     </div>
   )

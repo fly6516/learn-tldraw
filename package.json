@@ -11,6 +11,7 @@
   "dependencies": {
     "@ai-sdk/deepseek": "^3.0.89",
     "@ai-sdk/openai": "^4.0.122",
+    "@ai-sdk/react": "^4.0.183",
     "@hookform/resolvers": "^5.2.2",
     "@monaco-editor/react": "^4.7.0",
     "@radix-ui/react-accordion": "^1.2.12",

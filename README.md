@@ -149,35 +149,38 @@ preserves the link when a caption changes. A table card shows the caption, label
 Generated LaTeX includes the section cards in the entire project in document order. Repositioning
 or repaging the cards preserves that order. Images and tables stay attached to the project.
 
-## AI chapter editing
+## Writing AI
 
 Set `DEEPSEEK_API_KEY` on the local Next.js server to use the official DeepSeek API.
-`DEEPSEEK_MODEL` defaults to `deepseek-flash`. For OpenAI instead, set `OPENAI_API_KEY` and
-`OPENAI_MODEL` to a model that supports Structured Outputs on the Responses API.
-`OPENAI_BASE_URL` optionally points to a compatible Responses server. Keep the key on the
-server and run the workbench on loopback.
+`DEEPSEEK_MODEL` defaults to `deepseek-flash`. To use OpenAI instead, set `OPENAI_API_KEY`
+and `OPENAI_MODEL`. `OPENAI_BASE_URL` optionally points to a compatible Responses server.
+Keep the key on the server and run the workbench on loopback.
 
-Open an editable `.tex` file and toggle **Chapter AI** beside PDF Preview, or in the Writing
-toolbar on narrow screens. Choose **Review Chapter** or **Rewrite Chapter**. The Vercel AI SDK
-gives the configured model read-only tools for project search, bounded source excerpts,
-bibliography and label lookup, and compiler diagnostics. The model receives the selected chapter
-and the excerpts its tools request. Compiler output from an earlier source version is marked stale.
+Open **Writing AI** from the Writing tools bar. The panel sits on the right beside the
+editor and PDF on wide windows and opens as a right-side drawer on smaller windows.
+Use **Expand** to make it wider or close it to reclaim the full work area. Canvas node and
+connection details use the same controls.
 
-Select a result in **Project evidence** to locate the source. The chapter being reviewed stays
-pinned while you inspect another file. Review the before/after passages, then choose **Apply to
-Source** to save to the target file. Changes to the target or main file require a new suggestion
-before applying. Choose **Compile PDF** to typeset the updated project.
+The assistant streams its replies and tool activity. The Chapter, Across files and Compiler
+problems workflows guide it through bounded source excerpts, project search, reference lookup,
+and compiler diagnostics. Open **Source evidence** to jump to the file and line. A preview
+compile request uses the regular compiler only after you approve it. Conversations are stored
+per project in this browser. The model receives recent conversation text, project paths, and
+the excerpts returned by its tools.
 
-In **Multiple files**, select two to six editable LaTeX files. **Review files** shows
-findings with source locations verified against tool results. **Propose edits** groups the
-diffs by file. Select individual changes and apply them together to local drafts, then save
-to the project when ready. Changes to any selected source invalidate its old proposal.
+Use **Scope** to select up to six editable LaTeX files. By default, inspect **View diff** and
+select changes before choosing **Apply to drafts**. **Save to project** is a separate action.
+The project checks the saved source and local draft before applying or saving. **Undo AI changes**
+restores the original source and draft for the affected files while protecting later edits.
 
-In **Revision rounds → Responses and letter**, select a revised submission and the files
-that support the response. **Draft response with AI** sends the reviewer comment, author
-notes and bounded excerpts from the two archived ZIPs. For retained text, supply your own
-reason. **Use AI draft** puts the proposal in the response editor; save the response
-separately after review.
+Optional automatic approval applies to the approved files in the current conversation.
+**Auto draft** still leaves saving to you. In **Auto draft and save**, start the specific request
+with “Apply and save.” Refreshing or switching conversations clears the approval.
+
+Choose **Reviewer reply** to open Revision rounds. Select a revised submission and the files
+that support the response before choosing **Draft response with AI**. This workflow reads bounded
+excerpts from the archived ZIPs. **Use AI draft** copies the streamed proposal into the response
+editor for review before saving.
 
 ## References
 
