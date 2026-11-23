@@ -1,20 +1,13 @@
 import { createHash } from 'node:crypto'
-import { execFileSync } from 'node:child_process'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { expect, firefox, test, type Page } from '@playwright/test'
 import JSZip from 'jszip'
 import { testMethodLine, testMethods, testResultLine, testResults } from '../../src/lib/project/test-paper'
+import { externalTexCommand } from '../fixtures/external-tex'
 
 const distro = process.env.RESEARCH_BIBER_WSL
 test.skip(!distro && process.env.RESEARCH_BIBER_TEST !== '1', 'Requires a TeX Live installation with Biber and Poppler.')
-
-function externalCommand(command: string, args: string[], cwd: string) {
-  const options = { encoding: 'utf8' as const, timeout: 60_000 }
-  if (!distro) return execFileSync(command, args, { ...options, cwd })
-  const directory = execFileSync('wsl.exe', ['-d', distro, '--', 'wslpath', '-a', cwd.replaceAll('\\', '/')], options).trim()
-  return execFileSync('wsl.exe', ['-d', distro, '--cd', directory, '--', command, ...args], options)
-}
 
 async function riverPaper() {
   const zip = new JSZip()
@@ -101,9 +94,9 @@ test('revokes draft access and restores the exact Biber PDF across browsers befo
     await mkdir(join(destination, '..'), { recursive: true })
     await writeFile(destination, await entry.async('nodebuffer'))
   }
-  const log = externalCommand('latexmk', ['-norc', '-pdf', '-latexoption=-no-shell-escape', './main.tex'], directory)
+  const log = externalTexCommand('latexmk', ['-norc', '-pdf', '-latexoption=-no-shell-escape', './main.tex'], directory)
   expect(log).toMatch(/Running 'biber\b/i)
-  const contents = externalCommand('pdftotext', ['main.pdf', '-'], directory)
+  const contents = externalTexCommand('pdftotext', ['main.pdf', '-'], directory)
   expect(contents).toContain('River Gauge Study')
   expect(contents).toContain('Calibration appendix')
   expect(contents).toContain('River Gauge Calibration Handbook')

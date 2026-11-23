@@ -68,9 +68,27 @@ export function prepareSubmission(project: ProjectFileSystem, main: string, excl
   }
   const bibliographyPaths = new Set<string>()
   let uncertainBibliography = false
+  const selectedOptions = /\\documentclass\s*\[([^\]]*)\]/.exec(maskLatexCode(sources.get(main) ?? ''))?.[1]
+    .split(',').map(option => option.trim()) ?? []
+  const projectPaths = [...project.files.keys()]
   const hasGraphicsPath = [...sources.values()].some(source => /\\graphicspath\s*\{/.test(maskLatexCode(source)))
   for (const [path, source] of sources) {
     const text = maskLatexCode(source)
+    const templateFile = /\.(?:cls|sty)$/i.test(path)
+    for (const style of text.matchAll(/\\bibliographystyle\s*\{([^{}]+)\}/g)) {
+      const name = style[1].trim()
+      if (templateFile && !selectedOptions.includes(name)) continue
+      const literal = projectPath(root, name.endsWith('.bst') ? name : name + '.bst')
+      if (!literal) continue
+      const nested = name.includes('/') ? [] : projectPaths.filter(candidate => candidate.startsWith(root)
+        && candidate.endsWith('/' + literal.slice(root.length)))
+      const dependency = project.files.has(literal) ? literal : nested.length === 1 ? nested[0] : undefined
+      if (dependency && excluded.has(dependency)) {
+        const start = style.index + style[0].indexOf('{') + 1
+        issues.push({ severity: 'error', message: `Excluded bibliography style: ${dependency}`,
+          location: { path, line: lineNumber(source, start), start, end: start + style[1].length } })
+      }
+    }
     const commands = /\\(?:\\|(input|include|includegraphics|XeTeXpicfile|bibliography|addbibresource|graphicspath|includeonly)(?![\w@])\*?)/g
     for (const match of text.matchAll(commands)) {
       const command = match[1]
@@ -104,9 +122,12 @@ export function prepareSubmission(project: ProjectFileSystem, main: string, excl
         if (included) { if (bibliography) bibliographyPaths.add(included); continue }
         const offset = from + value.index + value[0].indexOf(literal)
         const excludedPath = candidates.find(candidate => excluded.has(candidate))
-        const searchPath = command === 'includegraphics' && hasGraphicsPath && !excludedPath
-        issue(excludedPath ? `Excluded dependency: ${excludedPath}` : searchPath ? `Check graphics search path: ${literal}` : `Missing file for \\${command}: ${literal}`,
-          searchPath ? 'warning' : 'error', offset, offset + literal.length)
+        const graphics = command === 'includegraphics' || command === 'XeTeXpicfile'
+        const optionalGraphics = graphics && templateFile
+        const searchPath = graphics && hasGraphicsPath && !excludedPath
+        issue(optionalGraphics ? `Check conditional template graphic: ${excludedPath ?? literal}`
+          : excludedPath ? `Excluded dependency: ${excludedPath}` : searchPath ? `Check graphics search path: ${literal}` : `Missing file for \\${command}: ${literal}`,
+          optionalGraphics || searchPath ? 'warning' : 'error', offset, offset + literal.length)
       }
     }
   }

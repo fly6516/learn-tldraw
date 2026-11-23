@@ -14,7 +14,7 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/componen
 import type { ImperativePanelGroupHandle, ImperativePanelHandle } from 'react-resizable-panels'
 import { useProjectFileSystem } from '@/contexts/ProjectFileSystemContext'
 import { getFileTree, updateFileContent, type FileTreeNode } from '@/lib/project/file-system'
-import { exportSourceArchive } from '@/lib/project/source-archive'
+import { exportSourceArchive, sourceArchiveEntry } from '@/lib/project/source-archive'
 import type { ProjectFile, ProjectFileSystem, ResearchNodeData } from '@/lib/project/types'
 import { WritingAiWorkbench } from './WritingAiWorkbench'
 import type { ChatAction } from '@/lib/project/writing-chat-actions'
@@ -114,7 +114,15 @@ function Files({ nodes, selected, main, onSelect, dirty, sourcePaths, onSetMain,
 
 type GenerateSource = (project: ProjectFileSystem, onNode?: (node: ResearchNodeData, line: number) => void) => string
 type CompileSnapshot = { main: string; files: ProjectFileSystem['files'] }
-type ExternalSubmission = Omit<SubmissionBuild, 'pdf' | 'warnings' | 'diagnostics'> & { checksum: string; downloadUrl: string }
+type ExternalSubmission = Omit<SubmissionBuild, 'pdf' | 'warnings' | 'diagnostics'> & { checksum: string; downloadUrl: string; snapshot: CompileSnapshot }
+
+function sameSubmissionInputs(previous: CompileSnapshot, current?: CompileSnapshot) {
+  return current && previous.main === current.main && previous.files.size === current.files.size
+    && [...previous.files].every(([path, before]) => {
+      const after = current.files.get(path)
+      return after && sourceArchiveEntry(before) === sourceArchiveEntry(after)
+    })
+}
 
 function submissionDiagnostics(diagnostics: CompileDiagnostic[], files: ProjectFileSystem['files']): SubmissionIssue[] {
   return diagnostics.map(({ path, line, severity, message }) => {
@@ -187,7 +195,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const [revision, setRevision] = useState<{ submissionId?: string }>()
   const [revisionRoundId, setRevisionRoundId] = useState<string>()
   const [includeDrafts, setIncludeDrafts] = useState(false)
-  const [submissionResult, setSubmissionResult] = useState<SubmissionBuild>()
+  const [submissionResult, setSubmissionResult] = useState<{ build: SubmissionBuild; snapshot: CompileSnapshot }>()
   const [externalSubmission, setExternalSubmission] = useState<ExternalSubmission>()
   const externalPreparation = useRef(0)
   const [submissionExcluded, setSubmissionExcluded] = useState<ReadonlySet<string>>(new Set())
@@ -327,6 +335,11 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     const excluded = new Set(paths.filter(path => path !== main && submissionExcluded.has(path)))
     return { ...prepareSubmission(source, main, excluded), paths, excluded }
   }, [submissionOpen, includeDrafts, workingProject, withGeneratedSource, project, main, submissionExcluded])
+  const submissionSnapshot = useMemo(() => submission && { main, files: submission.target.files }, [main, submission])
+  const latestSubmission = useRef(submissionSnapshot)
+  useLayoutEffect(() => { latestSubmission.current = submissionSnapshot }, [submissionSnapshot])
+  const freshExternal = externalSubmission && sameSubmissionInputs(externalSubmission.snapshot, submissionSnapshot) ? externalSubmission : undefined
+  const freshResult = submissionResult && sameSubmissionInputs(submissionResult.snapshot, submissionSnapshot) ? submissionResult.build : undefined
   const catalog = useMemo(() => ({ project: project.metadata.createdAt, index, blocks, references, files: workingFiles }),
     [index, blocks, references, workingFiles, project.metadata.createdAt])
   useLayoutEffect(() => {
@@ -855,7 +868,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
           sourceChecksum: packaged?.checksum }
         if (!chatSignal) {
           setSubmissionCompilerIssues(diagnostics)
-          setSubmissionResult(submission)
+          setSubmissionResult({ build: submission, snapshot: { main, files: target.files } })
           if (info?.hasWarnings) setSubmissionLog(info.log)
         }
       }
@@ -889,9 +902,9 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     }
   }
 
-  function resetSubmissionBuild() {
+  function resetSubmissionBuild(keepExternal = false) {
     externalPreparation.current++
-    setExternalSubmission(undefined)
+    if (!keepExternal) setExternalSubmission(undefined)
     setSubmissionResult(undefined)
     setSubmissionError('')
     setSubmissionLog('')
@@ -908,21 +921,24 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     const selection = getSubmissionSelection()
     if (!selection || locked) return
     const { target, ...info } = selection
+    const snapshot = { main, files: target.files }
     const token = ++externalPreparation.current
     try {
       const { zip, checksum } = await exportExternalBuild(target)
-      if (token !== externalPreparation.current) return
-      setExternalSubmission({ ...info, main, zip, checksum, downloadUrl: URL.createObjectURL(zip) })
+      if (token !== externalPreparation.current || !sameSubmissionInputs(snapshot, latestSubmission.current)) return
+      setExternalSubmission({ ...info, main, snapshot, zip, checksum, downloadUrl: URL.createObjectURL(zip) })
     } catch {
       if (token === externalPreparation.current) throw new Error('Could not prepare the external build ZIP.')
     }
   }
 
   function attachExternalPdf(pdf: File, engine: ExternalEngine, checksum: string) {
-    if (!externalSubmission || externalSubmission.checksum !== checksum) return
-    const { main, paths, excluded, drafts, issues, zip } = externalSubmission
-    setSubmissionResult({ main, paths, excluded, drafts, issues, zip, pdf: pdf.slice(0, pdf.size, 'application/pdf'),
-      warnings: false, diagnostics: [], externalEngine: engine, sourceChecksum: checksum })
+    if (!externalSubmission || externalSubmission.checksum !== checksum || !sameSubmissionInputs(externalSubmission.snapshot, latestSubmission.current)) {
+      throw new Error('The submission source changed. Prepare and compile the current ZIP before attaching a PDF.')
+    }
+    const { main, paths, excluded, drafts, issues, zip, snapshot } = externalSubmission
+    setSubmissionResult({ snapshot, build: { main, paths, excluded, drafts, issues, zip, pdf: pdf.slice(0, pdf.size, 'application/pdf'),
+      warnings: false, diagnostics: [], externalEngine: engine, sourceChecksum: checksum } })
     setSubmissionError('')
     setSubmissionLog('')
     setSubmissionCompilerIssues([])
@@ -1181,10 +1197,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
           <span>{/\.bib$/i.test(selected) ? 'BibTeX' : isTex ? 'LaTeX' : 'Plain text'} · Ctrl / ⌘ + S to save</span>
           {storage && journal.key && <Button variant="outline" size="sm" className="h-7" disabled={locked}
             onClick={() => setRevision({})}>Revision rounds</Button>}
-          <Button variant="outline" size="sm" className="h-7" disabled={!main || locked} onClick={() => {
-            resetSubmissionBuild()
-            setSubmissionOpen(true)
-          }}>Prepare submission</Button>
+          <Button variant="outline" size="sm" className="h-7" disabled={!main || locked} onClick={() => setSubmissionOpen(true)}>Prepare submission</Button>
         </div>
       </footer>
       {submission && <SubmissionDialog main={main} drafts={draftPaths} includeDrafts={includeDrafts} paths={submission.paths}
@@ -1193,10 +1206,11 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
           openFile(path, line)
         }}
         excluded={submission.excluded} issues={submission.issues} compilerIssues={submissionCompilerIssues}
-        compatibility={submission.compatibility} external={externalSubmission} onPrepareExternal={prepareExternalSubmission} onAttachExternal={attachExternalPdf}
+        compatibility={submission.compatibility} external={freshExternal} staleExternal={Boolean(externalSubmission && !freshExternal)}
+        onPrepareExternal={prepareExternalSubmission} onAttachExternal={attachExternalPdf}
         conflicting={includeDrafts && conflicts.some(path => !submission.excluded.has(path))}
-        ready={!locked} busy={busy} error={submissionError} log={submissionLog} result={submissionResult} database={storage} storageKey={journal.key}
-        onDraftChoice={include => { setIncludeDrafts(include); resetSubmissionBuild() }}
+        ready={!locked} busy={busy} error={submissionError} log={submissionLog} result={freshResult} database={storage} storageKey={journal.key}
+        onDraftChoice={include => { setIncludeDrafts(include); resetSubmissionBuild(true) }}
         onToggle={path => {
           setSubmissionExcluded(current => {
             const next = new Set(current)
@@ -1204,7 +1218,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
             else next.add(path)
             return next
           })
-          resetSubmissionBuild()
+          resetSubmissionBuild(true)
         }}
         onClose={() => setSubmissionOpen(false)} onLocate={issue => {
           const { location } = issue

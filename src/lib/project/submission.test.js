@@ -48,3 +48,21 @@ test('finds Biber in the selected custom class and reports a locally excluded cl
   expect(prepareSubmission(project, 'main.tex', new Set(['riverstudy.cls'])).issues[0])
     .toMatchObject({ severity: 'error', message: 'Excluded dependency: riverstudy.cls', location: { path: 'main.tex', line: 1 } })
 })
+
+test('flags the selected nested bibliography style without requiring inactive class graphics', () => {
+  const file = (path, content) => [path, { path, type: 'editable', content }]
+  const files = new Map([
+    file('paper/main.tex', String.raw`\documentclass[pdflatex,numbered]{journal}\bibliography{refs}`),
+    file('paper/journal.cls', String.raw`\bibliographystyle{numbered}
+\bibliographystyle{author-year}
+\def\optionalLogo{\includegraphics{logo.eps}}`),
+    file('paper/refs.bib', '@misc{sample,title={Sample}}'),
+    file('paper/bst/numbered.bst', 'selected'), file('paper/bst/author-year.bst', 'inactive'),
+  ])
+  const { issues, compatibility } = prepareSubmission({ files }, 'paper/main.tex', new Set(['paper/bst/numbered.bst', 'paper/bst/author-year.bst']))
+  expect(compatibility).toMatchObject({ engine: 'pdflatex', bibliography: 'bibtex' })
+  expect(issues).toMatchObject([
+    { severity: 'error', message: 'Excluded bibliography style: paper/bst/numbered.bst', location: { path: 'paper/journal.cls', line: 1 } },
+    { severity: 'warning', message: 'Check conditional template graphic: logo.eps' },
+  ])
+})

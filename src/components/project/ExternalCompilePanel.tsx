@@ -1,19 +1,21 @@
 'use client'
 
-import { useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { externalCompileCommand, missingCompilerFile, type CompileCompatibility, type ExternalEngine } from '@/lib/project/compile-compatibility'
 
-export function ExternalCompilePanel({ main, compatibility, error, checksum, downloadUrl, busy, ready, onPrepare, onAttach }: {
-  main: string; compatibility: CompileCompatibility; error: string; checksum?: string; downloadUrl?: string; busy: boolean; ready: boolean
-  onPrepare: () => Promise<void>; onAttach: (pdf: File, engine: ExternalEngine) => void
+export function ExternalCompilePanel({ main, compatibility, error, checksum, downloadUrl, busy, ready, stale, onPrepare, onAttach }: {
+  main: string; compatibility: CompileCompatibility; error: string; checksum?: string; downloadUrl?: string; busy: boolean; ready: boolean; stale?: boolean
+  onPrepare: () => Promise<void>; onAttach: (pdf: File, engine: ExternalEngine) => void | Promise<void>
 }) {
   const [choice, setChoice] = useState<ExternalEngine>()
   const [input, setInput] = useState<{ checksum: string; file: File }>()
   const [confirmed, setConfirmed] = useState(false)
   const [message, setMessage] = useState('')
   const [preparing, setPreparing] = useState(false)
+  const latestChecksum = useRef(checksum)
+  useLayoutEffect(() => { latestChecksum.current = checksum }, [checksum])
   const selected = input?.checksum === checksum ? input?.file : undefined
   const engine = choice ?? compatibility.engine ?? 'xelatex'
   const directory = main.includes('/') ? main.slice(0, main.lastIndexOf('/')) : 'the extracted ZIP root'
@@ -21,6 +23,7 @@ export function ExternalCompilePanel({ main, compatibility, error, checksum, dow
 
   return <details className="space-y-2 rounded border p-2 text-sm">
     <summary className="cursor-pointer font-medium">External compilation</summary>
+    {stale && <p role="status" className="text-amber-800">External ZIP out of date. Prepare and compile the current ZIP before attaching a PDF.</p>}
     {compatibility.engine && <p>Template engine hint <strong>{compatibility.engine}</strong></p>}
     {compatibility.bibliography && <p>Bibliography hint <strong>{compatibility.bibliography === 'biber' ? 'Biber' : 'BibTeX'}</strong></p>}
     {missingFile && <p className="break-words text-amber-800">The built-in compiler could not find <code>{missingFile}</code>. Check the selected files and the TeX installation used for compilation.</p>}
@@ -54,9 +57,12 @@ export function ExternalCompilePanel({ main, compatibility, error, checksum, dow
       <Button type="button" size="sm" disabled={busy || !selected || !confirmed} onClick={async () => {
         if (!selected || !confirmed) return
         try {
-          if (selected.size > 64 * 1024 * 1024 || await selected.slice(0, 5).text() !== '%PDF-') throw new Error()
-          onAttach(selected, engine)
-        } catch { setMessage('Select a PDF file of at most 64 MB.') }
+          if (selected.size > 64 * 1024 * 1024 || await selected.slice(0, 5).text() !== '%PDF-') {
+            throw new Error('Select a PDF file of at most 64 MB.')
+          }
+          if (latestChecksum.current !== checksum) throw new Error('The source ZIP changed. Prepare and compile the current ZIP again.')
+          await onAttach(selected, engine)
+        } catch (cause) { setMessage(cause instanceof Error ? cause.message : 'Could not attach the external PDF.') }
       }}>Attach external PDF</Button>
     </> : <Button type="button" size="sm" variant="outline" disabled={!ready || busy || preparing} onClick={async () => {
       setPreparing(true)

@@ -31,7 +31,7 @@ type VersionDraft = Omit<SubmissionVersion, 'id' | 'createdAt' | 'name'>
 
 export function SubmissionDialog({ main, drafts, includeDrafts, onDraftChoice, conflicting, paths, excluded, onToggle,
   issues, ready, busy, error, log, result, compilerIssues, onClose, onCompile, onLocate, database, storageKey,
-  compatibility, external, onPrepareExternal, onAttachExternal, onStartRevision, target, working, onEvidenceLocate }: {
+  compatibility, external, staleExternal, onPrepareExternal, onAttachExternal, onStartRevision, target, working, onEvidenceLocate }: {
   main: string
   drafts: string[]
   includeDrafts: boolean
@@ -54,6 +54,7 @@ export function SubmissionDialog({ main, drafts, includeDrafts, onDraftChoice, c
   storageKey?: WritingKey
   compatibility: CompileCompatibility
   external?: { downloadUrl: string; checksum: string }
+  staleExternal?: boolean
   onPrepareExternal: () => Promise<void>
   onAttachExternal: (pdf: File, engine: ExternalEngine, checksum: string) => void
   onStartRevision: (submissionId: string) => void
@@ -160,7 +161,7 @@ export function SubmissionDialog({ main, drafts, includeDrafts, onDraftChoice, c
           <Button onClick={() => download(result.pdf, `${name}.pdf`)}><Download /> Download submission PDF</Button>
         </> : <Button onClick={onCompile} disabled={busy || !ready || conflicting}>Compile submission files</Button>}
       </div>
-      {!result && <ExternalCompilePanel main={main} compatibility={compatibility} error={error} checksum={external?.checksum}
+      {!result && <ExternalCompilePanel main={main} compatibility={compatibility} error={error} checksum={external?.checksum} stale={staleExternal}
         downloadUrl={external?.downloadUrl}
         busy={busy} ready={ready && !conflicting} onPrepare={onPrepareExternal}
         onAttach={(pdf, engine) => { if (external) onAttachExternal(pdf, engine, external.checksum) }} />}

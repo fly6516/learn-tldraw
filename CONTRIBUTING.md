@@ -73,5 +73,16 @@ pdfLaTeX, biblatex, Biber, latexmk, and Poppler `pdftotext` in the test environm
 ZIP, backs up the verified task in Chromium, and imports it in Firefox before archiving.
 It compares the archived ZIP and PDF bytes and checks that an edited copy needs a fresh build.
 
+The publisher regression uses the [Springer Nature December 2024 template ZIP](https://www.springernature.com/gp/authors/campaigns/latex-author-support).
+Set `RESEARCH_PUBLISHER_ZIP` to the downloaded file and run `bun run test:e2e tests/e2e/publisher-template.spec.ts`.
+Keep the template and generated files in an ignored test folder. The regression pins the
+publisher ZIP by SHA-256 and builds two ZIPs downloaded from the browser. It needs
+pdfLaTeX, BibTeX, latexmk, `epstopdf`, Ghostscript, and Poppler `pdftotext`. On Ubuntu,
+install `texlive-latex-extra`, `texlive-science`, and `texlive-font-utils` to supply
+`manyfoot.sty`, `algorithm.sty`, and EPS conversion support.
+On Windows the test can run the commands in the distribution named by `RESEARCH_BIBER_WSL`.
+The build uses a recursive `BSTINPUTS` path for the `bst/` directory and preconverts
+the included EPS with `epstopdf` before calling latexmk with shell escape disabled.
+
 Use `.env.example` as a reference for local environment options. Keep real credentials,
 private research, and local test outputs out of commits.

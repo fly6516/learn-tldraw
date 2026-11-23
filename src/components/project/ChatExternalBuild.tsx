@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { exportExternalBuild } from '@/lib/project/submission'
 import type { CompileCompatibility, ExternalEngine } from '@/lib/project/compile-compatibility'
 import type { ProjectFileSystem } from '@/lib/project/types'
@@ -14,11 +14,11 @@ export function ChatExternalBuild({ target, main, compatibility, ready, busy, on
   const [attaching, setAttaching] = useState(false)
   const [error, setError] = useState('')
   const latest = useRef(target)
-  useEffect(() => { latest.current = target }, [target])
+  useLayoutEffect(() => { latest.current = target }, [target])
   useEffect(() => () => { if (prepared) URL.revokeObjectURL(prepared.url) }, [prepared])
   const build = prepared?.target === target ? prepared : undefined
   return <div className="space-y-1">
-    <ExternalCompilePanel main={main} compatibility={compatibility} error="" busy={busy || attaching}
+    <ExternalCompilePanel main={main} compatibility={compatibility} error="" busy={busy || attaching} stale={Boolean(prepared && !build)}
       ready={ready && Boolean(target)} checksum={build?.checksum} downloadUrl={build?.url}
       onPrepare={async () => {
         if (!target || !ready) return
