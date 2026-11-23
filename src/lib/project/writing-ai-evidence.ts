@@ -4,6 +4,34 @@ import type { ProjectFileSystem } from './types'
 
 export type SourceMove = { from: string; to: string }
 export type EvidenceQuote = { quote: string; before: string; after: string; requireContext?: boolean; wholeLine?: boolean }
+export type InlineEvidenceTarget = { path: string; location?: { path: string; line: number } }
+
+export function inlineEvidenceTargets(project: ProjectFileSystem, evidence: readonly {
+  path: string; line: number; text: string; kind: string; anchor?: EvidenceQuote
+}[], moves: readonly SourceMove[], revision: number | undefined, bibliography: ReadonlyMap<string, { path: string; line: number } | undefined>) {
+  const targets = new Map<string, InlineEvidenceTarget>()
+  function add(label: string, target: InlineEvidenceTarget) {
+    const previous = targets.get(label)
+    if (!previous) targets.set(label, target)
+    else if (previous.location?.path !== target.location?.path || previous.location?.line !== target.location?.line) {
+      targets.set(label, { path: target.path })
+    }
+  }
+  for (const item of evidence) {
+    if (item.kind === 'compile_diagnostics') continue
+    const location = locateEvidence(project, item, moves, revision ?? (moves.length === 0 ? 0 : undefined))
+    add(`${item.path}:${item.line}`, { path: item.path, location })
+    if (item.kind === 'query_references' && /\.bib$/i.test(item.path)) {
+      const key = item.text.split(' · ')[0]
+      if (!/^[\w.:+/\-]+$/.test(key)) continue
+      const definition = bibliography.get(key)
+      const target = { path: item.path, location: location && definition?.path === location.path && definition?.line === location.line ? location : undefined }
+      add('@' + key, target)
+      add(key, target)
+    }
+  }
+  return targets
+}
 
 export function captureEvidenceQuote(path: string, source: string, line: number): EvidenceQuote | undefined {
   const lines = source.split(/\r\n|\r|\n/)

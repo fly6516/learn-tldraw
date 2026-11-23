@@ -2,6 +2,7 @@ import { defineConfig, devices } from '@playwright/test'
 
 const livePath = process.env.RESEARCH_LIVE_TEST_PATH
   || (process.env.RESEARCH_LIVE_TEST === '1' || process.env.RESEARCH_LIVE_TEST_ZIP ? '/research' : undefined)
+const keylessSample = process.env.RESEARCH_SAMPLE_NO_KEY === '1'
 const port = livePath ? 3178 : 3177
 const server = `http://127.0.0.1:${port}`
 
@@ -17,8 +18,8 @@ export default defineConfig({
   use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 }, baseURL: server, trace: 'retain-on-failure' },
   webServer: {
     command: `bun run start --hostname 127.0.0.1 --port ${port}`,
-    url: server + (livePath ?? '/research-test'),
-    env: { RESEARCH_TEST_MODE: livePath ? '0' : '1', LATEX_COMPILE_ENABLED: '1', NEXT_TELEMETRY_DISABLED: '1',
+    url: server + (livePath ?? (keylessSample ? '/research' : '/research-test')),
+    env: { RESEARCH_TEST_MODE: livePath || keylessSample ? '0' : '1', LATEX_COMPILE_ENABLED: '1', NEXT_TELEMETRY_DISABLED: '1',
       ...(livePath ? {} : { DEEPSEEK_API_KEY: '', OPENAI_API_KEY: '' }) },
     timeout: 60_000,
   },

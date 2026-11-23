@@ -1,0 +1,3 @@
+export const writingSampleFiles = ['sections/methods.tex', 'sections/results.tex']
+export const writingSampleSubmission = 'Practice submission'
+export const writingSamplePrompt = `Revise sections/methods.tex and sections/results.tex, compile the manuscript, and prepare the submission named "${writingSampleSubmission}". In Methods replace "We recorded a temperature for each synthetic observation." with "We recorded one temperature per synthetic observation." In Results replace "The synthetic observations had an average of twenty degrees." with "The mean temperature of the synthetic observations was twenty degrees." Preserve the surrounding text and all figures. The observations are synthetic and confirmed for this sample.`

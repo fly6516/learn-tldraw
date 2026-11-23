@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { morningWalkZip } from '../fixtures/morning-walk'
 
 test('renders streamed Markdown in a narrow Writing AI panel without widening the layout', async ({ page }) => {
   await page.setViewportSize({ width: 414, height: 850 })
@@ -33,4 +34,37 @@ test('renders streamed Markdown in a narrow Writing AI panel without widening th
   await page.setViewportSize({ width: 1133, height: 813 })
   await expect(table.getByRole('columnheader', { name: '文件' })).toBeVisible()
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(0)
+})
+
+test('opens verified Markdown evidence across files and returns to the same narrow chat', async ({ page }) => {
+  await page.setViewportSize({ width: 414, height: 850 })
+  await page.goto('/research')
+  await page.getByLabel('Choose project ZIP or backup').setInputFiles({
+    name: 'Morning Walk Study.zip', mimeType: 'application/zip', buffer: await morningWalkZip(),
+  })
+  await expect(page.getByRole('heading', { name: 'Morning Walk Study' })).toBeVisible()
+  await page.getByRole('button', { name: 'Writing AI', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Message Writing AI' }).fill('Test: show inline evidence')
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  const message = page.getByRole('article', { name: 'Assistant' }).last()
+  await expect(message.getByText(/sections\/methods\.tex:999/)).toBeVisible()
+  await expect(message.getByRole('button', { name: /999/ })).toHaveCount(0)
+  await expect(message.locator('pre button')).toHaveCount(0)
+  const table = message.getByRole('table')
+  const editor = page.getByRole('region', { name: 'Source editor' })
+  for (const [scope, button, source] of [
+    [message, 'Open sections/methods.tex:3', 'sections/methods.tex'],
+    [table, 'Open sections/results.tex:3', 'sections/results.tex'],
+    [table, 'Open data/sessions.csv:2', 'data/sessions.csv'],
+    [table, /^Open references\/library\.bib:\d+$/, 'references/library.bib'],
+  ] as const) {
+    await scope.getByRole('button', { name: button, exact: typeof button === 'string' }).click()
+    await expect(editor.getByText(source, { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Back to Writing AI' }).click()
+    await expect(scope.getByRole('button', { name: button, exact: typeof button === 'string' })).toBeFocused()
+  }
+  await expect(page.getByRole('button', { name: 'Stop', exact: true })).toHaveCount(0)
+  await page.reload()
+  await page.getByRole('button', { name: 'Writing AI', exact: true }).click()
+  await expect(table.getByRole('button', { name: 'Open data/sessions.csv:2', exact: true })).toBeVisible()
 })

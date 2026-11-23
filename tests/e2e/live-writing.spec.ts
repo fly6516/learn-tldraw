@@ -223,3 +223,15 @@ test('real model carries one Morning Walk Study request from CSV evidence to an 
   await submission.getByRole('button', { name: 'Confirm submission archive' }).click()
   await expect(submission.getByText('Archived Evidence review.')).toBeVisible()
 })
+
+test('real model uses the read-only CSV calculator and displays its exact inputs', async ({ page }) => {
+  test.setTimeout(100_000)
+  await openPaper(page)
+  await openAi(page)
+  await send(page, 'Calculate the mean using calculate_csv. Use data/sessions.csv, column shaded_c, CSV record numbers 3 and 4 (the header is 1), rounded to 2 decimal places. This is a read-only check.')
+  const calculation = page.getByRole('region', { name: 'CSV calculation calc-1', exact: true })
+  await expect(calculation.getByText('(27.5 + 27) / 2 = 27.25 · 2 decimal places')).toBeVisible({ timeout: 65_000 })
+  await expect(calculation.getByRole('button', { name: 'data/sessions.csv:3' })).toBeVisible()
+  await expect(calculation.getByRole('button', { name: 'data/sessions.csv:4' })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Source change proposal' })).toHaveCount(0)
+})

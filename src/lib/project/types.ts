@@ -102,6 +102,7 @@ export interface ProjectFileSystem {
     createdAt: string
     updatedAt: string
     sourceMode?: 'archive'
+    writingSample?: boolean
     mainFile?: string
   }
 }

@@ -15,8 +15,8 @@ import type { ChatAction } from '@/lib/project/writing-chat-actions'
 import { validateChatProposal, verificationBaseline, type ChatVerification, type ManuscriptBuild } from '@/lib/project/writing-chat-validation'
 import { editableSource, type WritingDrafts, type WritingKey } from '@/lib/project/writing-drafts'
 import type { ProjectFileSystem } from '@/lib/project/types'
-import { locateEvidence, type SourceMove } from '@/lib/project/writing-ai-evidence'
-import { collectBibliography, findNewUnknownCitations } from '@/lib/project/references'
+import { inlineEvidenceTargets, locateEvidence, type SourceMove } from '@/lib/project/writing-ai-evidence'
+import { collectBibliography, findNewUnknownCitations, indexCanvasReferences } from '@/lib/project/references'
 import { confirmChatRevisionSetup, prepareChatLetter, prepareChatReply, prepareChatRevisionSetup } from '@/lib/project/chat-revision'
 import { revisionDraftSchema } from '@/lib/project/ai-revision'
 import type { SubmissionBuild, SubmissionSelection } from '@/lib/project/submission'
@@ -28,6 +28,9 @@ import { manuscriptPlanSchema, manuscriptProgress, type ManuscriptContext, type 
 import { buildAttachmentContext } from '@/lib/project/ai-attachments'
 import { ClaimEvidence, type ReviewedClaim } from './ClaimEvidence'
 import { WritingMarkdown } from './WritingMarkdown'
+import { csvCalculationSchema } from '@/lib/project/csv-calculation'
+import { CalculationEvidence } from './CalculationEvidence'
+import { writingSampleFiles, writingSamplePrompt } from '@/lib/project/writing-sample'
 import { writingClaimsSchema, type ClaimReview } from '@/lib/project/writing-claims'
 
 const Diff = dynamic(() => import('./MonacoSourceEditor').then(module => module.WritingDraftComparison), { ssr: false })
@@ -60,6 +63,7 @@ const toolLabels: Record<string, string> = {
   prepare_revision_round: 'Check revision baseline', prepare_reviewer_comment: 'Check reviewer comment target',
   plan_manuscript: 'Plan manuscript changes', list_attachments: 'List project attachments', read_csv_rows: 'Read CSV evidence',
   read_manuscript_data: 'Read planned CSV evidence',
+  calculate_csv: 'Calculate from CSV',
   resolve_claim_evidence: 'Link fresh claim evidence',
 }
 const receiptKinds = new Set(['draft', 'saved', 'undone', 'rejected', 'archived', 'revision-created', 'comment-added', 'reply-saved',
@@ -272,7 +276,7 @@ function Conversation(props: WorkbenchProps & {
     setWasActive(props.active)
     if (!props.active) { setPermission(undefined); setConsent(undefined); setRunningManuscript(false) }
   }
-  const pending = useRef<{ id: string; grant?: string; manuscriptId?: string; claimId?: string } | null>(null)
+  const pending = useRef<{ id: string; grant?: string; manuscriptId?: string; claimId?: string; example?: boolean } | null>(null)
   const [runSnapshots, setRunSnapshots] = useState(props.conversation.runs)
   const runs = useRef(props.conversation.runs)
   const latest = useRef(props)
@@ -302,7 +306,7 @@ function Conversation(props: WorkbenchProps & {
       const plan = toolResult(message, 'tool-plan_manuscript', manuscriptPlanSchema)
       const original = messages.find(item => item.role === 'user' && item.metadata?.run === runId)
       if (plan && original && !manuscriptRef.current && latest.current.active) {
-        updateManuscript({ ...plan, id: crypto.randomUUID(), goal: chatText(original).slice(0, 12000), batches: [] })
+        updateManuscript({ ...plan, id: crypto.randomUUID(), goal: chatText(original).slice(0, 12000), batches: [], example: task?.example })
       }
       const projectTask = manuscriptRef.current
       if (runId && task?.claimId && task.id === runId && projectTask && run?.manuscriptId === projectTask.id && latest.current.active) {
@@ -616,7 +620,7 @@ function Conversation(props: WorkbenchProps & {
 
   function submit(value: string, repair?: { id: string; report: ChatVerification; proposal?: NonNullable<ReturnType<typeof editProposal>>;
     reverify?: boolean; manuscriptTask?: boolean },
-    approvedScope?: string[], taskMode?: 'plan' | 'batch' | 'evidence', evidence?: ReviewedClaim) {
+    approvedScope?: string[], taskMode?: 'plan' | 'batch' | 'evidence', evidence?: ReviewedClaim, example = false) {
     const text = value.trim()
     if (!text || streaming || props.disabled || mutating || !props.active) return false
     setError('')
@@ -665,7 +669,9 @@ function Conversation(props: WorkbenchProps & {
     const task = manuscriptRef.current
     const manuscriptId = taskMode === 'batch' || taskMode === 'evidence' || repair?.manuscriptTask
       ? task?.id : repair ? runs.current[repair.id]?.manuscriptId : undefined
-    pending.current = { id, grant: repair?.manuscriptTask ? undefined : grant.current?.id, manuscriptId, claimId: evidence?.id }
+    const writingExample = example || (taskMode === 'batch' && Boolean(task?.example))
+    pending.current = { id, grant: repair?.manuscriptTask ? undefined : grant.current?.id, manuscriptId, claimId: evidence?.id,
+      example: writingExample || undefined }
     const source: ChapterEditRequest = { mode: 'rewrite', path: primary, main: props.main, source: file.content,
       instruction: '', compiler: props.compiler, context }
     setPrompt('')
@@ -710,7 +716,8 @@ function Conversation(props: WorkbenchProps & {
     }))
     void sendMessage({ text, metadata: { run: id, selection } }, {
       body: { run: id, workflow: turnWorkflow, scope: editPaths, source, selection, feedback, previousProposal: failedProposal,
-        workspaceActivity, draftPermission: access, manuscript: taskContext, attachments: buildAttachmentContext(props.working,
+        workspaceActivity, draftPermission: access, manuscript: taskContext, writingExample: writingExample || undefined,
+        attachments: buildAttachmentContext(props.working,
           [text, taskContext?.goal, ...(taskContext?.data ?? []).map(file => file.path)].filter(Boolean).join('\n')) },
     })
     return true
@@ -797,6 +804,12 @@ function Conversation(props: WorkbenchProps & {
 
   const anyError = error || (streamError ? 'The request failed. Check the model configuration or retry.' : '') || props.storageError
   const lastPrompt = [...messages].reverse().find(message => message.role === 'user')
+  const bibliographyDefinitions = useMemo(() => indexCanvasReferences(props.working, collectBibliography(props.working)).definitions, [props.working])
+  function requestFreshEvidence(path: string) {
+    setPrompt(previous => [previous, `Find fresh source evidence in the current project for the earlier reference to ${path}. Report reliable file and line locations.`]
+      .filter(Boolean).join('\n\n').slice(0, 12_000))
+    composer.current?.focus()
+  }
   const deliveryArchive = manuscript && props.tasks[manuscript.id]?.findLast(step => step.kind === 'archived')?.detail
   const deliveryName = manuscript?.delivery?.submissionName
   return <div className="flex size-full min-h-0 min-w-0 flex-col text-sm">
@@ -809,6 +822,20 @@ function Conversation(props: WorkbenchProps & {
       <Button size="sm" variant="ghost" disabled={streaming || mutating} onClick={props.onNew}>New</Button>
       <Button size="sm" variant="ghost" disabled={streaming || mutating} onClick={() => setDeleteOpen(true)}>Delete</Button>
     </div>
+    {props.project.metadata.writingSample && <section aria-label="Writing sample" className="shrink-0 space-y-1 border-b bg-indigo-50 p-2 text-xs">
+      {!manuscript ? <>
+        <p>Revise two synthetic chapters, verify the PDF and archive the submission.</p>
+        <div className="flex flex-wrap gap-1">
+          <Button size="sm" variant="outline" disabled={props.disabled || !props.active || streaming || mutating}
+            onClick={() => submit(writingSamplePrompt, undefined, writingSampleFiles, 'plan', undefined, true)}>Use example edits</Button>
+          <Button size="sm" variant="ghost" disabled={props.disabled || !props.active || streaming || mutating}
+            onClick={() => submit(writingSamplePrompt, undefined, writingSampleFiles, 'plan')}>Use configured model</Button>
+        </div>
+      </> : <p>{deliveryArchive ? 'Sample complete. The archive keeps both the verified PDF and the source ZIP.'
+        : props.checkpoints[manuscript.id] === 'saved' ? 'Review the final ZIP and confirm its archive below.'
+          : taskProgress?.remaining.length ? 'Review the plan and apply each draft proposal to continue.'
+            : 'Verify the selected drafts and confirm the project save.'}</p>}
+    </section>}
     {manuscript && <ManuscriptTaskCard task={manuscript} states={props.checkpoints} receipts={props.tasks} messages={messages}
         running={runningManuscript} busy={streaming || mutating || props.disabled || !props.active}
         onRun={() => setRunningManuscript(true)} onPause={pauseManuscript}
@@ -860,6 +887,14 @@ function Conversation(props: WorkbenchProps & {
         const proposal = editProposal(message)
         const runId = message.metadata?.run
         const run = runId ? runSnapshots[runId] : undefined
+        const evidence = message.metadata?.complete && message.metadata.evidence?.length && props.sourceMoves
+          ? { targets: inlineEvidenceTargets(props.working, message.metadata.evidence, props.sourceMoves, run?.pathRevision, bibliographyDefinitions),
+            onLocate: props.onLocate, onRefresh: requestFreshEvidence } : undefined
+        const calculations = message.metadata?.complete ? message.parts.flatMap(part => {
+          if (part.type !== 'tool-calculate_csv' || !('output' in part)) return []
+          const parsed = csvCalculationSchema.safeParse(part.output)
+          return parsed.success ? [parsed.data] : []
+        }) : []
         const compileRequest = message.metadata?.complete && message.parts.find(part => part.type === 'tool-request_preview_compile'
           && 'output' in part && part.output && typeof part.output === 'object' && 'requested' in part.output
           && part.output.requested === true)
@@ -881,8 +916,11 @@ function Conversation(props: WorkbenchProps & {
           className={message.role === 'user' ? 'rounded-md bg-indigo-50 px-2 py-1.5' : 'space-y-2'}>
           <p className="mb-1 text-xs font-semibold">{message.role === 'user' ? 'You' : 'Assistant'}</p>
           <ChatToolProgress message={message} />
-          {message.role === 'assistant' ? <WritingMarkdown text={chatText(message)} />
+          {message.role === 'assistant' ? <WritingMarkdown text={chatText(message)} evidence={evidence} />
             : <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{chatText(message)}</p>}
+          {!proposal && calculations.map(calculation => <CalculationEvidence key={calculation.id}
+            calculation={calculation} project={props.working} moves={props.sourceMoves ?? []} revision={run?.pathRevision}
+            onLocate={props.onLocate} />)}
           {runId && editPermission && <section aria-label="Draft permission request" className="space-y-2 rounded border border-indigo-200 p-2 text-xs">
             <h3 className="font-semibold">AI requests permission to edit working drafts</h3>
             <p className="break-words">{editPermission.reason}</p>
@@ -980,10 +1018,7 @@ function Conversation(props: WorkbenchProps & {
               <TaskTimeline steps={steps} />
               {message.metadata.evidence?.length ? <EvidenceList evidence={message.metadata.evidence} project={props.working}
                 moves={props.sourceMoves} revision={run?.pathRevision} onLocate={props.onLocate}
-                onRefresh={path => {
-                  setPrompt(previous => [previous, `Find fresh source evidence in the current project for the earlier reference to ${path}. Report reliable file and line locations.`].filter(Boolean).join('\n\n').slice(0, 12_000))
-                  composer.current?.focus()
-                }} /> : null}
+                onRefresh={requestFreshEvidence} /> : null}
               {proposal && run && runId && <Proposal proposal={proposal} run={run} state={props.checkpoints[runId]} project={props.working}
             disabled={props.disabled || mutating} onAction={action => mutate(runId, action)} active={props.active} sourceMoves={props.sourceMoves}
             input={input} baseline={baseline?.input === input ? baseline : undefined} verification={props.verifications[runId]}

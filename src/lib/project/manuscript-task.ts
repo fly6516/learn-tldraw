@@ -23,6 +23,7 @@ export const manuscriptPlanSchema = z.object({
 
 export const manuscriptTaskSchema = manuscriptPlanSchema.extend({
   id: z.uuid(),
+  example: z.boolean().optional(),
   goal: z.string().trim().min(1).max(12000),
   batches: z.array(z.object({ run: z.uuid(), files: z.array(path).min(1).max(6), replaces: z.uuid().optional(),
     claims: writingClaimsSchema.optional(), sourceRevision: z.number().int().nonnegative().optional() })).max(120),

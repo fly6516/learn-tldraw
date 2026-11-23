@@ -63,6 +63,7 @@ export const chatRequestSchema = z.object({
   feedback: compileFeedbackSchema.optional(),
   previousProposal: chatEditSchema.optional(),
   manuscript: manuscriptContextSchema.optional(),
+  writingExample: z.boolean().optional(),
   attachments: attachmentContextSchema.optional(),
   draftPermission: z.union([z.literal('all'), z.array(z.string().min(1).max(500)).max(6)]).optional(),
   workspaceActivity: z.array(z.object({

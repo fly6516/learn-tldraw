@@ -18,9 +18,10 @@ function finish(unified: 'tool-calls' | 'stop' | 'length'): Part {
 }
 
 export function testWritingModel(selected: string[], text: string, feedback?: 'passed' | 'failed', revision = false, canDraft = false,
-  manuscript?: ManuscriptContext): LanguageModel {
+  manuscript?: ManuscriptContext, writingExample = false): LanguageModel {
   const scenario = text.trim().toLowerCase()
   const markdown = scenario === 'test: show markdown'
+  const inlineEvidence = scenario === 'test: show inline evidence'
   const failed = scenario === testScenarios.fail.toLowerCase()
   const interrupted = scenario === testScenarios.interrupted.toLowerCase()
   const repair = scenario.startsWith('repair the selected changes')
@@ -42,6 +43,19 @@ export function testWritingModel(selected: string[], text: string, feedback?: 'p
     modelId: 'research-fixture',
     doStream: async () => {
       const turn = step++
+      if (inlineEvidence) {
+        const chunks: Part[] = turn === 0 ? [
+          toolCall('read_source', { path: testMethods, startLine: 3, lineCount: 1 }),
+          toolCall('read_source', { path: testResults, startLine: 3, lineCount: 1 }),
+          toolCall('read_csv_rows', { path: 'data/sessions.csv', startRow: 2, rowCount: 1 }),
+          toolCall('query_references', { query: 'oke2017', kind: 'bibliography' }), finish('tool-calls'),
+        ] : [
+          { type: 'text-start', id: 'inline' },
+          { type: 'text-delta', id: 'inline', delta: 'Methods citation: sections/methods.tex:3. Unread line: sections/methods.tex:999.\n\n| Results | Data | Literature |\n| --- | --- | --- |\n| **sections/results.tex:3** | `data/sessions.csv:2` | `oke2017` |\n\n```text\nsections/methods.tex:3\n```' },
+          { type: 'text-end', id: 'inline' }, finish('stop'),
+        ]
+        return { stream: simulateReadableStream({ chunks, chunkDelayInMs: 20 }) }
+      }
       if (markdown) {
         const deltas = [
           '## 修改摘要\n\n| 文件 | 说明 | 数据 | 引用 | 状态 | 附件 | 备注 |',
@@ -76,6 +90,9 @@ export function testWritingModel(selected: string[], text: string, feedback?: 'p
         })) : []),
       ]).filter(edit => selected.includes(edit.path))
       const requestedTool = revision ? ['read_archived_changes', {}] as const
+        : writingExample && manuscript?.mode === 'plan' ? ['plan_manuscript', { title: 'Revise and submit Practice Paper',
+          files: [testMethods, testResults], decisions: ['Keep the measurements synthetic.'], questions: [],
+          delivery: { data: [], submissionName: 'Practice submission' } }] as const
         : workflowFixture && !batch ? ['plan_manuscript', { title: 'Prepare manuscript for review',
           files: scenario.includes('morning claim review') ? [testMethods, testResults] : [testMethods, testResults, 'notes/first.tex', 'notes/second.tex'], decisions: [], questions: [],
           delivery: { data: [{ path: 'data/sessions.csv', startRow: 1, rowCount: 3 }], submissionName: river || scenario.includes('river publication')
@@ -97,8 +114,13 @@ export function testWritingModel(selected: string[], text: string, feedback?: 'p
           toolCall('propose_reply', { draft: 'We clarified the synthetic mean temperature in the Results.' }), finish('tool-calls'),
         ] : turn === 0 && citeCsv ? [
           toolCall('list_attachments', {}), toolCall('read_csv_rows', { path: 'data/sessions.csv', startRow: 2, rowCount: 2 }), finish('tool-calls'),
-        ] : evidence ? turn === 0 ? [toolCall('read_csv_rows', { path: 'data/sessions.csv', startRow: 3, rowCount: 2 }), finish('tool-calls')]
-          : [toolCall('resolve_claim_evidence', { references: [{ path: 'data/sessions.csv', line: 3 }, { path: 'data/sessions.csv', line: 4 }] }), finish('tool-calls')]
+        ] : evidence ? turn === 0 ? [
+          morning ? toolCall('calculate_csv', { path: 'data/sessions.csv', operation: 'mean', decimals: 2,
+            cells: [{ row: 3, column: 'shaded_c' }, { row: 4, column: 'shaded_c' }] })
+            : toolCall('read_csv_rows', { path: 'data/sessions.csv', startRow: 3, rowCount: 2 }),
+          finish('tool-calls'),
+        ] : [toolCall('resolve_claim_evidence', morning ? { references: [], calculationIds: ['calc-1'] }
+          : { references: [{ path: 'data/sessions.csv', line: 3 }, { path: 'data/sessions.csv', line: 4 }] }), finish('tool-calls')]
         : turn === 0 && scopedRepair ? [
           toolCall('read_patch_verification', {}), finish('tool-calls'),
         ] : turn === 0 && plannedData ? [toolCall('read_manuscript_data', {}), finish('tool-calls')]

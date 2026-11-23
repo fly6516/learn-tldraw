@@ -4,6 +4,7 @@ import { findCitations, parseBibliography } from './references'
 import { captureEvidenceQuote, locateEvidence, type SourceMove } from './writing-ai-evidence'
 import type { ProjectFileSystem } from './types'
 import { readCsvRange } from './ai-attachments'
+import { assessCsvCalculation, csvCalculationSchema, type CsvCalculation } from './csv-calculation'
 
 const path = z.string().min(1).max(500)
 const location = z.object({ path, line: z.number().int().positive() })
@@ -15,10 +16,12 @@ const evidence = location.extend({
 })
 export const claimSuggestionSchema = z.array(z.object({
   path, quote: z.string().trim().min(1).max(500), references: z.array(location).max(6),
+  calculationIds: z.array(csvCalculationSchema.shape.id).max(4).optional(),
 })).max(16)
 export const writingClaimsSchema = z.array(z.object({
   path, quote: z.string().min(1).max(500), kind: z.enum(['claim', 'citation']), references: z.array(evidence).max(6),
   needsConfirmation: z.boolean().optional(),
+  calculations: z.array(csvCalculationSchema).max(4).optional(),
   exclusion: z.object({ before: z.string().min(1).max(4000), after: z.string().max(4000) }).optional(),
 })).max(24)
 export const claimReviewSchema = z.object({
@@ -35,10 +38,16 @@ const numbers = (text: string) => [...text.matchAll(/(?:^|[^\p{L}\p{N}_])([+-]?\
 const observation = /\b(?:measured|observed|increased|decreased|outperformed|statistically significant|significantly|correlat\w*|associated with)\b|显著|实测|观测到|相关性|提高了|下降了/i
 
 export function claimEvidenceFor(quote: string, references: { path: string; line: number }[], observed: ClaimReference[],
-  oldText = '') {
+  oldText = '', calculationIds?: readonly string[], calculations: readonly CsvCalculation[] = []) {
   const linked = references.flatMap(ref => observed.find(item => item.path === ref.path && item.line === ref.line) ?? [])
   const recorded = new Set([...numbers(oldText), ...linked.filter(ref => ref.kind !== 'bibliography').flatMap(ref => numbers(ref.text))])
-  return { references: linked, needsConfirmation: numbers(quote).some(value => !recorded.has(value)) }
+  const derived = calculations.filter(item => calculationIds?.includes(item.id))
+  const recognized = (value: string) => derived.some(item => {
+    const percent = value.endsWith('%')
+    return percent === (item.operation === 'percent_change') && Number(value.replace(/\\?%$/, '')) === item.result
+  })
+  return { references: linked, needsConfirmation: numbers(quote).some(value => !recorded.has(value) && !recognized(value)),
+    ...(derived.length ? { calculations: derived } : {}) }
 }
 
 export function assessClaim(claim: WritingClaims[number], project: ProjectFileSystem, moves: readonly SourceMove[],
@@ -63,10 +72,13 @@ export function assessClaim(claim: WritingClaims[number], project: ProjectFileSy
     const actual = text?.slice(0, 500) ?? null
     return { location: actual === reference.text ? location : undefined, text: actual }
   })
-  const fingerprint = JSON.stringify([claim.path, claim.quote, present, refs.map(item => item.text)])
+  const calculated = claim.calculations?.map(item => assessCsvCalculation(item, project, moves, revision)) ?? []
+  const fingerprint = JSON.stringify([claim.path, claim.quote, present, refs.map(item => item.text),
+    ...(calculated.length ? [calculated.map(item => item.inputs.map(input => input.value ?? null))] : [])])
   const confirmed = present && review?.decision === 'confirmed' && review.fingerprint === fingerprint
   const excluded = !present && review?.decision === 'excluded'
-  const needsReview = !excluded && !confirmed && (!present || claim.needsConfirmation || !refs.some(ref => ref.location)
+  const needsReview = !excluded && !confirmed && (!present || claim.needsConfirmation || calculated.some(item => !item.current)
+    || !refs.some(ref => ref.location) && !calculated.some(item => item.current)
     || review?.decision === 'requested' || review?.decision === 'confirmed' || review?.decision === 'excluded')
   return { fingerprint, present, confirmed, excluded, needsReview, locations: refs.map(ref => ref.location) }
 }
@@ -83,7 +95,7 @@ function reversibleChange(edit: ProjectSuggestion['edits'][number], quote: strin
 }
 
 export function collectWritingClaims(edits: ProjectSuggestion['edits'], suggested: z.infer<typeof claimSuggestionSchema>,
-  observed: z.infer<typeof evidence>[], sources: readonly { path: string; source: string }[]): WritingClaims {
+  observed: z.infer<typeof evidence>[], sources: readonly { path: string; source: string }[], calculations: readonly CsvCalculation[] = []): WritingClaims {
   const result: WritingClaims = []
   const bibliography = sources.flatMap(file => /\.bib$/i.test(file.path)
     ? parseBibliography(file.path, file.source).map(entry => ({ file, entry })) : [])
@@ -94,7 +106,8 @@ export function collectWritingClaims(edits: ProjectSuggestion['edits'], suggeste
     const priorNumbers = new Set(numbers(edit.before))
     for (const item of suggested) {
       if (item.path !== edit.path || !edit.after.includes(item.quote) || edit.before.includes(item.quote)) continue
-      add({ path: edit.path, quote: item.quote, kind: 'claim', ...claimEvidenceFor(item.quote, item.references, observed, edit.before),
+      add({ path: edit.path, quote: item.quote, kind: 'claim',
+        ...claimEvidenceFor(item.quote, item.references, observed, edit.before, item.calculationIds, calculations),
         exclusion: reversibleChange(edit, item.quote) })
     }
     const earlierKeys = new Set(findCitations(edit.path, edit.before).map(item => item.key))

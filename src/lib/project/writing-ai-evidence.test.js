@@ -1,5 +1,25 @@
 import { expect, test } from 'bun:test'
-import { captureEvidenceQuote, locateEvidence } from './writing-ai-evidence'
+import { captureEvidenceQuote, inlineEvidenceTargets, locateEvidence } from './writing-ai-evidence'
+
+test('links only observed citations and makes changed or ambiguous locations available for fresh evidence', () => {
+  const original = 'Opening\nObserved result.\nEnd'
+  const item = { path: 'sections/a.tex', line: 2, text: 'Observed result.', kind: 'read_source',
+    anchor: captureEvidenceQuote('sections/a.tex', original, 2) }
+  const bibPath = 'refs.bib'
+  const bib = '@book{source2020, title={Observed title}}'
+  const reference = { path: bibPath, line: 1, text: 'source2020 · Observed title', kind: 'query_references',
+    anchor: captureEvidenceQuote(bibPath, bib, 1) }
+  const project = content => ({ files: new Map([['sections/b.tex', { content }], [bibPath, { content: bib }]]) })
+  const moves = [{ from: 'sections/a.tex', to: 'sections/b.tex' }]
+  const definitions = new Map([['source2020', { path: bibPath, line: 1 }]])
+  const found = inlineEvidenceTargets(project('Inserted\n' + original), [item, reference], moves, 0, definitions)
+  expect(found.get('sections/a.tex:2').location).toMatchObject({ path: 'sections/b.tex', line: 3 })
+  expect(found.has('sections/a.tex:999')).toBe(false)
+  expect(found.get('@source2020').location).toMatchObject({ path: bibPath, line: 1 })
+  const ambiguous = inlineEvidenceTargets(project(original + '\n' + original), [item, reference], moves, 0, new Map())
+  expect(ambiguous.get('sections/a.tex:2').location).toBeUndefined()
+  expect(ambiguous.get('source2020').location).toBeUndefined()
+})
 
 const oldPath = 'sections/results.tex'
 const newPath = 'sections/findings.tex'

@@ -210,7 +210,9 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const [pdfTarget, setPdfTarget] = useState<SyncRegion | null>(null)
   const [syncMessage, setSyncMessage] = useState('')
   const [panel, setPanel] = useState<'problems' | 'references' | 'cross-references' | 'review' | null>(null)
-  const [aiOpen, setAiOpen] = useState(false)
+  const [aiOpen, setAiOpen] = useState(Boolean(project.metadata.writingSample))
+  const [returnToAi, setReturnToAi] = useState(false)
+  const evidenceTrigger = useRef<HTMLElement | null>(null)
   const [sourceMoves, setSourceMoves] = useState<SourceMove[]>()
   const writingKey = journal.key
   useEffect(() => {
@@ -499,14 +501,34 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   }
 
   function toggleChapterAi() {
+    if (!aiOpen && returnToAi) {
+      resumeAi()
+      return
+    }
     setAiOpen(!aiOpen)
     setMobileFiles(false)
     if (!aiOpen && aiLayout === 'floating' && !wideTools) setPanel(null)
   }
 
   function locateAiEvidence(path: string, line: number) {
-    if (aiLayout === 'floating') setAiOpen(false)
+    if (aiLayout === 'floating') {
+      evidenceTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+      setReturnToAi(true)
+      setAiOpen(false)
+    }
     openFile(path, line, undefined, true)
+  }
+
+  function resumeAi() {
+    setReturnToAi(false)
+    setMobileFiles(false)
+    setAiOpen(true)
+    requestAnimationFrame(() => {
+      const trigger = evidenceTrigger.current
+      if (trigger?.isConnected && trigger.closest('#writing-ai')) trigger.focus()
+      else document.querySelector<HTMLElement>('#writing-ai textarea')?.focus()
+      evidenceTrigger.current = null
+    })
   }
 
   function aiSelection() {
@@ -936,6 +958,9 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         </ul>
       </div>}
       {saveError && <p role="alert" className="shrink-0 border-b bg-red-50 px-3 py-1.5 text-sm text-red-900">{saveError}</p>}
+      {returnToAi && !aiOpen && <div className="flex shrink-0 items-center border-b bg-white px-2 py-1">
+        <Button type="button" size="sm" variant="outline" onClick={resumeAi}>Back to Writing AI</Button>
+      </div>}
       <div className="flex shrink-0 items-center gap-2 border-b bg-white px-2 py-1.5 lg:hidden">
         <Button ref={fileToggle} size="sm" variant="outline" aria-expanded={mobileFiles} aria-controls="writing-files"
           onClick={() => { if (!aiDocked && !wideTools) setAiOpen(false); setMobileFiles(open => !open) }}><PanelLeft /> Files</Button>

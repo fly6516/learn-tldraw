@@ -42,6 +42,7 @@ const savedManifest = z.object({
       createdAt: z.string(),
       updatedAt: z.string(),
       sourceMode: z.literal('archive').optional(),
+      writingSample: z.boolean().optional(),
       mainFile: z.string().optional(),
     }),
     template: z.object({

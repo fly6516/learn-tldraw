@@ -85,7 +85,7 @@ export function ManuscriptReviewDialog(props: {
       batch.claims?.forEach((original, index) => {
         const id = `${batch.run}:${index}`
         const review = props.claimReviews?.[id]
-        const claim = review?.evidence ? { ...original, references: review.evidence.references,
+        const claim = review?.evidence ? { ...original, references: review.evidence.references, calculations: review.evidence.calculations,
           needsConfirmation: review.evidence.needsConfirmation } : original
         const revision = review?.revision ?? batch.sourceRevision
         const assessment = assessClaim(claim, working, props.sourceMoves, revision, review)

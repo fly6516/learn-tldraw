@@ -106,6 +106,11 @@ export function ProjectLibrary() {
       </div>
       <div className="flex flex-wrap gap-2">
         <Button variant="outline" disabled={!catalog || busy} onClick={() => fileInput.current?.click()}><FileUp /> Import project</Button>
+        <Button variant="outline" disabled={!catalog || busy} onClick={() => void run(async () => {
+          const { testPaperZip, testPaperName } = await import('@/lib/project/test-paper')
+          const sample = await importSourceArchive(new File([await testPaperZip()], `${testPaperName}.zip`))
+          await openCopy({ ...sample, metadata: { ...sample.metadata, writingSample: true } }, 'write')
+        })}>Try a writing sample</Button>
         <Button disabled={!catalog || busy} onClick={() => setNameDialog({ value: '' })}><Plus /> New project</Button>
         <input ref={fileInput} type="file" hidden aria-label="Choose project ZIP or backup"
           accept={`.zip,${projectBackupExtension}`} onChange={event => {

@@ -3,6 +3,7 @@ import { locateEvidence, type SourceMove } from '@/lib/project/writing-ai-eviden
 import type { WritingClaims } from '@/lib/project/writing-claims'
 import type { assessClaim, ClaimReview } from '@/lib/project/writing-claims'
 import { Button } from '@/components/ui/button'
+import { CalculationEvidence } from './CalculationEvidence'
 
 export type ReviewedClaim = { id: string; claim: WritingClaims[number]; revision?: number; review?: ClaimReview
   assessment: ReturnType<typeof assessClaim> }
@@ -26,7 +27,7 @@ export function ClaimEvidence({ claims, project, moves, onLocate, disabled, onDe
           <blockquote className="break-words">{claim.kind === 'citation' && 'Citation · '}{claim.quote}</blockquote>
           {assessment?.confirmed && <p className="font-medium text-emerald-800">Confirmed</p>}
           {assessment?.excluded && <p className="font-medium text-slate-700">Excluded from draft</p>}
-          {(assessment?.needsReview ?? (!hasEvidence || claim.needsConfirmation)) && <p className="font-medium text-amber-800">
+          {(assessment?.needsReview ?? ((!hasEvidence && !claim.calculations?.length) || claim.needsConfirmation)) && <p className="font-medium text-amber-800">
             {review?.decision === 'confirmed' ? 'Evidence or wording changed. Review again.'
               : review?.decision === 'requested' ? 'Evidence requested. Review the available sources.' : 'Needs author confirmation'}
           </p>}
@@ -42,6 +43,8 @@ export function ClaimEvidence({ claims, project, moves, onLocate, disabled, onDe
               {match && reference.text && <p className="font-mono text-slate-600">{reference.text}</p>}
             </div>
           })}
+          {claim.calculations?.map(calculation => <CalculationEvidence key={calculation.id} calculation={calculation}
+            project={project} moves={moves} revision={revision} onLocate={onLocate} />)}
           {onDecision && id && assessment && !assessment.excluded && <div className="flex flex-wrap gap-1">
             <Button size="sm" variant="outline" disabled={disabled || assessment.confirmed || !assessment.present}
               onClick={() => onDecision(id, 'confirmed')}>Confirm claim</Button>

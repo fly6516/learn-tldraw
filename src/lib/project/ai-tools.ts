@@ -8,6 +8,7 @@ import type { ProjectFileSystem } from './types'
 import { captureEvidenceQuote, type EvidenceQuote } from './writing-ai-evidence'
 import { readCsvRange, type AttachmentContext } from './ai-attachments'
 import type { ClaimReference } from './writing-claims'
+import { calculateCsv, csvCalculationRequest, type CsvCalculation } from './csv-calculation'
 
 type Answer = z.infer<typeof chapterAnswerSchema>
 const query = z.string().trim().min(1).max(100)
@@ -23,8 +24,9 @@ export function createChapterTools(input: ChapterEditRequest, attachments?: Atta
   const calls: Answer['tools'] = []
   const observed = new Set<string>()
   const readFiles = new Set<string>()
+  const calculations: CsvCalculation[] = []
   const csv = new Map(attachments?.csv.map(file => [file.path, file]))
-  function record(kind: Answer['tools'][number], items: { path: string; line: number; text: string }[]) {
+  function record(kind: Answer['tools'][number], items: { path: string; line: number; text: string }[], linkClaim = true) {
     if (calls.length === 80) return { error: 'Tool call limit reached.' }
     calls.push(kind)
     const output = items.map(item => ({ ...item, text: item.text.slice(0, 500) }))
@@ -36,7 +38,7 @@ export function createChapterTools(input: ChapterEditRequest, attachments?: Atta
       const source = sources.get(item.path)?.source ?? csv.get(item.path)?.text
       const anchor = source === undefined ? undefined : captureEvidenceQuote(item.path, source, item.line)
       if (evidence.length < 40 && !evidence.some(found => found.path === item.path && found.line === item.line && found.kind === kind)) evidence.push({ ...item, kind, anchor })
-      if (referenceKind && claimEvidence.length < 72 && !claimEvidence.some(found => found.path === item.path && found.line === item.line)) {
+      if (linkClaim && referenceKind && claimEvidence.length < 72 && !claimEvidence.some(found => found.path === item.path && found.line === item.line)) {
         claimEvidence.push({ ...item, kind: referenceKind, anchor })
       }
     }
@@ -51,7 +53,7 @@ export function createChapterTools(input: ChapterEditRequest, attachments?: Atta
     return { path, header: readCsvRange(source.text, 1, 1, source.truncated).rows[0], ...result, ...citations }
   }
 
-  return { calls, evidence, claimEvidence, observed, readFiles, readAttachmentRows, tools: {
+  return { calls, evidence, claimEvidence, calculations, observed, readFiles, readAttachmentRows, tools: {
     ...(attachments ? {
       list_attachments: tool({
         description: 'List local project attachments by path, including figures and datasets. Only CSV files marked csv are readable. This does not inspect image contents.',
@@ -65,6 +67,20 @@ export function createChapterTools(input: ChapterEditRequest, attachments?: Atta
         description: 'Read CSV records by one-based row number, including row 1 for headers. Cite the returned project path and physical line numbers. Truncated data do not support whole-file claims.',
         inputSchema: z.object({ path: pathName, startRow: z.number().int().min(1).max(24_000), rowCount: z.number().int().min(1).max(12) }),
         execute: async ({ path, startRow, rowCount }) => readAttachmentRows(path, startRow, rowCount),
+      }),
+      calculate_csv: tool({
+        description: 'Calculate a mean, a difference (first minus second), or percent change ((second minus first) divided by first times 100) from named columns in explicit CSV records. Row numbering includes the header as row 1. Return the calculation ID with a proposed claim using the result.',
+        inputSchema: csvCalculationRequest,
+        execute: async request => {
+          const source = csv.get(request.path)
+          if (!source || calculations.length >= 8) return { error: 'The CSV or calculation capacity is unavailable.' }
+          try {
+            const result = calculateCsv(`calc-${calculations.length + 1}`, request, source.text, source.truncated)
+            calculations.push(result)
+            record('read_csv_rows', result.inputs.map(input => ({ path: request.path, line: input.line, text: `${input.column} = ${input.raw}` })), false)
+            return result
+          } catch (cause) { return { error: cause instanceof Error ? cause.message : 'Could not read the selected cells.' } }
+        },
       }),
     } : {}),
     search_source: tool({

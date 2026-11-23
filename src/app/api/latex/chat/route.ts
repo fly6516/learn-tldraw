@@ -8,6 +8,7 @@ import { sourceOffsetAtPosition } from '@/lib/project/latex-source'
 import { isProjectPath } from '@/lib/project/source-archive'
 import { manuscriptPlanSchema } from '@/lib/project/manuscript-task'
 import { claimEvidenceFor, claimSuggestionSchema, collectWritingClaims } from '@/lib/project/writing-claims'
+import { writingSampleFiles, writingSamplePrompt, writingSampleSubmission } from '@/lib/project/writing-sample'
 import { chatEditSchema, chatRequestSchema, editPermissionRequestSchema, replyChatSchema, revisionRoundRequestSchema, reviewerCommentRequestSchema,
   submissionChatSchema, workflowVersion, writingWorkflows } from '@/lib/project/writing-chat'
 
@@ -25,9 +26,14 @@ export async function POST(request: Request) {
   const parsed = chatRequestSchema.safeParse(json)
   if (!parsed.success) return error('Open a valid project source file or archived revision before sending.', 400)
   const input = parsed.data
-  const provider = process.env.RESEARCH_TEST_MODE === '1'
+  if (input.writingExample && (input.workflow !== 'auto' || input.manuscript?.goal !== writingSamplePrompt
+    || !['plan', 'batch'].includes(input.manuscript.mode) || !input.scope.length
+    || input.scope.some(path => !writingSampleFiles.includes(path)))) {
+    return error('The example mode only supports the built-in sample task.', 400)
+  }
+  const provider = input.writingExample || process.env.RESEARCH_TEST_MODE === '1'
     ? { model: (await import('@/lib/project/test-writing-model')).testWritingModel(input.scope, input.messages.at(-1)?.text ?? '',
-      input.feedback?.status, input.workflow === 'revision', Boolean(input.draftPermission), input.manuscript) }
+      input.feedback?.status, input.workflow === 'revision', Boolean(input.draftPermission), input.manuscript, input.writingExample) }
     : configuredAi()
   if (!provider) return error('Configure the model on the local server before opening a conversation.', 503)
   const { source, revision, scope, workflow, run, selection } = input
@@ -77,10 +83,10 @@ export async function POST(request: Request) {
     ...(chapter && evidenceClaim ? {
       resolve_claim_evidence: tool({
         description: 'Link this claim to exact CSV, table or bibliography lines read with the project tools this turn. Return all relevant inputs for a calculated claim. Leave interpretation to the author.',
-        inputSchema: z.object({ references: claimSuggestionSchema.element.shape.references.min(1) }),
-        execute: async ({ references }) => {
-          const found = claimEvidenceFor(evidenceClaim.quote, references, chapter.claimEvidence)
-          if (!found.references.length) return { error: 'Read the cited CSV, table or bibliography excerpt before linking it.' }
+        inputSchema: claimSuggestionSchema.element.pick({ references: true, calculationIds: true }),
+        execute: async ({ references, calculationIds }) => {
+          const found = claimEvidenceFor(evidenceClaim.quote, references, chapter.claimEvidence, '', calculationIds, chapter.calculations)
+          if (!found.references.length && !found.calculations?.length) return { error: 'Read the excerpt or calculate from CSV cells before linking it.' }
           return stageWorkflow({ ...evidenceClaim, ...found })
         },
       }),
@@ -97,8 +103,10 @@ export async function POST(request: Request) {
           for (const file of requestedData) if (data.length < 4 && !data.some(item => item.path === file.path)) {
             data.push({ path: file.path, startRow: 1, rowCount: 12 })
           }
-          const delivery = deliveryRequested || plan.delivery
-            ? { data, submissionName: deliveryRequested ? plan.delivery?.submissionName || 'Manuscript submission' : undefined } : undefined
+          const submissionName = deliveryRequested
+            ? latestRequest === writingSamplePrompt ? writingSampleSubmission : plan.delivery?.submissionName || 'Manuscript submission'
+            : undefined
+          const delivery = deliveryRequested || plan.delivery ? { data, submissionName } : undefined
           return stageWorkflow({ ...plan, files, delivery })
         },
       }),
@@ -207,7 +215,7 @@ export async function POST(request: Request) {
             })) return { error: 'Keep changes to the selected lines in this file.' }
           }
           proposed = true
-          return { summary: data.summary, edits, claims: collectWritingClaims(edits, data.claims ?? [], chapter?.claimEvidence ?? [], inventory) }
+          return { summary: data.summary, edits, claims: collectWritingClaims(edits, data.claims ?? [], chapter?.claimEvidence ?? [], inventory, chapter?.calculations) }
         },
       }),
     } : {}),
@@ -253,6 +261,7 @@ Read each proposed edit location first. Keep answers concise and avoid repeating
 Use propose_edits only for a requested modification, within the supplied editable files and selected lines. Do not repeat the patch in the answer.
 For a multi-batch manuscript request, use plan_manuscript when available. For a manuscript batch, complete the goal only for the listed editable files, preserve earlier decisions, and use propose_edits after reading them. Use list_attachments to confirm file existence and read_csv_rows for numerical evidence when available. Cite its physical lines and never assume the contents of images or unread data.
 The csvSources list contains CSV inputs available for read-only access. The planned batch reads its confirmed ranges automatically. Do not ask for file-edit permission to read those CSV inputs. In a plan, reserve questions for unresolved author decisions or missing data.
+For a mean, difference or percent change, use calculate_csv on explicit row and column selections. Cite its physical lines and attach the returned ID in calculationIds when proposing or verifying a claim. Do not treat an unavailable value as zero.
 Use request_edit_permission only when needed. The author controls draft grants locally. Only the current draftPermission describes active access. Prior permission decisions are historical. Respect a denial and do not ask again unless the author requests a new edit or requests a change in permissions.
 An edit or publication action is a proposal for local author approval, including when the author asks you to save. Archive names are matched exactly and may be ambiguous. With localCompilerResult, distinguish a failed temporary patch from errors in the current source. If a failedProposal is provided, propose the complete replacement patch against the original working source, retaining the successful parts of the original proposal. If repairing manuscript drafts with no failedProposal, patch only the diagnosed issues in the current task drafts.
 When repairing a patch, use read_patch_verification if available. The preview compiler can still report a successful build of the original manuscript. A missing compiler resource or font can prevent PDF output without a source-line error. Explain that dependency before making unrelated source changes. Keep written LaTeX in the manuscript's language and do not assume packages or glyphs the current document does not support.
@@ -265,7 +274,7 @@ Use request_preview_compile when a fresh preview is requested without a source p
     ...provider, tools, messages, stopWhen: [stepCountIs(10), hasWorkflowResult], maxOutputTokens: 4600, maxRetries: 0,
     prepareStep: ({ stepNumber }) => {
       if (evidenceClaim) {
-        const readTools = input.attachments ? ['read_csv_rows', 'read_source', 'query_references', 'search_source'] as const
+        const readTools = input.attachments ? ['read_csv_rows', 'calculate_csv', 'read_source', 'query_references', 'search_source'] as const
           : ['read_source', 'query_references', 'search_source'] as const
         return { toolChoice: stepNumber === 0 ? 'required' : 'auto',
           activeTools: stepNumber === 0 ? [...readTools] : [...readTools, 'resolve_claim_evidence'] }
@@ -278,17 +287,21 @@ Use request_preview_compile when a fresh preview is requested without a source p
         return { toolChoice: 'required', activeTools: ['read_manuscript_data'] }
       }
       if (stepNumber === 0 && batch && editTargets.length) return { toolChoice: 'required',
-        activeTools: input.attachments ? ['read_source', 'list_attachments', 'read_csv_rows', 'query_references'] : ['read_source', 'query_references'],
+        activeTools: input.attachments ? ['read_source', 'list_attachments', 'read_csv_rows', 'calculate_csv', 'query_references'] : ['read_source', 'query_references'],
         instructions: instructions + '\nStart by reading the listed source files and any evidence the author explicitly requested.' }
       if (editTargets.length && !proposed) {
         const unread = editTargets.filter(path => !chapter?.readFiles.has(path))
         if (!unread.length) return { toolChoice: 'required',
-          activeTools: stepNumber < 8 ? ['propose_edits', 'read_source', 'query_references', 'search_source'] : ['propose_edits'],
+          activeTools: stepNumber < 8 ? ['propose_edits', 'read_source', 'query_references', 'search_source',
+            ...(input.attachments ? ['calculate_csv' as const] : [])] : ['propose_edits'],
           instructions: instructions + '\nStage exact replacements with propose_edits. Read additional source ranges or reference entries first if you have not seen the complete edit anchor or evidence.' }
         return { toolChoice: 'required', activeTools: ['read_source'],
           instructions: instructions + `\nRead one of these remaining paths with read_source: ${JSON.stringify(unread)}.` }
       }
       if (explicitEdit) return { toolChoice: 'required', activeTools: ['search_source', 'read_source', 'query_references', 'propose_edits'] }
+      if (stepNumber === 0 && chapter && input.attachments && /^calculate\b|^计算/.test(latestRequest.trim().toLowerCase())) {
+        return { toolChoice: 'required', activeTools: ['calculate_csv', 'read_csv_rows', 'list_attachments'] }
+      }
       return {}
     },
     abortSignal: AbortSignal.any([request.signal, AbortSignal.timeout(75_000)]),

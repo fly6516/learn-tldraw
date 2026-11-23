@@ -32,6 +32,13 @@ Open **Writing AI** in Auto and send one of the test prompts shown on the page.
 The test workspace uses separate browser
 storage from the main project. Keep test mode disabled in normal use.
 
+On the project list, **Try a writing sample** imports Practice Paper and opens Writing AI.
+**Use example edits** runs the scripted sample without a model key. The usual draft, save,
+compile and archive approvals still apply. It needs the local LaTeX compiler. For browser
+acceptance outside simulated server mode, set `RESEARCH_SAMPLE_NO_KEY=1` and run
+`bun run test:e2e tests/e2e/writing-sample.spec.ts`. To exercise **Use configured model**,
+set `RESEARCH_LIVE_TEST=1` with a configured DeepSeek key and run the same file.
+
 The optional live browser tests generate the synthetic **Morning Walk Study** ZIP from the
 checked-in fixture. Configure `DEEPSEEK_API_KEY` for the loopback test server. The test
 sends synthetic chapter excerpts, CSV data and reviewer comments to the configured model.
