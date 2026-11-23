@@ -191,6 +191,7 @@ test('runs writing, preview, submission and a grounded reviewer reply from one c
   await expect(reply.getByText('Reply saved.')).toBeVisible()
   await request(page, '/letter')
   const letter = page.getByRole('region', { name: 'Response letter' })
+  await expect(letter.getByRole('heading', { name: 'Round 1', exact: true })).toBeVisible()
   await expect(letter.getByText(/We clarified the synthetic mean temperature/)).toBeVisible()
   const downloadedLetter = page.waitForEvent('download')
   await letter.getByRole('button', { name: 'Download response letter' }).click()

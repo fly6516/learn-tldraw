@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useChat } from '@ai-sdk/react'
 import { chatText, chatTransport, ChatToolProgress } from './WritingAiWorkbench'
+import { WritingMarkdown } from './WritingMarkdown'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { buildRevisionLetter, type RevisionResponse, type RevisionRound, type RevisionFile } from '@/lib/project/revision-rounds'
@@ -60,7 +61,9 @@ export function RevisionResponses({ round, baseline, versions, files, reportErro
       <Button size="sm" variant="outline" disabled={!letter || !round.comments.length} onClick={() => setPreview(value => !value)}>{preview ? 'Hide response letter' : 'Preview response letter'}</Button>
       <Button size="sm" disabled={!letter || !round.comments.length} onClick={downloadLetter}>{draft ? 'Download Markdown draft' : 'Download response Markdown'}</Button>
     </div>
-    {preview && letter && <pre aria-label="Response letter preview" className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded border bg-slate-50 p-3 text-xs">{letter.markdown}</pre>}
+    {preview && letter && <section aria-label="Response letter preview" className="max-h-64 overflow-auto rounded border bg-slate-50 p-3 text-xs">
+      <WritingMarkdown text={letter.markdown} />
+    </section>}
   </section>
 }
 

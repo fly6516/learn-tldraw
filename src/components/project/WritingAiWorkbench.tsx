@@ -27,6 +27,7 @@ import { ManuscriptReviewDialog } from './ManuscriptReviewDialog'
 import { manuscriptPlanSchema, manuscriptProgress, type ManuscriptContext, type ManuscriptTask } from '@/lib/project/manuscript-task'
 import { buildAttachmentContext } from '@/lib/project/ai-attachments'
 import { ClaimEvidence, type ReviewedClaim } from './ClaimEvidence'
+import { WritingMarkdown } from './WritingMarkdown'
 import { writingClaimsSchema, type ClaimReview } from '@/lib/project/writing-claims'
 
 const Diff = dynamic(() => import('./MonacoSourceEditor').then(module => module.WritingDraftComparison), { ssr: false })
@@ -880,7 +881,8 @@ function Conversation(props: WorkbenchProps & {
           className={message.role === 'user' ? 'rounded-md bg-indigo-50 px-2 py-1.5' : 'space-y-2'}>
           <p className="mb-1 text-xs font-semibold">{message.role === 'user' ? 'You' : 'Assistant'}</p>
           <ChatToolProgress message={message} />
-          <ChatMessageText text={chatText(message)} />
+          {message.role === 'assistant' ? <WritingMarkdown text={chatText(message)} />
+            : <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{chatText(message)}</p>}
           {runId && editPermission && <section aria-label="Draft permission request" className="space-y-2 rounded border border-indigo-200 p-2 text-xs">
             <h3 className="font-semibold">AI requests permission to edit working drafts</h3>
             <p className="break-words">{editPermission.reason}</p>
@@ -949,7 +951,7 @@ function Conversation(props: WorkbenchProps & {
           {runId && reply && run?.reply && <section className="space-y-1 rounded border border-indigo-200 p-2 text-xs" aria-label="Reviewer reply proposal">
             <h3 className="font-semibold">{run.reply.roundName} · Reviewer reply</h3>
             <blockquote className="whitespace-pre-wrap break-words border-l-2 pl-2">{run.reply.commentText}</blockquote>
-            <p className="whitespace-pre-wrap break-words">{reply.draft}</p>
+            <WritingMarkdown text={reply.draft} />
             {run.reply.paths.length > 0 && <p className="break-all">Archived evidence · {run.reply.paths.join(', ')}</p>}
             {replySaved ? <p role="status">Reply saved.</p> : <Button size="sm" disabled={props.disabled || streaming || mutating}
               onClick={() => void saveReply(runId, run.reply!, reply.draft)}>
@@ -957,7 +959,7 @@ function Conversation(props: WorkbenchProps & {
             </Button>}
           </section>}
           {letter && <section className="space-y-1 rounded border p-2" aria-label="Response letter">
-            <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words text-xs">{letter.markdown}</pre>
+            <div className="max-h-48 overflow-auto text-xs"><WritingMarkdown text={letter.markdown} /></div>
             <Button size="sm" onClick={() => download(new Blob([letter.markdown], { type: 'text/markdown;charset=utf-8' }),
               `${submissionFilename(letter.name)}${letter.unresolved.length ? '-draft' : ''}-response.md`)}>
               {letter.unresolved.length ? 'Download response draft' : 'Download response letter'}
@@ -1099,17 +1101,6 @@ function Conversation(props: WorkbenchProps & {
           <Button variant="destructive" onClick={props.onDelete}>Delete conversation</Button></div>
       </DialogContent>
     </Dialog>
-  </div>
-}
-
-function ChatMessageText({ text }: { text: string }) {
-  return <div className="space-y-2 break-words [overflow-wrap:anywhere]">
-    {text.split('\n\n').map((paragraph, index) => <p key={index} className="whitespace-pre-wrap">
-      {paragraph.split(/(\*\*[^*\n]+\*\*|`[^`\n]+`)/).map((piece, segment) =>
-        piece.startsWith('**') && piece.endsWith('**') && piece.length > 4 ? <strong key={segment}>{piece.slice(2, -2)}</strong>
-          : piece.startsWith('`') && piece.endsWith('`') && piece.length > 2 ? <code key={segment} className="rounded bg-slate-100 px-0.5 text-xs">{piece.slice(1, -1)}</code>
-            : piece)}
-    </p>)}
   </div>
 }
 

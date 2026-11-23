@@ -20,6 +20,7 @@ function finish(unified: 'tool-calls' | 'stop' | 'length'): Part {
 export function testWritingModel(selected: string[], text: string, feedback?: 'passed' | 'failed', revision = false, canDraft = false,
   manuscript?: ManuscriptContext): LanguageModel {
   const scenario = text.trim().toLowerCase()
+  const markdown = scenario === 'test: show markdown'
   const failed = scenario === testScenarios.fail.toLowerCase()
   const interrupted = scenario === testScenarios.interrupted.toLowerCase()
   const repair = scenario.startsWith('repair the selected changes')
@@ -41,6 +42,20 @@ export function testWritingModel(selected: string[], text: string, feedback?: 'p
     modelId: 'research-fixture',
     doStream: async () => {
       const turn = step++
+      if (markdown) {
+        const deltas = [
+          '## 修改摘要\n\n| 文件 | 说明 | 数据 | 引用 | 状态 | 附件 | 备注 |',
+          '\n| --- | :--- | ---: | --- | --- | --- | --- |\n',
+          '| `sections/methods.tex` | **已修订** | 28.1 | A \\| B | 保留 | `data/sessions.csv` | 已核对 |\n',
+          '\n### 后续步骤\n\n1. 检查引用\n   - *补充说明*\n2. 再编译\n\n> ~~旧结果~~\n\n',
+          '```latex\n\\input{sections/methods}\n' + 'x'.repeat(140) + '\n```\n\n',
+          '[文档](https://example.com) [不安全](javascript:alert%281%29) ![远程图片](https://example.com/remote.png)\n\n<strong>原始 HTML</strong>',
+        ]
+        const chunks: Part[] = [{ type: 'text-start', id: 'markdown' },
+          ...deltas.map(delta => ({ type: 'text-delta' as const, id: 'markdown', delta })),
+          { type: 'text-end', id: 'markdown' }, finish('stop')]
+        return { stream: simulateReadableStream({ chunks, chunkDelayInMs: 300 }) }
+      }
       const direct = 'The first recorded value was 28.1 degrees.'
       const calculated = 'The mean of the second and third sessions was 27.25 degrees.'
       const unsupported = 'Follow-up sessions improved by 12.9 degrees.'
