@@ -1,7 +1,12 @@
 import { maskLatexCode } from './latex-source'
 
 export type ExternalEngine = 'pdflatex' | 'xelatex' | 'lualatex'
-export type CompileCompatibility = { engine?: ExternalEngine; bibliography?: 'bibtex' | 'biber'; eps: boolean; nestedStyles: boolean }
+export type CompileCompatibility = { engine?: ExternalEngine; configuredEngine?: ExternalEngine; bibliography?: 'bibtex' | 'biber'; eps: boolean; nestedStyles: boolean }
+
+export function needsExternalCompile(compatibility: CompileCompatibility) {
+  if (compatibility.configuredEngine) return compatibility.configuredEngine === 'lualatex'
+  return compatibility.bibliography === 'biber' || compatibility.engine === 'lualatex' || compatibility.engine === 'pdflatex'
+}
 
 export function detectCompileCompatibility(sources: ReadonlyMap<string, string>, main: string, paths: Iterable<string>): CompileCompatibility {
   const entry = sources.get(main) ?? ''

@@ -5,6 +5,7 @@ import { lineNumber, sourceOffsetAtPosition } from './latex-source'
 import { buildManuscriptSnapshot } from './manuscript-review'
 import { collectBibliography, findNewUnknownCitations } from './references'
 import type { ExternalEngine } from './compile-compatibility'
+import { compileProfileKey, projectCompileUrl, type CompileProfile } from './compile-profile'
 import { exportExternalBuild, prepareSubmission } from './submission'
 import { exportSourceArchive, sourceArchiveEntry } from './source-archive'
 import type { ProjectFileSystem } from './types'
@@ -27,7 +28,7 @@ export type ChatVerification = {
   message: string
   log: string
 }
-export type ManuscriptBuild = { pdf: Blob; sourceChecksum: string; compiledBaseline: string; externalEngine?: ExternalEngine }
+export type ManuscriptBuild = { pdf: Blob; sourceChecksum: string; compiledBaseline: string; externalEngine?: ExternalEngine; compileProfile?: CompileProfile }
 
 const encoder = new TextEncoder()
 const binaryHashes = new WeakMap<Blob, Promise<string>>()
@@ -54,7 +55,9 @@ export async function verificationBaseline(project: ProjectFileSystem, drafts: W
       content instanceof Blob ? await binaryHash(content) : content === undefined ? undefined : await digest(encoder.encode(content))]
   }))
   const localDrafts = Object.keys(drafts).sort().map(path => [path, drafts[path].base, drafts[path].text])
-  return digest(encoder.encode(JSON.stringify([project.metadata.mainFile, files, localDrafts])))
+  const profile = project.metadata.compileProfile
+  return digest(encoder.encode(JSON.stringify([project.metadata.mainFile, files, localDrafts,
+    ...(profile && profile.engine !== 'tectonic' ? [compileProfileKey(profile)] : [])])))
 }
 
 export function verificationPatch(edits: Edits) {
@@ -137,7 +140,8 @@ export async function validateManuscript(input: {
     return { ...issue, sourceLine }
   })
   const report = { ...result, diagnostics, selected: [], manuscript: { paths, accepted } }
-  const build = pdf && report.status === 'passed' ? { pdf, sourceChecksum: archive.checksum, compiledBaseline: report.compiledBaseline } : undefined
+  const build = pdf && report.status === 'passed' ? { pdf, sourceChecksum: archive.checksum, compiledBaseline: report.compiledBaseline,
+    compileProfile: candidate.metadata.compileProfile } : undefined
   return { report, build }
 }
 
@@ -156,7 +160,7 @@ export async function externalManuscriptVerification(project: ProjectFileSystem,
   const report: ChatVerification = { baseline, compiledBaseline, patch: compiledBaseline, main, selected: [],
     manuscript: { paths, accepted }, status: 'passed', diagnostics: [], log: '',
     message: `External PDF attached · ${externalEngine} · Source match confirmed by you.` }
-  return { report, build: { pdf, sourceChecksum, compiledBaseline, externalEngine } satisfies ManuscriptBuild }
+  return { report, build: { pdf, sourceChecksum, compiledBaseline, externalEngine, compileProfile: candidate.metadata.compileProfile } satisfies ManuscriptBuild }
 }
 
 async function compileChatSnapshot(project: ProjectFileSystem, drafts: WritingDrafts, candidate: ProjectFileSystem,
@@ -170,7 +174,7 @@ async function compileChatSnapshot(project: ProjectFileSystem, drafts: WritingDr
   const bibliography = collectBibliography(candidate)
   const citations = [...changed].flatMap(([path, text]) => findNewUnknownCitations(path, sources.get(path) ?? '', text, bibliography)
     .map(({ line, key }): CompileDiagnostic => ({ path, line, severity: 'error', message: `New unknown citation: ${key}` })))
-  const response = await fetch(`/api/latex/compile?main=${encodeURIComponent(main)}&sync=1`, { method: 'POST', body: archive, signal })
+  const response = await fetch(projectCompileUrl(main, candidate.metadata.compileProfile), { method: 'POST', body: archive, signal })
   let report: Partial<CompileReport> & { error?: string }
   let pdf: Blob | undefined
   if (response.ok) {

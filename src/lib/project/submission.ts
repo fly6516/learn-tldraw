@@ -6,12 +6,13 @@ import type { ProjectFileSystem } from './types'
 import { detectCompileCompatibility, type ExternalEngine } from './compile-compatibility'
 import { exportSourceArchive } from './source-archive'
 import type { SubmissionEvidence } from './submission-evidence'
+import type { CompileProfile } from './compile-profile'
 
 export type SubmissionIssue = { severity: 'error' | 'warning'; message: string; location?: SourceLocation }
 export type SubmissionFiles = { pdf: Blob; zip: Blob; warnings: boolean; diagnostics: SubmissionIssue[] }
 export type SubmissionVersion = SubmissionFiles & { id: string; name: string; createdAt: string; main: string;
   paths: string[]; excluded: string[]; drafts: string[]; issues: SubmissionIssue[]; externalEngine?: ExternalEngine; sourceChecksum?: string
-  evidence?: SubmissionEvidence }
+  evidence?: SubmissionEvidence; compileProfile?: CompileProfile }
 export type SubmissionVersionInfo = Omit<SubmissionVersion, 'pdf' | 'zip'>
 export type SubmissionBuild = Omit<SubmissionVersion, 'id' | 'name' | 'createdAt'>
 export type SubmissionSelection = Pick<SubmissionVersion, 'paths' | 'excluded' | 'drafts' | 'issues'> & { target: ProjectFileSystem }
@@ -139,5 +140,10 @@ export function prepareSubmission(project: ProjectFileSystem, main: string, excl
   for (const { key, kind, ...location } of checkCitations({ ...target, files: reachable }, citations)) {
     issues.push({ severity: 'warning', location, message: kind === 'missing' ? `Unknown citation key: ${key}` : `Duplicate bibliography key: ${key}` })
   }
-  return { target, issues, compatibility: detectCompileCompatibility(sources, main, files.keys()) }
+  const compatibility = detectCompileCompatibility(sources, main, files.keys())
+  const profile = project.metadata?.compileProfile
+  return { target, issues, compatibility: profile && profile.engine !== 'tectonic'
+    ? { ...compatibility, configuredEngine: profile.engine,
+      bibliography: profile.bibliography === 'auto' ? compatibility.bibliography : profile.bibliography === 'none' ? undefined : profile.bibliography }
+    : compatibility }
 }

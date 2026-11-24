@@ -13,6 +13,8 @@ import { ChatExternalBuild } from './ChatExternalBuild'
 import type { ChatVerification } from '@/lib/project/writing-chat-validation'
 import { claimSourceLine } from '@/lib/project/writing-claims'
 import { SubmissionEvidencePanel, useSubmissionEvidence } from './SubmissionEvidence'
+import { needsExternalCompile } from '@/lib/project/compile-compatibility'
+import { compileProfileKey } from '@/lib/project/compile-profile'
 
 export function ChatSubmissionCard({ runId, request, saved, working, drafts, main, active, disabled, storage, projectKey, archived, manuscriptReport,
   onBuild, onLocate, onExternal, onResult, onArchive }: {
@@ -47,7 +49,7 @@ export function ChatSubmissionCard({ runId, request, saved, working, drafts, mai
   const current = useRef(selection)
   const allowed = active && !disabled && !busy && !archiveName
   const canBuild = main && !invalid.length && !selection.issues.some(issue => issue.severity === 'error')
-  const externalRequired = selection.compatibility.bibliography === 'biber' || ['pdflatex', 'lualatex'].includes(selection.compatibility.engine ?? '')
+  const externalRequired = needsExternalCompile(selection.compatibility)
   const result = build?.selection === selection || archiveName ? build?.result : undefined
   const evidence = useSubmissionEvidence(archiveName ? null : storage, projectKey, selection.target, result)
   useEffect(() => {
@@ -65,10 +67,11 @@ export function ChatSubmissionCard({ runId, request, saved, working, drafts, mai
     void Promise.all([readManuscriptBuild(storage, projectKey, runId), exportExternalBuild(selection.target)]).then(([verified, source]) => {
       if (!mounted || !verified) return
       if (canBuild && !include && !excluded.size && manuscriptReport.main === main
+        && compileProfileKey(verified.compileProfile) === compileProfileKey(selection.target.metadata.compileProfile)
         && verified.compiledBaseline === manuscriptReport.compiledBaseline && verified.sourceChecksum === source.checksum) {
         setBuild({ selection, result: { main, paths: selection.paths, excluded: selection.excluded, drafts: selection.drafts, issues: selection.issues,
           pdf: verified.pdf, zip: source.zip, sourceChecksum: source.checksum,
-          externalEngine: verified.externalEngine, warnings: manuscriptReport.diagnostics.length > 0,
+          externalEngine: verified.externalEngine, compileProfile: verified.compileProfile, warnings: manuscriptReport.diagnostics.length > 0,
           diagnostics: manuscriptReport.diagnostics.map(issue => ({ severity: issue.severity, message: `${issue.path}:${issue.line} · ${issue.message}` })) } })
       } else setStaleBuild(selection)
     }).catch(() => {})

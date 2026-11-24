@@ -33,10 +33,12 @@ export function compileLog(output: string, log: string, limit: number) {
 export function parseCompileDiagnostics(output: string, main: string, paths: Iterable<string>): CompileDiagnostic[] {
   const files = new Set(paths)
   const folder = main.slice(0, main.lastIndexOf('/') + 1)
-  const diagnosticLines = /^(error|warning):[^\S\r\n]*(.+?):(\d+):[^\S\r\n]*(.+)$/gm
+  const diagnosticLines = /^(?:(error|warning):[^\S\r\n]*(.+?)|(.+?\.(?:tex|sty|cls|bib|bbl))):(\d+):[^\S\r\n]*(.+)$/gim
   const seen = new Set<string>()
   const diagnostics: CompileDiagnostic[] = []
-  for (const [, level, filename, lineNumber, message] of output.matchAll(diagnosticLines)) {
+  for (const [, explicitLevel, tectonicPath, systemPath, lineNumber, message] of output.matchAll(diagnosticLines)) {
+    const filename = tectonicPath ?? systemPath
+    const level = explicitLevel ?? (/\bwarning\b/i.test(message) ? 'warning' : 'error')
     const reported = filename.trim().replace(/\\/g, '/').replace(/^\.\//, '')
     const relative = folder + reported
     const parts: string[] = []

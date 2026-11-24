@@ -5,6 +5,7 @@
 
 import type { ResearchNodeType } from '@/app/research/research-node'
 import type { ResearchCanvas } from './research-graph'
+import type { CompileProfile } from './compile-profile'
 
 /**
  * LaTeX template information
@@ -106,6 +107,7 @@ export interface ProjectFileSystem {
     writingSample?: boolean
     aiReadExclusions?: string[]
     mainFile?: string
+    compileProfile?: CompileProfile
   }
 }
 

@@ -1,5 +1,6 @@
 import type JSZip from 'jszip'
 import { z } from 'zod'
+import { compileProfileSchema } from './compile-profile'
 import { chapterAnswerSchema } from './ai-edit'
 import { figureAnchorSchema, sectionAnchorSchema, selectionAnchorSchema } from './research-graph'
 import type { RevisionRound } from './revision-rounds'
@@ -35,7 +36,7 @@ const storedBlob = z.object({ sha256: hash, bytes: z.number().int().positive() }
 const submission = identity.extend({
   main: path, paths: z.array(path), excluded: z.array(path), drafts: z.array(path), issues: z.array(issue),
   warnings: z.boolean(), diagnostics: z.array(issue), externalEngine: z.enum(['pdflatex', 'xelatex', 'lualatex']).optional(),
-  sourceChecksum: hash.optional(), pdf: storedBlob, zip: storedBlob, evidence: submissionEvidenceSchema.optional(),
+  sourceChecksum: hash.optional(), pdf: storedBlob, zip: storedBlob, evidence: submissionEvidenceSchema.optional(), compileProfile: compileProfileSchema.optional(),
 }).refine(value => !value.evidence || value.evidence.sourceChecksum === value.sourceChecksum && value.sourceChecksum === value.zip.sha256)
 const target = z.discriminatedUnion('type', [
   z.object({ type: z.literal('file'), path }),
@@ -89,7 +90,7 @@ const ai = z.object({
     diagnostics: z.array(z.object({ path, line: positive, severity: z.enum(['error', 'warning']), message: text, sourceLine: positive.optional() })),
     message: text, log: text })),
   builds: z.array(z.object({ id, pdf: storedBlob, sourceChecksum: hash, compiledBaseline: hash,
-    externalEngine: z.enum(['pdflatex', 'xelatex', 'lualatex']).optional() })).max(12).refine(unique).optional(),
+    externalEngine: z.enum(['pdflatex', 'xelatex', 'lualatex']).optional(), compileProfile: compileProfileSchema.optional() })).max(12).refine(unique).optional(),
 })
 export const backupHistorySchema = z.object({
   publication: z.object({ submissions: z.array(submission), rounds: z.array(round) }).refine(({ submissions, rounds }) => {

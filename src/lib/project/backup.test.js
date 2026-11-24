@@ -28,9 +28,11 @@ test('round-trips graph pages, node positions, directed edges, viewports, and at
     updateFileContent(createProjectFileSystem(template, 'Portable paper'), 'preamble.tex', 'custom'),
     'figure.png', new Blob([bytes], { type: 'image/png' }),
   )
+  project.metadata.compileProfile = { engine: 'pdflatex', bibliography: 'biber' }
   const restored = await decodeProjectBackup(await encodeProjectBackup(canvas, project))
   expect(restored.project.canvas).toEqual(canvas)
   expect(restored.project.metadata.projectName).toBe('Portable paper')
+  expect(restored.project.metadata.compileProfile).toEqual({ engine: 'pdflatex', bibliography: 'biber' })
   expect(restored.project.files.get('preamble.tex').content).toBe('custom')
   const figure = restored.project.files.get('figures/figure.png')
   expect(figure.blob.type).toBe('image/png')

@@ -4,6 +4,7 @@ import { researchCanvasSchema, type ResearchCanvas } from './research-graph'
 import type { ProjectDirectory, ProjectFile, ProjectFileSystem } from './types'
 import { isProjectPath } from './source-archive'
 import { aiReadExclusionsSchema } from './ai-read-scope'
+import { compileProfileSchema } from './compile-profile'
 import { draftConflicts, type PortableWritingState } from './writing-drafts'
 
 import { backupHistorySchema, decodeBackupHistory, encodeBackupHistory, maxHistoryBytes, type PortableProjectHistory } from './backup-history'
@@ -46,6 +47,7 @@ const savedManifest = z.object({
       writingSample: z.boolean().optional(),
       aiReadExclusions: aiReadExclusionsSchema.optional(),
       mainFile: z.string().optional(),
+      compileProfile: compileProfileSchema.optional(),
     }),
     template: z.object({
       documentClass: z.string(),

@@ -17,7 +17,7 @@ export function ExternalCompilePanel({ main, compatibility, error, checksum, dow
   const latestChecksum = useRef(checksum)
   useLayoutEffect(() => { latestChecksum.current = checksum }, [checksum])
   const selected = input?.checksum === checksum ? input?.file : undefined
-  const engine = choice ?? compatibility.engine ?? 'xelatex'
+  const engine = choice ?? compatibility.configuredEngine ?? compatibility.engine ?? 'xelatex'
   const directory = main.includes('/') ? main.slice(0, main.lastIndexOf('/')) : 'the extracted ZIP root'
   const missingFile = missingCompilerFile(error)
 

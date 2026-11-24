@@ -9,6 +9,8 @@ test('maps compiler diagnostics to the nested main directory and deduplicates re
     { path: 'paper/chapters/results.tex', line: 3, severity: 'error', message: 'Undefined control sequence' },
     { path: 'paper/paper.tex', line: 8, severity: 'warning', message: 'Missing character' },
   ])
+  expect(parseCompileDiagnostics('./chapters/results.tex:5: Undefined control sequence.', 'paper/paper.tex', project))
+    .toMatchObject([{ path: 'paper/chapters/results.tex', line: 5, severity: 'error' }])
 })
 
 test('reports a missing math font independently of line diagnostics', () => {

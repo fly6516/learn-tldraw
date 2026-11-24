@@ -10,6 +10,7 @@ import type { WritingKey } from '@/lib/project/writing-drafts'
 import { listSubmissionVersions, readSubmissionFiles, saveSubmissionVersion } from '@/lib/project/storage'
 import { ExternalCompilePanel } from './ExternalCompilePanel'
 import type { CompileCompatibility, ExternalEngine } from '@/lib/project/compile-compatibility'
+import { compilerLabels } from '@/lib/project/compile-profile'
 import type { ProjectFileSystem } from '@/lib/project/types'
 import { claimSourceLine } from '@/lib/project/writing-claims'
 import { SubmissionEvidenceFindings, SubmissionEvidencePanel, useSubmissionEvidence } from './SubmissionEvidence'
@@ -178,7 +179,8 @@ export function SubmissionDialog({ main, drafts, includeDrafts, onDraftChoice, c
         {versions.map(version => <details key={version.id} className="rounded border p-2">
           <summary className="cursor-pointer break-all font-medium">{version.name} · {new Date(version.createdAt).toLocaleString()}</summary>
           <p className="mt-1 break-all">{version.main} · {version.paths.length} files · {version.drafts.length} local drafts</p>
-          <p>{version.externalEngine ? `External PDF · ${version.externalEngine}` : version.warnings ? 'Compiled with warnings' : 'Compiled successfully'} · {version.issues.length} preflight findings</p>
+          <p>{version.externalEngine ? `External PDF · ${version.externalEngine}` : version.warnings ? 'Compiled with warnings' : 'Compiled successfully'}
+            {version.compileProfile && !version.externalEngine && ` · ${compilerLabels[version.compileProfile.engine]}`} · {version.issues.length} preflight findings</p>
           {version.sourceChecksum && <p className="break-all text-xs">ZIP SHA-256 <code>{version.sourceChecksum}</code></p>}
           {version.evidence && <details className="mt-1"><summary>Archived evidence check · {version.evidence.checked} claims</summary>
             {version.evidence.exceptionAccepted && <p>Evidence exceptions accepted for this ZIP.</p>}

@@ -17,6 +17,7 @@ import type { SourceMove } from '@/lib/project/writing-ai-evidence'
 import { assessClaim, claimPresent, claimSourceLine } from '@/lib/project/writing-claims'
 import { ClaimEvidence, type ReviewedClaim } from './ClaimEvidence'
 import { ChatExternalBuild } from './ChatExternalBuild'
+import { needsExternalCompile } from '@/lib/project/compile-compatibility'
 
 const Diff = dynamic(() => import('./MonacoSourceEditor').then(module => module.WritingDraftComparison), { ssr: false })
 const text = (source: ChatSource) => source.draft?.text ?? source.saved
@@ -73,7 +74,7 @@ export function ManuscriptReviewDialog(props: {
   [acceptedPaths, batches, drafts, paths, project, props.generatedEntry])
   const compatibility = useMemo(() => prepareSubmission(candidate ?? project, project.metadata.mainFile ?? '', new Set()).compatibility,
     [candidate, project])
-  const requiresExternal = compatibility.bibliography === 'biber' || compatibility.engine === 'lualatex' || compatibility.engine === 'pdflatex'
+  const requiresExternal = needsExternalCompile(compatibility)
   const current = report?.manuscript && Boolean(props.baseline) && report.baseline === props.baseline
     && report.manuscript.paths.join('\n') === paths.join('\n') && report.manuscript.accepted.join('\n') === acceptedPaths.join('\n')
   const failed = current && report?.status === 'failed'
@@ -264,7 +265,7 @@ export function ManuscriptReviewDialog(props: {
           </div>}
         </div>}
         {props.generatedEntry && <p role="alert">The generated compile entry needs to match the saved project before an entire task can be verified.</p>}
-        {requiresExternal && !current && <ChatExternalBuild target={candidate} main={project.metadata.mainFile ?? ''}
+        {((requiresExternal && !current) || (compatibility.configuredEngine && failed)) && <ChatExternalBuild target={candidate} main={project.metadata.mainFile ?? ''}
           compatibility={compatibility} busy={busy} ready={Boolean(candidate)}
           onAttach={async (pdf, engine, _zip, checksum) => {
             if (!candidate) return

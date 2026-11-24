@@ -4,7 +4,7 @@ import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, 
 import { createPortal } from 'react-dom'
 import dynamic from 'next/dynamic'
 import type { editor, IPosition } from 'monaco-editor'
-import { BookOpen, ChevronRight, CircleAlert, Download, Ellipsis, FileCode2, FileText, Folder, Link2, ListChecks, LocateFixed, PanelLeft, Play, Save, Sparkles, X } from 'lucide-react'
+import { BookOpen, ChevronRight, CircleAlert, Download, Ellipsis, FileCode2, FileText, Folder, Link2, ListChecks, LocateFixed, PanelLeft, Play, Save, SlidersHorizontal, Sparkles, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { WorkbenchSetup } from './WorkbenchSetup'
 import { RightToolPanel, useRightToolPanelWide } from '@/components/ui/right-tool-panel'
@@ -44,6 +44,8 @@ import { SubmissionDialog } from './SubmissionDialog'
 import { RevisionRoundsDialog } from './RevisionRoundsDialog'
 import { exportExternalBuild, prepareSubmission, type SubmissionIssue, type SubmissionBuild, type SubmissionSelection } from '@/lib/project/submission'
 import type { ExternalEngine } from '@/lib/project/compile-compatibility'
+import { compilerLabels, compileProfileKey, projectCompileUrl, type CompileProfile } from '@/lib/project/compile-profile'
+import { CompileSettingsDialog } from './CompileSettingsDialog'
 import { useWritingDrafts } from './useWritingDrafts'
 import { SourceSearchPanel } from './SourceSearchPanel'
 import { WritingReviewPanel, type WritingReviewActions } from './WritingReviewPanel'
@@ -114,11 +116,11 @@ function Files({ nodes, selected, main, onSelect, dirty, sourcePaths, onSetMain,
 }
 
 type GenerateSource = (project: ProjectFileSystem, onNode?: (node: ResearchNodeData, line: number) => void) => string
-type CompileSnapshot = { main: string; files: ProjectFileSystem['files'] }
+type CompileSnapshot = { main: string; profile: string; files: ProjectFileSystem['files'] }
 type ExternalSubmission = Omit<SubmissionBuild, 'pdf' | 'warnings' | 'diagnostics'> & { checksum: string; downloadUrl: string; snapshot: CompileSnapshot }
 
 function sameSubmissionInputs(previous: CompileSnapshot, current?: CompileSnapshot) {
-  return current && previous.main === current.main && previous.files.size === current.files.size
+  return current && previous.main === current.main && previous.profile === current.profile && previous.files.size === current.files.size
     && [...previous.files].every(([path, before]) => {
       const after = current.files.get(path)
       return after && sourceArchiveEntry(before) === sourceArchiveEntry(after)
@@ -188,6 +190,9 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const texFiles = textFiles.filter(file => /\.tex$/i.test(file.path))
   const main = texFiles.find(file => file.path === project.metadata.mainFile)?.path
     ?? (generateSource && sourcePaths.has('main.tex') ? 'main.tex' : texFiles[0]?.path ?? '')
+  const profile = project.metadata.compileProfile
+  const profileKey = compileProfileKey(profile)
+  const [compileSettingsOpen, setCompileSettingsOpen] = useState(false)
   const [selection, setSelected] = useState<string>()
   const wanted = selection ?? restoredView?.path ?? main
   const selected = sourcePaths.has(wanted) ? wanted : main
@@ -324,8 +329,8 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const source = currentFile?.content ?? ''
   const workingFile = workingProject.files.get(selected)
   const draft = workingFile && 'content' in workingFile ? workingFile.content ?? '' : ''
-  const pdfStale = Boolean(lastCompile && (lastCompile.main !== main || !sameSources(lastCompile.files, workingProject.files)))
-  const diagnosticsStale = Boolean(diagnosticSnapshot && (diagnosticSnapshot.main !== main
+  const pdfStale = Boolean(lastCompile && (lastCompile.main !== main || lastCompile.profile !== profileKey || !sameSources(lastCompile.files, workingProject.files)))
+  const diagnosticsStale = Boolean(diagnosticSnapshot && (diagnosticSnapshot.main !== main || diagnosticSnapshot.profile !== profileKey
     || !sameSources(diagnosticSnapshot.files, workingFiles)))
   const currentWarnings = hasWarnings && !diagnosticsStale
   const tree = useMemo(() => getFileTree(project), [project])
@@ -339,7 +344,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     const excluded = new Set(paths.filter(path => path !== main && submissionExcluded.has(path)))
     return { ...prepareSubmission(source, main, excluded), paths, excluded }
   }, [submissionOpen, includeDrafts, workingProject, withGeneratedSource, project, main, submissionExcluded])
-  const submissionSnapshot = useMemo(() => submission && { main, files: submission.target.files }, [main, submission])
+  const submissionSnapshot = useMemo(() => submission && { main, profile: profileKey, files: submission.target.files }, [main, profileKey, submission])
   const latestSubmission = useRef(submissionSnapshot)
   useLayoutEffect(() => { latestSubmission.current = submissionSnapshot }, [submissionSnapshot])
   const freshExternal = externalSubmission && sameSubmissionInputs(externalSubmission.snapshot, submissionSnapshot) ? externalSubmission : undefined
@@ -792,6 +797,13 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     markSourceChanged()
   }
 
+  function saveCompileSettings(path: string, compileProfile: CompileProfile) {
+    if (locked) return
+    setFileSystem(current => current ? { ...current, metadata: { ...current.metadata, mainFile: path, compileProfile } } : current)
+    setCompileSettingsOpen(false)
+    markSourceChanged()
+  }
+
   async function discard(paths: string[]) {
     if (locked) return
     setWriting(true)
@@ -829,10 +841,10 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       setHasWarnings(false)
     }
     try {
-      const snapshot = { main, files: updatePreview ? workingFiles : target.files }
+      const snapshot = { main, profile: profileKey, files: updatePreview ? workingFiles : target.files }
       const packaged = submissionSelection ? await exportExternalBuild(target) : undefined
       const archive = packaged?.zip ?? await exportSourceArchive(target)
-      const response = await fetch(`/api/latex/compile?main=${encodeURIComponent(main)}&sync=1`, {
+      const response = await fetch(projectCompileUrl(main, target.metadata.compileProfile), {
         method: 'POST', body: archive, signal,
       })
       if (!response.ok) {
@@ -865,10 +877,10 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         const diagnostics = submissionDiagnostics(info?.diagnostics ?? [], target.files)
         if (info?.hasWarnings && !diagnostics.length) diagnostics.push({ severity: 'warning', message: 'The compiler reported warnings without a source location. See the compiler output.' })
         submission = { main, paths, excluded, drafts, issues, pdf, zip: archive, warnings: Boolean(info?.hasWarnings), diagnostics,
-          sourceChecksum: packaged?.checksum }
+          sourceChecksum: packaged?.checksum, compileProfile: target.metadata.compileProfile }
         if (!chatSignal) {
           setSubmissionCompilerIssues(diagnostics)
-          setSubmissionResult({ build: submission, snapshot: { main, files: target.files } })
+          setSubmissionResult({ build: submission, snapshot: { ...snapshot, files: target.files } })
           if (info?.hasWarnings) setSubmissionLog(info.log)
         }
       }
@@ -921,7 +933,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     const selection = getSubmissionSelection()
     if (!selection || locked) return
     const { target, ...info } = selection
-    const snapshot = { main, files: target.files }
+    const snapshot = { main, profile: profileKey, files: target.files }
     const token = ++externalPreparation.current
     try {
       const { zip, checksum } = await exportExternalBuild(target)
@@ -968,6 +980,10 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         <Button size="sm" variant="outline" onClick={save} disabled={!dirty || locked}><Save /> {writing ? 'Saving…' : 'Save'}</Button>
         <Button size="sm" className="bg-indigo-700 text-white hover:bg-indigo-800" onClick={() => void compile()} disabled={!main || locked}>
           <Play /> {busy ? 'Compiling…' : 'Compile PDF'}
+        </Button>
+        <Button size="sm" variant="ghost" aria-label="Compile settings" title="Compile settings" disabled={!main || locked}
+          onClick={() => setCompileSettingsOpen(true)} className="shrink-0 px-1.5 sm:px-2">
+          <SlidersHorizontal /><span className="hidden text-xs xl:inline">{compilerLabels[profile?.engine ?? 'tectonic']}</span>
         </Button>
         <WorkbenchSetup storage={journal.loadError || journal.failed.size ? 'unavailable' : journal.ready && storage ? 'ready' : 'checking'} />
         <Button ref={aiTrigger} size="sm" variant={aiOpen ? 'secondary' : 'outline'} aria-expanded={aiOpen} aria-controls="writing-ai"
@@ -1209,6 +1225,8 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
           <Button variant="outline" size="sm" className="h-7" disabled={!main || locked} onClick={() => setSubmissionOpen(true)}>Prepare submission</Button>
         </div>
       </footer>
+      {compileSettingsOpen && <CompileSettingsDialog main={main} paths={texFiles.map(file => file.path)} profile={profile}
+        onSave={saveCompileSettings} onClose={() => setCompileSettingsOpen(false)} />}
       {submission && <SubmissionDialog main={main} drafts={draftPaths} includeDrafts={includeDrafts} paths={submission.paths}
         target={submission.target} working={workingProject} onEvidenceLocate={(path, line) => {
           setSubmissionOpen(false)

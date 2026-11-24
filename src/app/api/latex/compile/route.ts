@@ -8,6 +8,8 @@ import { importSourceArchive, isProjectPath } from '@/lib/project/source-archive
 import { compileFailureMessage, compileLog, parseCompileDiagnostics, type CompileReport } from '@/lib/project/compile-diagnostics'
 import { readSyncTex } from '@/lib/project/read-synctex'
 import { claimLocalCompiler, currentLocalCompile, writeCompileSources } from '@/lib/project/local-compile'
+import { compileProfileSchema } from '@/lib/project/compile-profile'
+import { runSystemTex, systemCompilerUnavailable } from '@/lib/project/system-tex'
 
 export const runtime = 'nodejs'
 
@@ -26,6 +28,10 @@ export async function POST(request: Request) {
   const params = new URL(request.url).searchParams
   const mainFile = params.get('main') ?? ''
   const synchronize = params.get('sync') === '1'
+  const profile = compileProfileSchema.safeParse({ engine: params.get('engine') ?? 'tectonic', bibliography: params.get('bibliography') ?? 'auto' })
+  if (!profile.success) return Response.json({ error: 'Choose a supported compilation profile.' }, { status: 400 })
+  const unavailable = systemCompilerUnavailable(profile.data)
+  if (unavailable) return Response.json({ error: unavailable }, { status: 503 })
   if (!isProjectPath(mainFile) || !/\.tex$/i.test(mainFile)) {
     return Response.json({ error: 'Select a valid .tex main file.' }, { status: 400 })
   }
@@ -52,30 +58,39 @@ export async function POST(request: Request) {
 
     work = await mkdtemp(join(tmpdir(), 'research-latex-'))
     const sources = join(work, 'sources')
-    const output = join(work, 'output')
-    await mkdir(output)
     await writeCompileSources(sources, project)
+    const engine = profile.data.engine
+    const output = engine === 'tectonic' ? join(work, 'output') : await mkdtemp(join(dirname(join(sources, mainFile)), 'research-build-'))
+    if (engine === 'tectonic') await mkdir(output)
 
     const job = basename(mainFile).replace(/\.tex$/i, '')
     const readLog = () => readFile(join(output, job + '.log'), 'utf8').catch(() => '')
     const onlyCached = process.env.TECTONIC_ONLY_CACHED === '1'
     const timeout = process.env.RESEARCH_TRIAL_RUNTIME === '1' && !onlyCached ? 360_000 : 120_000
     let outputText: string
+    let syncRoot = sources
     try {
-      const { stdout, stderr } = await exec(process.env.TECTONIC_BIN || 'tectonic', [
-        '--untrusted', '--keep-logs',
-        ...(synchronize ? ['--synctex'] : []),
-        ...(onlyCached ? ['--only-cached'] : []),
-        '--outdir', output, '--', basename(mainFile),
-      ], {
-        cwd: dirname(join(sources, mainFile)), windowsHide: true,
-        timeout, maxBuffer: 2 * 1024 * 1024, signal: request.signal,
-      })
-      outputText = [stderr, stdout].filter(Boolean).join('\n')
+      if (profile.data.engine !== 'tectonic') {
+        const result = await runSystemTex(profile.data, { main: mainFile, sourceRoot: sources, output, paths: new Set(project.files.keys()) },
+          synchronize, request.signal)
+        outputText = result.log
+        syncRoot = result.syncRoot
+      } else {
+        const { stdout, stderr } = await exec(process.env.TECTONIC_BIN || 'tectonic', [
+          '--untrusted', '--keep-logs',
+          ...(synchronize ? ['--synctex'] : []),
+          ...(onlyCached ? ['--only-cached'] : []),
+          '--outdir', output, '--', basename(mainFile),
+        ], {
+          cwd: dirname(join(sources, mainFile)), windowsHide: true,
+          timeout, maxBuffer: 2 * 1024 * 1024, signal: request.signal,
+        })
+        outputText = [stderr, stdout].filter(Boolean).join('\n')
+      }
     } catch (cause) {
       const failure = cause as NodeJS.ErrnoException & { killed?: boolean; stderr?: string; stdout?: string }
       const outputText = [failure.stderr, failure.stdout].filter(Boolean).join('\n')
-      const error = failure.code === 'ENOENT'
+      const error = engine !== 'tectonic' ? failure.message : failure.code === 'ENOENT'
         ? 'Tectonic executable not found. Install it or set TECTONIC_BIN.'
         : failure.killed ? 'LaTeX compilation timed out.' : compileFailureMessage(outputText, onlyCached)
       const log = await readLog()
@@ -91,7 +106,7 @@ export async function POST(request: Request) {
       const map = await stat(mapPath).then(async info => {
         if (info.size > maxBytes) return []
         const text = gunzipSync(await readFile(mapPath), { maxOutputLength: maxBytes }).toString()
-        return readSyncTex(text, sources, mainFile, project.files.keys())
+        return readSyncTex(text, syncRoot, mainFile, project.files.keys())
       }).catch(() => [])
       const result = new FormData()
       result.set('pdf', new Blob([pdf], { type: 'application/pdf' }), job + '.pdf')
