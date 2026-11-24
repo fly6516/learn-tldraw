@@ -10,12 +10,14 @@ import type { CanvasSourceCatalog } from '@/lib/project/canvas-source-links'
 import type { SourceLocation } from '@/lib/project/latex-source'
 import { resolveReviewTarget, reviewTargetChoices, type ReviewItem } from '@/lib/project/review-links'
 import { compareRevisionFiles, readRevisionBaseline, type RevisionComment, type RevisionFile, type RevisionRound } from '@/lib/project/revision-rounds'
-import { addRevisionComment, createRevisionRound, linkRevisedSubmission, listRevisionRounds, listSubmissionVersions, readSubmissionFiles, saveRevisionResponse } from '@/lib/project/storage'
+import { addRevisionComment, createRevisionRound, linkRevisedSubmission, listRevisionRounds, listSubmissionVersions, readRevisionPackage, readSubmissionFiles, saveRevisionResponse } from '@/lib/project/storage'
+import { buildRevisionPackage } from '@/lib/project/revision-package'
 import type { SubmissionVersionInfo } from '@/lib/project/submission'
 import type { ProjectFileSystem } from '@/lib/project/types'
 import type { WritingKey } from '@/lib/project/writing-drafts'
 import { RevisionFileComparison } from './RevisionFileComparison'
 import { RevisionResponses } from './RevisionResponses'
+import { download, submissionFilename } from './SubmissionDialog'
 
 export function RevisionRoundsDialog({ database, storageKey, initialSubmission, roundId, onSelectRound, current,
   catalog, cards, drafts, conflicts, openSource, openCanvas, onClose }: {
@@ -154,6 +156,11 @@ export function RevisionRoundsDialog({ database, storageKey, initialSubmission, 
         {tab === 'responses' && <RevisionResponses key={round.id} round={round} baseline={version?.name ?? 'Original submission'} busy={busy}
           versions={(library?.versions ?? []).filter(item => item.id !== round.submissionId && (!version || item.createdAt >= version.createdAt))}
           files={revisedArchive?.files} reportError={(loaded?.id === baselineId ? loaded?.error : undefined) ?? revisedArchive?.error} paths={evidencePaths}
+          onDownloadPackage={() => perform(async () => {
+            const input = await readRevisionPackage(database, storageKey, round)
+            const bundle = await buildRevisionPackage(input)
+            download(bundle, `${submissionFilename(round.name)}-revision.zip`)
+          })}
           onLink={id => void perform(async () => { updateRound(await linkRevisedSubmission(database, storageKey, round.id, id)) })}
           onSave={(commentId, response) => perform(async () => { updateRound(await saveRevisionResponse(database, storageKey, round.id, commentId, response)) })} />}
       </>}

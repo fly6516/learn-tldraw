@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { expect, firefox, test, type Download, type Page } from '@playwright/test'
+import JSZip from 'jszip'
 import { morningWalkZip } from '../fixtures/morning-walk'
 
 const workspace = process.env.RESEARCH_HISTORY_TEST_PATH ?? '/research-test?view=write'
@@ -13,6 +14,24 @@ async function download(page: Page, button: string) {
 
 async function digest(file: Download) {
   return createHash('sha256').update(await readFile(await file.path())).digest('hex')
+}
+
+async function verifyRevisionPackage(file: Download, originalZip: string, revisedZip: string, revisedPdf: string) {
+  const bytes = await readFile(await file.path())
+  const archive = await JSZip.loadAsync(bytes, { checkCRC32: true })
+  expect(Object.keys(archive.files).sort()).toEqual(['manifest.json', 'manuscript.pdf', 'response.md', 'source.zip'])
+  const manifest = JSON.parse(await archive.file('manifest.json')!.async('string'))
+  expect(manifest.original).toMatchObject({ name: 'Submission v1', sourceChecksum: originalZip })
+  expect(manifest.revised).toMatchObject({ name: 'Submission v2', sourceChecksum: revisedZip })
+  for (const entry of manifest.files) {
+    const content = await archive.file(entry.name)!.async('nodebuffer')
+    expect(content.byteLength).toBe(entry.bytes)
+    expect(createHash('sha256').update(content).digest('hex')).toBe(entry.sha256)
+  }
+  expect(manifest.files.find((file: { name: string }) => file.name === 'manuscript.pdf').sha256).toBe(revisedPdf)
+  expect(manifest.files.find((file: { name: string }) => file.name === 'source.zip').sha256).toBe(revisedZip)
+  expect(await archive.file('response.md')!.async('string')).toContain('We clarified how the results were summarized.')
+  return createHash('sha256').update(bytes).digest('hex')
 }
 
 async function openMenu(page: Page, item: string) {
@@ -166,10 +185,12 @@ test('restores archived submission files and reviewer replies from Chromium into
   await revisions.getByRole('button', { name: 'Responses and letter' }).click()
   const revisedLabel = await revisions.getByRole('option', { name: /^Submission v2 ·/ }).getAttribute('value')
   await revisions.getByRole('combobox', { name: 'Revised submission' }).selectOption(revisedLabel!)
+  await expect(revisions.getByRole('button', { name: 'Download revision package' })).toBeDisabled()
   await revisions.getByRole('textbox', { name: 'Response', exact: true }).fill('We clarified how the results were summarized.')
   await revisions.getByRole('checkbox', { name: /^sections\/results\.tex/ }).check()
   await revisions.getByRole('button', { name: 'Save response' }).click()
   await expect(revisions.getByText('Response saved.')).toBeVisible()
+  const packaged = await verifyRevisionPackage(await download(page, 'Download revision package'), originalZip, revisedZip, revisedPdf)
   await revisions.getByRole('button', { name: 'Close', exact: true }).click()
 
   await openMenu(page, 'Project Snapshots')
@@ -220,6 +241,7 @@ test('restores archived submission files and reviewer replies from Chromium into
     const reply = await readFile(await (await download(restored, 'Download response Markdown')).path(), 'utf8')
     expect(reply).toContain('We clarified how the results were summarized.')
     expect(reply).toContain('Modified · sections/results.tex')
+    expect(await verifyRevisionPackage(await download(restored, 'Download revision package'), originalZip, revisedZip, revisedPdf)).toBe(packaged)
     await restoredRound.getByRole('button', { name: 'Reviewer comments' }).click()
     await restoredRound.getByRole('button', { name: 'sections/results.tex', exact: true }).click()
     await expect(restored.getByRole('region', { name: 'Source editor' }).getByText('sections/results.tex', { exact: true })).toBeVisible()

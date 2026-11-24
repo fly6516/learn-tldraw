@@ -10,13 +10,15 @@ import { buildRevisionLetter, type RevisionResponse, type RevisionRound, type Re
 import type { SubmissionVersionInfo } from '@/lib/project/submission'
 import { archiveReplyEvidence, revisionDraftSchema } from '@/lib/project/ai-revision'
 
-export function RevisionResponses({ round, baseline, versions, files, reportError, paths, busy, onLink, onSave }: {
+export function RevisionResponses({ round, baseline, versions, files, reportError, paths, busy, onLink, onSave, onDownloadPackage }: {
   round: RevisionRound; baseline: string; versions: SubmissionVersionInfo[]; files?: RevisionFile[]; reportError?: string
   paths: string[]; busy: boolean; onLink: (id?: string) => void
   onSave: (commentId: string, response?: RevisionResponse) => Promise<boolean>
+  onDownloadPackage: () => Promise<boolean>
 }) {
   const [selected, setSelected] = useState(round.comments[0]?.id ?? '')
   const [preview, setPreview] = useState(false)
+  const [exporting, setExporting] = useState(false)
   const comment = round.comments.find(item => item.id === selected)
   const revised = versions.find(version => version.id === round.revisedSubmissionId)
   const letter = files && revised ? buildRevisionLetter(round, baseline, revised.name, files) : undefined
@@ -60,6 +62,16 @@ export function RevisionResponses({ round, baseline, versions, files, reportErro
     <div className="flex flex-wrap gap-2">
       <Button size="sm" variant="outline" disabled={!letter || !round.comments.length} onClick={() => setPreview(value => !value)}>{preview ? 'Hide response letter' : 'Preview response letter'}</Button>
       <Button size="sm" disabled={!letter || !round.comments.length} onClick={downloadLetter}>{draft ? 'Download Markdown draft' : 'Download response Markdown'}</Button>
+    </div>
+    <div className="space-y-2 rounded border p-3 text-sm">
+      <p>{revised ? `Use the PDF and source ZIP archived as ${revised.name}, along with the response letter and version manifest.`
+        : 'Choose a revised submission to assemble its PDF, source ZIP, and response letter.'}</p>
+      {draft && revised && <p className="text-amber-800">Resolve the remaining replies and evidence before exporting the final package.</p>}
+      <Button size="sm" disabled={busy || exporting || !letter || draft || !round.comments.length} onClick={async () => {
+        setExporting(true)
+        try { await onDownloadPackage() }
+        finally { setExporting(false) }
+      }}>{exporting ? 'Preparing revision package…' : 'Download revision package'}</Button>
     </div>
     {preview && letter && <section aria-label="Response letter preview" className="max-h-64 overflow-auto rounded border bg-slate-50 p-3 text-xs">
       <WritingMarkdown text={letter.markdown} />

@@ -12,6 +12,7 @@ import { restoreSnapshotFiles } from './snapshots'
 import type { SubmissionVersion, SubmissionVersionInfo } from './submission'
 import { submissionEvidenceLedger } from './submission-evidence'
 import type { RevisionComment, RevisionResponse, RevisionRound } from './revision-rounds'
+import type { RevisionPackageInput } from './revision-package'
 import { applyWritingDrafts, draftConflicts, editableSource, sameDraft, type PortableWritingState, type WritingDraft, type WritingDrafts, type WritingKey, type WritingView } from './writing-drafts'
 
 const storeName = 'projects'
@@ -101,6 +102,30 @@ export async function readSubmissionFiles(database: IDBDatabase, key: WritingKey
     const request = transaction.objectStore(storeName).get(['submission-files', ...key, id])
     await complete(transaction)
     return request.result as Pick<SubmissionVersion, 'pdf' | 'zip'> | undefined
+}
+
+export async function readRevisionPackage(database: IDBDatabase, key: WritingKey, reviewed: RevisionRound): Promise<RevisionPackageInput> {
+    const { id, submissionId, revisedSubmissionId } = reviewed
+    if (!revisedSubmissionId || revisedSubmissionId === submissionId) throw new Error('Choose an archived revised submission.')
+    const transaction = database.transaction(storeName)
+    const store = transaction.objectStore(storeName)
+    const round = store.get(['revision-round', ...key, id])
+    const info = (version: string) => store.get(['submission-info', ...key, version])
+    const files = (version: string) => store.get(['submission-files', ...key, version])
+    const before = info(submissionId)
+    const after = info(revisedSubmissionId)
+    const beforeFiles = files(submissionId)
+    const afterFiles = files(revisedSubmissionId)
+    await complete(transaction)
+    if (JSON.stringify(round.result) !== JSON.stringify(reviewed)) {
+        throw new Error('The revision round changed. Reopen it and review the current responses before exporting.')
+    }
+    if (!before.result || !after.result || !(beforeFiles.result?.zip instanceof Blob)
+        || !(afterFiles.result?.zip instanceof Blob) || !(afterFiles.result?.pdf instanceof Blob)) {
+        throw new Error('The archived original ZIP, revised ZIP, or revised PDF is unavailable.')
+    }
+    return { round: round.result, original: { ...before.result, zip: beforeFiles.result.zip },
+        revised: { ...after.result, zip: afterFiles.result.zip, pdf: afterFiles.result.pdf } }
 }
 
 export async function readSubmissionEvidence(database: IDBDatabase, key: WritingKey) {
