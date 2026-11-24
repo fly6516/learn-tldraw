@@ -1,7 +1,10 @@
-import { expect, test, type Page } from '@playwright/test'
+import { expect, test, type Locator, type Page } from '@playwright/test'
 import { readFile } from 'node:fs/promises'
 import { morningWalkZip } from '../fixtures/morning-walk'
 import { approveContext, approveContextIfRequested } from '../fixtures/model-context'
+import { longAiPaperZip, longResultHeading, longResultLine, selectLongResult } from '../fixtures/long-ai-paper'
+import { testResultLine, testResults } from '../../src/lib/project/test-paper'
+import { modelFailureMessages } from '../../src/lib/project/workbench-status'
 
 const zipPath = process.env.RESEARCH_LIVE_TEST_ZIP
 const seededPath = process.env.RESEARCH_LIVE_TEST_PATH
@@ -20,6 +23,68 @@ async function openAi(page: Page) {
   await page.getByRole('button', { name: 'Writing AI', exact: true }).click()
   await expect(page.getByRole('textbox', { name: 'Message Writing AI' })).toBeVisible()
 }
+
+async function waitForModelResult(page: Page, result: Locator) {
+  const retry = page.getByRole('button', { name: 'Retry request', exact: true })
+  await expect(result.or(retry).first()).toBeVisible({ timeout: 85_000 })
+  if (await result.isVisible()) return
+  const transient = page.getByRole('alert').filter({
+    hasText: new RegExp('^(' + [modelFailureMessages.timeout, modelFailureMessages.unavailable]
+      .map(message => message.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')$'),
+  })
+  await expect(transient).toBeVisible()
+  test.info().annotations.push({ type: 'recovered model request', description: await transient.innerText() })
+  await retry.click()
+  await approveContextIfRequested(page)
+  await expect(result).toBeVisible({ timeout: 85_000 })
+}
+
+test('real model verifies its connection and edits a long chapter by selection and heading', async ({ page }, info) => {
+  test.setTimeout(300_000)
+  const start = Date.now()
+  await page.goto('/research')
+  await page.getByRole('button', { name: 'Workbench setup' }).click()
+  const setup = page.getByRole('dialog', { name: 'Workbench setup' })
+  const response = page.waitForResponse(response => response.url().endsWith('?check=model-connection'))
+  await setup.getByRole('button', { name: 'Test model connection' }).click()
+  const connection = await (await response).json()
+  await expect(setup.getByText(/Model connection verified/)).toBeVisible({ timeout: 30_000 })
+  info.annotations.push({ type: 'model', description: connection.recipient })
+  await info.attach('model-connection', { contentType: 'application/json',
+    body: JSON.stringify({ state: connection.state, model: connection.recipient, durationMs: Date.now() - start }) })
+  await page.keyboard.press('Escape')
+  await page.getByLabel('Choose project ZIP or backup').setInputFiles({
+    name: 'Long paper.zip', mimeType: 'application/zip', buffer: await longAiPaperZip(),
+  })
+  await openAi(page)
+  await selectLongResult(page)
+  await send(page, `Read the selected line and quote it with its exact file and line number. Leave the text as is.`)
+  const answer = page.getByRole('article', { name: 'Assistant' }).last()
+  await waitForModelResult(page, answer.getByText(/^Source evidence ·/))
+  await expect(answer.getByRole('button', { name: `Open ${testResults}:${longResultLine}`, exact: true })).toBeVisible()
+  await answer.getByText(/^Source evidence ·/).click()
+  await expect(answer.getByRole('button', { name: new RegExp('^' + testResults + ':' + longResultLine + ' ·') })).toBeVisible()
+  const replacement = 'The synthetic observations averaged twenty degrees.'
+  const editPrompt = `Replace exactly "${testResultLine}" with "${replacement}". Use propose_edits. Preserve the rest of the file.`
+  await send(page, editPrompt)
+  const proposals = page.getByRole('region', { name: 'Source change proposal' })
+  await waitForModelResult(page, proposals.nth(0))
+  await expect(proposals).toHaveCount(1)
+  await proposals.last().getByRole('button', { name: 'Verify selected changes' }).click()
+  await expect(proposals.last().getByText(/^Verification passed\./)).toBeVisible()
+  await page.getByRole('complementary', { name: 'Project navigation' }).getByRole('button', { name: 'Files', exact: true }).click()
+  await page.getByRole('button', { name: /^main\.tex\b/ }).click()
+  await expect(page.getByRole('textbox', { name: 'Project source editor' })).toBeFocused()
+  await send(page, `In the ${longResultHeading} section of ${testResults}, ${editPrompt}`)
+  await waitForModelResult(page, proposals.nth(1))
+  await expect(proposals).toHaveCount(2)
+  await proposals.last().getByRole('button', { name: 'Verify selected changes' }).click()
+  await expect(proposals.last().getByText(/^Verification passed\./)).toBeVisible()
+  await proposals.last().getByRole('button', { name: 'Save verified changes' }).click()
+  await expect(proposals.last().getByText('Saved to project', { exact: true })).toBeVisible()
+  await selectLongResult(page, replacement)
+  await expect(page.getByRole('region', { name: 'Source editor' }).locator('.view-lines')).toContainText(replacement)
+})
 
 async function send(page: Page, text: string) {
   await page.getByRole('textbox', { name: 'Message Writing AI' }).fill(text)
@@ -107,11 +172,12 @@ test('real model moves Morning Walk Study from writing through submission and re
   for (const [index, [source]] of comments.entries()) {
     const requests = page.getByRole('button', { name: 'Draft reply from archived changes' })
     await send(page, `Draft a reviewer reply to comment ${index + 1} in Route review using archived Submission v2.`)
-    await expect(requests).toHaveCount(index + 1, { timeout: 65_000 })
+    await waitForModelResult(page, requests.nth(index))
+    await expect(requests).toHaveCount(index + 1)
     await requests.last().click()
     await approveContext(page)
     const reply = page.getByRole('region', { name: 'Reviewer reply proposal' }).nth(index)
-    await expect(reply.getByText(`Archived evidence · ${source}`)).toBeVisible({ timeout: 65_000 })
+    await waitForModelResult(page, reply.getByText(`Archived evidence · ${source}`))
     await reply.getByRole('button', { name: /Confirm .*save reply/ }).click()
     await expect(reply.getByText('Reply saved.')).toBeVisible()
   }
@@ -181,6 +247,14 @@ test('real model reads Morning Walk Study evidence and applies a multi-batch man
     await review.getByRole('button', { name: 'Verify manuscript' }).click()
   }
   await expect(review.getByRole('status')).toContainText('Manuscript verification passed.')
+  // The model may flag the author-supplied fixture sentence for confirmation.
+  for (const path of files) {
+    await review.getByRole('button', { name: path, exact: true }).click()
+    const fixtureClaim = review.getByRole('listitem', {
+      name: 'This draft uses synthetic observations for workflow testing.', exact: true,
+    }).getByRole('button', { name: 'Confirm claim', exact: true })
+    if (await fixtureClaim.isVisible() && await fixtureClaim.isEnabled()) await fixtureClaim.click()
+  }
   await review.getByRole('button', { name: 'Save verified files' }).click()
   await expect(task.getByText('4 task files saved together.')).toBeVisible()
   await expect(mainFile.getByLabel('Unsaved')).toBeVisible()
@@ -198,7 +272,7 @@ test('real model carries one Morning Walk Study request from CSV evidence to an 
   await openAi(page)
   await send(page, 'Read rows 1 through 5 of data/sessions.csv, revise exactly sections/methods.tex and sections/results.tex, compile the manuscript, and prepare a submission named "Evidence review". In Methods clarify that the sessions were paired. In Results add that the shaded route measured 28.1 degrees Celsius in session 1. Link that sentence to CSV physical line 2 in your proposal. These are synthetic observations confirmed for this test. Preserve the rest of the text, figures and citations. No further factual questions need answering.')
   const task = page.getByRole('region', { name: 'Manuscript task' })
-  await expect(task.getByText(/data\/sessions\.csv · CSV rows/)).toBeVisible({ timeout: 65_000 })
+  await waitForModelResult(page, task.getByText(/data\/sessions\.csv · CSV rows/))
   const continueTask = task.getByRole('button', { name: 'Continue task' })
   if (await continueTask.isDisabled()) {
     await task.getByText('Author decisions and open questions').click()

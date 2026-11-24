@@ -51,7 +51,8 @@ export function SyncedPdfPreview({ url, page, onPage, regions, target, onLocate 
     const failed = () => { if (active) setError('PDF preview could not be loaded. Use Download PDF to open it.') }
     thread.addEventListener('error', failed)
     const worker = PDFWorker.create({ port: thread })
-    const task = getDocument({ url, worker, isEvalSupported: false, useWasm: false })
+    const task = getDocument({ url, worker, isEvalSupported: false, useWasm: false,
+      cMapUrl: '/api/latex/pdf-cmaps/', cMapPacked: true })
     task.promise.then(document => { if (active) setPdf(document) })
       .catch(failed)
     return () => {

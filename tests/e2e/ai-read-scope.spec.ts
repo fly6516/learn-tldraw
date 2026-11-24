@@ -26,6 +26,8 @@ test('previews actual model context and leaves excluded bytes out of requests af
   await page.getByRole('textbox', { name: 'Excluded project paths' }).fill('sections/results.tex\ndata/')
   await page.getByRole('button', { name: 'Save read exclusions' }).click()
   const check = async () => {
+    const responses = page.getByRole('article', { name: 'Assistant' })
+    const before = await responses.count()
     await prompt.fill('Summarize the available chapters.')
     await page.getByRole('button', { name: 'Review context' }).click()
     const preview = page.getByRole('dialog', { name: 'Review model context' })
@@ -50,7 +52,8 @@ test('previews actual model context and leaves excluded bytes out of requests af
       headers: { origin: new URL(page.url()).origin }, data: { ...body, expectedRecipient: 'Different model' },
     })
     expect(mismatch.status()).toBe(409)
-    const response = page.getByRole('article', { name: 'Assistant' }).last()
+    await expect(responses).toHaveCount(before + 1)
+    const response = responses.last()
     await expect(response).toContainText('Fixture response')
     await response.getByText('Model context sent', { exact: true }).click()
     await expect(response).toContainText('Local test model')

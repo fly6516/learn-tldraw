@@ -48,6 +48,7 @@ const savedManifest = z.object({
       aiReadExclusions: aiReadExclusionsSchema.optional(),
       mainFile: z.string().optional(),
       compileProfile: compileProfileSchema.optional(),
+      templateOrigin: z.object({ id: z.string(), version: z.string(), sha256: z.string().regex(/^[0-9a-f]{64}$/) }).optional(),
     }),
     template: z.object({
       documentClass: z.string(),

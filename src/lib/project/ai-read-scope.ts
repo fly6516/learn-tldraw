@@ -6,8 +6,10 @@ import type { SourceMove } from './writing-ai-evidence'
 const path = z.string().max(500).refine(isProjectPath)
 export const aiReadExclusionsSchema = z.array(z.string().max(500).refine(value => isProjectPath(value.replace(/\/$/, '')))).max(512)
 export const aiContextReceiptSchema = z.object({
-  files: z.array(z.object({ path, kind: z.enum(['saved', 'draft', 'csv', 'csv_draft', 'attachment', 'archive']),
-    partial: z.boolean().optional() })).max(400),
+  files: z.array(z.object({ path, kind: z.enum(['saved', 'draft', 'csv', 'csv_draft', 'attachment', 'archive', 'pdf_page', 'image']),
+    partial: z.boolean().optional(),
+    page: z.number().int().positive().optional(),
+    lines: z.object({ start: z.number().int().positive(), end: z.number().int().positive() }).optional() })).max(400),
   diagnostics: z.boolean(), taskNotes: z.boolean(), reviewerComment: z.boolean().optional(), restricted: z.boolean(),
   confirmation: z.enum(['approved', 'reused', 'local']).optional(),
 })

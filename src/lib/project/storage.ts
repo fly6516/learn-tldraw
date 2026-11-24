@@ -823,7 +823,7 @@ export async function commitChatAction(database: IDBDatabase, key: WritingKey, r
         const paths = chatActionPaths(action, previous)
         const requests = paths.map(path => ({ path, request: store.get(['draft', ...key, path]) }))
         function mutate(project: ProjectFileSystem) {
-            if ((action.kind === 'apply' || action.kind === 'apply-save') && action.signal?.aborted) {
+            if ((action.kind === 'apply' || action.kind === 'apply-save' || action.kind === 'save') && action.signal?.aborted) {
                 failure = new Error('Edit authorization was cancelled.')
                 return
             }
@@ -852,19 +852,21 @@ export async function commitChatAction(database: IDBDatabase, key: WritingKey, r
                 selected: action.kind === 'apply' || action.kind === 'apply-save' ? action.edits.length : undefined,
                 selection: action.kind === 'apply' ? action.selection : undefined,
                 paths: Object.keys(checkpoint.after),
-                detail: action.kind === 'apply-save' ? 'Saved after passing verification.'
+                detail: action.kind === 'apply-save' || action.kind === 'save' ? 'Saved after passing verification.'
                     : action.kind === 'apply' ? action.automatic ? 'Session approval used.' : 'Author approved the selected changes.' : undefined })
             result = { project, checkpoint, changed: true }
         }
         const last = requests.at(-1)
-        if (action.kind === 'apply-save' && !previous) {
+        if ((action.kind === 'apply-save' && !previous) || (action.kind === 'save' && previous?.state === 'draft')) {
+            const saveWorking = action.kind === 'save'
+            const { signal } = action
             const drafts = store.getAll(draftRange(key))
             const keys = store.getAllKeys(draftRange(key))
             const report = store.get(['ai-verify', ...key, runId])
             report.onsuccess = () => {
                 const verified = report.result as ChatVerification | undefined
-                if (verified?.status !== 'passed' || verified.working || action.signal.aborted
-                    || action.selection && action.selection.join(',') !== verified.selected.join(',')
+                if (verified?.status !== 'passed' || Boolean(verified.working) !== saveWorking || signal?.aborted
+                    || action.kind === 'apply-save' && action.selection && action.selection.join(',') !== verified.selected.join(',')
                     || verified.currentSelection && verified.currentSelection.join(',') !== verified.selected.join(',')) {
                     failure = new Error('This turn needs a passing verification before saving.')
                     return
@@ -872,12 +874,13 @@ export async function commitChatAction(database: IDBDatabase, key: WritingKey, r
                 const currentDrafts = Object.fromEntries(keys.result.map((key, index) =>
                     [(key as [string, ...WritingKey, string])[3], drafts.result[index]]))
                 let outcome: { current: boolean } | undefined
-                void Promise.all([verificationBaseline(original, currentDrafts), verificationPatch(action.edits)])
-                    .then(([baseline, patch]) => { outcome = { current: baseline === verified.baseline && patch === verified.patch } })
+                void Promise.all([verificationBaseline(original, currentDrafts),
+                    action.kind === 'apply-save' ? verificationPatch(action.edits) : undefined])
+                    .then(([baseline, patch]) => { outcome = { current: baseline === verified.baseline && (saveWorking || patch === verified.patch) } })
                     .catch(() => { outcome = { current: false } })
                 // Keep this transaction open during hashing so another tab cannot change the verified inputs before the write.
                 function validate() {
-                    if (action.kind !== 'apply-save' || action.signal.aborted) {
+                    if (signal?.aborted) {
                         failure = new Error('Save authorization was cancelled.')
                     } else if (!outcome) {
                         store.getKey(entry).onsuccess = validate

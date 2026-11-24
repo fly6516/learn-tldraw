@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { readCsvRange } from './ai-attachments'
+import { readCsvRange, type CsvWindow } from './ai-attachments'
 import { isProjectPath } from './source-archive'
 import type { ProjectFileSystem } from './types'
 import { captureEvidenceQuote, locateEvidence, type SourceMove } from './writing-ai-evidence'
@@ -7,7 +7,7 @@ import { captureEvidenceQuote, locateEvidence, type SourceMove } from './writing
 const operation = z.enum(['mean', 'difference', 'percent_change'])
 const path = z.string().max(500).refine(isProjectPath)
 const column = z.string().min(1).max(240)
-const cell = z.object({ row: z.number().int().min(2).max(24_000), column })
+const cell = z.object({ row: z.number().int().min(2).max(999_999), column })
 export const csvCalculationRequest = z.object({
   path, operation, cells: z.array(cell).min(1).max(12), decimals: z.number().int().min(0).max(8).default(4),
 })
@@ -50,6 +50,16 @@ function records(source: string, truncated: boolean) {
 
 export function calculateCsv(id: string, request: z.infer<typeof csvCalculationRequest>, source: string, truncated: boolean): CsvCalculation {
   const [header, ...rows] = records(source, truncated)
+  return calculateRecords(id, request, header, rows, row => captureEvidenceQuote(request.path, source, row.line), !truncated && source.length <= 24_000)
+}
+
+export function calculateCsvWindow(id: string, request: z.infer<typeof csvCalculationRequest>, window: CsvWindow) {
+  return calculateRecords(id, request, window.header, window.rows,
+    row => window.rows.find(item => item.line === row.line)?.anchor, false)
+}
+
+function calculateRecords(id: string, request: z.infer<typeof csvCalculationRequest>, header: CsvWindow['header'] | undefined,
+  rows: readonly CsvWindow['header'][], anchorFor: (row: CsvWindow['header']) => CsvWindow['rows'][number]['anchor'], complete: boolean): CsvCalculation {
   if (!header || header.clipped) throw new Error('A complete CSV header is required.')
   const inputs = request.cells.map(cell => {
     const row = rows.find(row => row.row === cell.row)
@@ -58,9 +68,9 @@ export function calculateCsv(id: string, request: z.infer<typeof csvCalculationR
     const raw = row.cells[column]
     const value = numericCell(raw)
     const keyColumn = header.cells[0]
-    const key = !truncated && source.length <= 24_000 && keyColumn && keyColumn.length <= 240 && uniqueColumn(header.cells, keyColumn) === 0 && row.cells[0]
+    const key = complete && keyColumn && keyColumn.length <= 240 && uniqueColumn(header.cells, keyColumn) === 0 && row.cells[0]
       && rows.filter(item => item.cells[0] === row.cells[0]).length === 1 ? { column: keyColumn, value: row.cells[0] } : undefined
-    return { ...cell, line: row.line, raw, value, key, anchor: captureEvidenceQuote(request.path, source, row.line) }
+    return { ...cell, line: row.line, raw, value, key, anchor: anchorFor(row) }
   })
   return { id, path: request.path, operation: request.operation, decimals: request.decimals, inputs,
     result: calculate(request.operation, inputs.map(input => input.value), request.decimals) }
@@ -79,7 +89,8 @@ export function assessCsvCalculation(item: CsvCalculation, project: ProjectFileS
     const keyColumn = input.key ? uniqueColumn(header.cells, input.key.column) : -1
     const anchor = !input.key ? locateEvidence(project, { path: item.path, anchor: input.anchor }, moves, from) : undefined
     const matches = input.key && keyColumn >= 0 && source && source.length <= 24_000
-      ? rows.filter(row => row.cells[keyColumn] === input.key?.value) : rows.filter(row => row.line === anchor?.line)
+      ? rows.filter(row => row.cells[keyColumn] === input.key?.value)
+      : source && anchor ? readCsvRange(source, 1, 1, false, anchor.line).rows : []
     const row = matches.length === 1 && !matches[0].clipped ? matches[0] : undefined
     const value = column >= 0 ? row?.cells[column] : undefined
     return { value, location: value !== undefined && row ? { path, line: row.line } : undefined }

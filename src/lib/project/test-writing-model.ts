@@ -3,6 +3,7 @@ import { MockLanguageModelV4, simulateReadableStream } from 'ai/test'
 import { testEvidence, testMethodEdit, testMethodLine, testMethods, testResultEdit, testResultLine, testResults, testScenarios } from './test-paper'
 import type { ManuscriptContext } from './manuscript-task'
 import { writingExerciseClaim, writingExerciseCommand, writingExerciseData, writingExercisePrompt, writingExerciseSubmission } from './writing-sample'
+import type { SourceExcerpt } from './ai-source-ranges'
 
 type Stream = Awaited<ReturnType<MockLanguageModelV4['doStream']>>['stream']
 type Part = Stream extends ReadableStream<infer Chunk> ? Chunk : never
@@ -19,7 +20,7 @@ function finish(unified: 'tool-calls' | 'stop' | 'length'): Part {
 }
 
 export function testWritingModel(selected: string[], text: string, feedback?: 'passed' | 'failed', revision = false, canDraft = false,
-  manuscript?: ManuscriptContext, writingExample = false): LanguageModel {
+  manuscript?: ManuscriptContext, writingExample = false, excerpts: SourceExcerpt[] = []): LanguageModel {
   const scenario = text.trim().toLowerCase()
   const markdown = scenario === 'test: show markdown'
   const inlineEvidence = scenario === 'test: show inline evidence'
@@ -38,7 +39,7 @@ export function testWritingModel(selected: string[], text: string, feedback?: 'p
   const scopedRepair = manuscript?.mode === 'repair'
   const taskRepair = scenario.startsWith('repair the errors in the manuscript verification report')
   const broken = testResultEdit + ' \\undefinedFixtureCommand'
-  const suggested = scenario === testScenarios.pass.toLowerCase() || failed || interrupted
+  const suggested = scenario.startsWith(testScenarios.pass.toLowerCase()) || failed || interrupted
     || ((repair || taskRepair) && feedback === 'failed') || (access && canDraft) || batch
   let step = 0
   return new MockLanguageModelV4({
@@ -53,7 +54,7 @@ export function testWritingModel(selected: string[], text: string, feedback?: 'p
           toolCall('query_references', { query: 'oke2017', kind: 'bibliography' }), finish('tool-calls'),
         ] : [
           { type: 'text-start', id: 'inline' },
-          { type: 'text-delta', id: 'inline', delta: 'Methods citation: sections/methods.tex:3. Unread line: sections/methods.tex:999.\n\n| Results | Data | Literature |\n| --- | --- | --- |\n| **sections/results.tex:3** | `data/sessions.csv:2` | `oke2017` |\n\n```text\nsections/methods.tex:3\n```' },
+          { type: 'text-delta', id: 'inline', delta: 'Methods citation: sections/methods.tex:3: paired sessions. Unread line: sections/methods.tex:999.\n\n| Results | Data | Literature |\n| --- | --- | --- |\n| **sections/results.tex:3** | `data/sessions.csv:2` | `oke2017` |\n\n```text\nsections/methods.tex:3\n```' },
           { type: 'text-end', id: 'inline' }, finish('stop'),
         ]
         return { stream: simulateReadableStream({ chunks, chunkDelayInMs: 20 }) }
@@ -92,6 +93,10 @@ export function testWritingModel(selected: string[], text: string, feedback?: 'p
           path, before: 'Original test note.', after: 'Edited test note.',
         })) : []),
       ]).filter(edit => selected.includes(edit.path))
+      const readEdit = (edit: typeof edits[number]) => {
+        const excerpt = excerpts.find(excerpt => excerpt.path === edit.path && excerpt.source.includes(edit.before))
+        return toolCall('read_source', { path: edit.path, startLine: excerpt?.start ?? 1, lineCount: 4 })
+      }
       const requestedTool = revision ? ['read_archived_changes', {}] as const
         : exercise && manuscript?.mode === 'plan' ? ['plan_manuscript', { title: 'Practice manuscript recovery',
           files: [testMethods, testResults], decisions: ['Use the synthetic readings for the exercise.'], questions: [],
@@ -131,11 +136,11 @@ export function testWritingModel(selected: string[], text: string, feedback?: 'p
           toolCall('read_patch_verification', {}), finish('tool-calls'),
         ] : turn === 0 && plannedData ? [toolCall('read_manuscript_data', {}), finish('tool-calls')]
         : (turn === Number(plannedData) && batch) || (turn === 1 && scopedRepair) ? [
-          ...edits.map(edit => toolCall('read_source', { path: edit.path, startLine: 1, lineCount: 4 })), finish('tool-calls'),
+          ...edits.map(readEdit), finish('tool-calls'),
         ] : exercise && batch && turn === 2 ? [
           toolCall('calculate_csv', { path: writingExerciseData, operation: 'mean', decimals: 2,
             cells: [{ row: 2, column: 'temp_c' }, { row: 3, column: 'temp_c' }] }), finish('tool-calls'),
-        ] : turn === 0 ? [
+      ] : turn === 0 && excerpts.length && suggested ? [...edits.map(readEdit), finish('tool-calls')] : turn === 0 ? [
         toolCall('search_source', { query: testEvidence }),
         toolCall('read_source', { path: testMethods, startLine: 2, lineCount: 2 }),
         toolCall('read_source', { path: testResults, startLine: 2, lineCount: 4 }),

@@ -7,7 +7,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { aiReadExclusionsSchema, type AiContextReceipt } from '@/lib/project/ai-read-scope'
 
 const kinds = { saved: 'Saved source', draft: 'Local draft', csv: 'CSV source', csv_draft: 'CSV draft',
-  attachment: 'Attachment name and size', archive: 'Archived source excerpts' }
+  attachment: 'Attachment name and size', archive: 'Archived source excerpts', pdf_page: 'PDF page text', image: 'Image content' }
 
 export function AiContextDetails({ receipt, recipient, historyCount }: {
   receipt: AiContextReceipt; recipient?: string; historyCount?: number
@@ -20,8 +20,9 @@ export function AiContextDetails({ receipt, recipient, historyCount }: {
     <p>{historyCount !== undefined ? `${historyCount} earlier chat messages sent.`
       : receipt.restricted ? 'Earlier chat messages withheld.' : 'Up to 23 earlier messages may be included.'} {receipt.diagnostics ? 'Compiler diagnostics or logs included.' : 'No compiler diagnostics included.'}</p>
     {receipt.files.length > 0 && <ul aria-label="Model context files" className="max-h-52 space-y-1 overflow-auto">
-      {receipt.files.map(file => <li key={`${file.kind}:${file.path}`} className="break-all">
-        <span className="font-mono">{file.path}</span> · {kinds[file.kind]}{file.partial && ' · Excerpt'}
+      {receipt.files.map(file => <li key={`${file.kind}:${file.path}:${file.lines?.start ?? ''}`} className="break-all">
+        <span className="font-mono">{file.path}</span> · {kinds[file.kind]}{file.lines
+          ? ` · Lines ${file.lines.start}–${file.lines.end}` : file.partial && ' · Excerpt'}{file.page && ` · Page ${file.page}`}
       </li>)}
     </ul>}
   </div>

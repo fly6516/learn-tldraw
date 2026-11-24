@@ -1,6 +1,22 @@
 import { expect, test } from 'bun:test'
-import { assessClaim, collectWritingClaims } from './writing-claims'
+import { assessClaim, claimEvidenceFor, collectWritingClaims } from './writing-claims'
 import { captureEvidenceQuote } from './writing-ai-evidence'
+
+test('checks mirrored groups, units and causal wording against observed CSV columns', () => {
+  const ref = { path: 'data/sessions.csv', line: 2, text: '["1","28.1","30.7"]', kind: 'data',
+    csvHeader: ['session', 'shaded_c', 'exposed_c'] }
+  const choice = { path: ref.path, line: ref.line }
+  const check = (quote, column) => claimEvidenceFor(quote, [{ ...choice, column }], [ref]).needsConfirmation
+  expect(check('The shaded route measured 28.1 degrees Celsius.')).toBe(false)
+  expect(check('The shaded route measured 30.7 degrees Celsius.', 'exposed_c')).toBe(true)
+  expect(check('The shaded route measured 28.1 degrees Fahrenheit.', 'shaded_c')).toBe(true)
+  expect(check('遮阴道路实测 30.7 摄氏度。', 'exposed_c')).toBe(true)
+  expect(check('The shaded route measured 28.1\\,\\textdegree{}F.', 'shaded_c')).toBe(true)
+  expect(check('Shade caused the temperature to drop.')).toBe(true)
+  const claims = collectWritingClaims([{ path: 'main.tex', before: 'Shade was linked to cooler temperatures.',
+    after: 'Shade caused cooler temperatures.' }], [], [], [])
+  expect(claims[0]).toMatchObject({ needsConfirmation: true })
+})
 
 test('keeps claims next to exact replacement text and accepts only evidence actually read', () => {
   const path = 'sections/results.tex'
@@ -11,7 +27,7 @@ test('keeps claims next to exact replacement text and accepts only evidence actu
   const edits = [{ path, before: unrelated, after: [unrelated, supported, unresolved, unsupported].join('\n') }]
   const observed = [{ path: 'data/sessions.csv', line: 2, text: '["1","28.1"]', kind: 'data' }]
   const claims = collectWritingClaims(edits, [
-    { path, quote: supported, references: [{ path: 'data/sessions.csv', line: 2 }, { path: 'data/sessions.csv', line: 9 }] },
+    { path: 'data/sessions.csv', quote: supported, references: [{ path: 'data/sessions.csv', line: 2 }, { path: 'data/sessions.csv', line: 9 }] },
     { path, quote: unresolved, references: [{ path: 'data/sessions.csv', line: 2 }] },
     { path, quote: 'Not part of the edit.', references: [] },
   ], observed, [])

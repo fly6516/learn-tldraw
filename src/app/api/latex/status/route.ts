@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { aiProviderStatus, isLocalAiRequest } from '@/lib/project/ai-provider'
+import { checkModelConnection } from '@/lib/project/ai-connection'
 import { claimLocalCompiler, writeCompileSources } from '@/lib/project/local-compile'
 import { createTestPaper } from '@/lib/project/test-paper'
 import type { ResourcePreparation, WorkbenchStatus } from '@/lib/project/workbench-status'
@@ -70,6 +71,8 @@ async function checkCompiler(): Promise<WorkbenchStatus['compiler']> {
 export async function POST(request: Request) {
   if (!isLocalAiRequest(request)) return Response.json({ error: 'Setup checks are available from the local workbench only.' }, { status: 403 })
   const check = new URL(request.url).searchParams.get('check')
+  if (check === 'model-connection') return Response.json(await checkModelConnection(request.signal),
+    { headers: { 'Cache-Control': 'no-store' } })
   if (check === 'model') {
     const model = aiProviderStatus()
     const simulated = process.env.RESEARCH_TEST_MODE === '1'

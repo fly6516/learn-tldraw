@@ -285,7 +285,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
   const restoredCursor = useRef(false)
   const writeInProgress = useRef(false)
-  const pendingJump = useRef<{ path: string; range?: { start: IPosition; end: IPosition } } | null>(null)
+  const pendingJump = useRef<{ path: string; previousFocus: Element | null; range?: { start: IPosition; end: IPosition } } | null>(null)
   const isTex = /\.tex$/i.test(selected)
   const draftPaths = Object.keys(drafts)
   const revisionDraftPaths = useMemo(() => new Set(Object.keys(drafts)), [drafts])
@@ -442,7 +442,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       }
       const position = instance.getPosition()
       if (position) captureCursor(pending.path, position)
-      instance.focus()
+      if (document.activeElement === pending.previousFocus || document.activeElement === document.body) instance.focus()
     })
   }, [captureCursor, restoredView])
 
@@ -460,7 +460,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     const start = location ? sourcePosition(text, location.start) : line === undefined ? undefined : { lineNumber: line, column: 1 }
     const end = location ? sourcePosition(text, location.end)
       : start && (selectLine ? { ...start, column: Number.MAX_SAFE_INTEGER } : start)
-    pendingJump.current = { path, range: start && end ? { start, end } : undefined }
+    pendingJump.current = { path, previousFocus: document.activeElement, range: start && end ? { start, end } : undefined }
     applyPendingJump(editorRef.current)
   }
 

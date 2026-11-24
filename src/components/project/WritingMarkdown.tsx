@@ -32,7 +32,7 @@ function writingUrl(url: string) {
 function markEvidence(targets: ReadonlyMap<string, InlineEvidenceTarget>) {
   const labels = [...targets.keys()].sort((a, b) => b.length - a.length)
   const escaped = labels.map(label => label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
-  const mentions = new RegExp(`(?<![\\w./@-])(?:${escaped})(?![\\w/:-])`, 'g')
+  const mentions = new RegExp(`(?<![\\w./@-])(?:${escaped})(?![\\w/-]|:[\\w/:-])`, 'g')
   return () => (tree: Root) => {
     function visit<T extends RootContent>(children: T[], code = false): (T | Text | Element)[] {
       return children.flatMap<T | Text | Element>(child => {

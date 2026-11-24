@@ -108,6 +108,7 @@ export interface ProjectFileSystem {
     aiReadExclusions?: string[]
     mainFile?: string
     compileProfile?: CompileProfile
+    templateOrigin?: { id: string; version: string; sha256: string }
   }
 }
 

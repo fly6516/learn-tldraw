@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import { Settings2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
-import type { ResourcePreparation, StorageStatus, WorkbenchStatus } from '@/lib/project/workbench-status'
+import type { ModelConnection, ResourcePreparation, StorageStatus, WorkbenchStatus } from '@/lib/project/workbench-status'
 
 const compilerMessages: Record<WorkbenchStatus['compiler'], [string, string]> = {
   ready: ['Sample resources ready', 'Tectonic compiled a small built-in document using cached resources. Individual templates may need additional packages.'],
@@ -22,10 +22,25 @@ export function WorkbenchSetup({ storage }: { storage: StorageStatus }) {
   const [starting, setStarting] = useState(false)
   const [elapsed, setElapsed] = useState(0)
   const [error, setError] = useState('')
+  const [modelConnection, setModelConnection] = useState<ModelConnection>()
+  const [checkingModel, setCheckingModel] = useState(false)
+
+  async function checkModel() {
+    setCheckingModel(true)
+    setModelConnection(undefined)
+    try {
+      const response = await fetch('/api/latex/status?check=model-connection', { method: 'POST', signal: AbortSignal.timeout(30_000) })
+      if (!response.ok) throw new Error()
+      setModelConnection(await response.json())
+    } catch {
+      setModelConnection({ state: 'unavailable', message: 'Could not reach the local workbench for the model check.' })
+    } finally { setCheckingModel(false) }
+  }
 
   async function check() {
     setPending(true)
     setError('')
+    setModelConnection(undefined)
     try {
       const response = await fetch('/api/latex/status', { method: 'POST', signal: AbortSignal.timeout(25_000) })
       if (!response.ok) throw new Error('Open the local workbench on http://127.0.0.1 and retry the check.')
@@ -97,7 +112,12 @@ export function WorkbenchSetup({ storage }: { storage: StorageStatus }) {
             ? 'You can compile the sample now. Other templates may download additional packages.' : compilerMessages[result.compiler][1]}</p>
         </> : pending ? 'Checking the local compiler…' : 'Compiler status unavailable'}</dd></div>
         <div><dt className="font-medium">Writing AI</dt><dd>{result?.model
-          ? <>{result.model.provider} · {result.model.model} configured. The check does not contact the model.</>
+          ? <>{result.model.provider} · {result.model.model} configured.
+            <div className="mt-1"><Button size="sm" variant="outline" type="button" onClick={() => void checkModel()} disabled={checkingModel || pending}>
+              {checkingModel ? 'Testing model…' : 'Test model connection'}
+            </Button></div>
+            {modelConnection && <p role={modelConnection.state === 'ready' ? 'status' : 'alert'}>{modelConnection.message}</p>}
+          </>
           : result ? <>No model configured. Use example edits in the writing sample, or set DEEPSEEK_API_KEY in .env.local and restart to use DeepSeek.</>
             : pending ? 'Checking model configuration…' : 'Model status unavailable'}</dd></div>
       </dl>

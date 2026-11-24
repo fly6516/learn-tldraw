@@ -8,6 +8,8 @@ import { manuscriptContextSchema, type ManuscriptTask } from './manuscript-task'
 import { attachmentContextSchema } from './ai-attachments'
 import { writingClaimsSchema } from './writing-claims'
 import type { AiContextReceipt } from './ai-read-scope'
+import { maxSourceRanges, sourceRangeSchema } from './ai-source-ranges'
+import { aiMediaSchema } from './ai-media'
 
 export const writingWorkflows = {
   auto: { name: 'Auto', instruction: 'Infer whether to review, compare, edit, compile, prepare a submission, start a revision round, record a reviewer comment, or draft a reply. Search for relevant files when the file is unclear or the request spans files.' },
@@ -59,6 +61,8 @@ export const reviewerCommentRequestSchema = revisionSetupSchema.options[1].pick(
 
 export const chatRequestSchema = z.object({
   run: z.uuid(), workflow: chatWorkflowSchema, source: editRequestSchema.optional(),
+  excerpts: z.array(sourceRangeSchema).max(maxSourceRanges).optional(),
+  media: aiMediaSchema.optional(),
   scope: z.array(z.string().max(500)).max(49),
   revision: revisionDraftRequestSchema.optional(),
   feedback: compileFeedbackSchema.optional(),

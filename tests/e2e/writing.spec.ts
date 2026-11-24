@@ -334,10 +334,19 @@ test('evidence follows renames and line shifts but refuses duplicate matching co
   await page.getByRole('button', { name: 'Apply file changes' }).click()
   await task.getByRole('button', { name: /^sections\/findings\.tex:4 ·/ }).first().click()
   const monaco = page.getByRole('textbox', { name: 'Project source editor' })
-  await monaco.press('Control+Home')
+  const navigation = page.getByRole('complementary', { name: 'Project navigation' })
+  const findInSource = async (text: string) => {
+    await navigation.getByRole('button', { name: 'Search', exact: true }).click()
+    await navigation.getByRole('searchbox', { name: 'Search project source' }).fill(text)
+    await navigation.getByRole('button', { name: /^findings\.tex:/ }).click()
+    await expect(monaco).toBeFocused()
+  }
+  await findInSource('\\section{Results}')
+  await monaco.press('ArrowLeft')
   await monaco.press('Enter')
   await expect(task.getByRole('button', { name: /^sections\/findings\.tex:5 ·/ }).first()).toBeVisible()
-  await monaco.press('Control+End')
+  await findInSource('The same reporting unit was used for all entries in the sample.')
+  await monaco.press('ArrowRight')
   await page.keyboard.insertText('\n\\section{Results}\n' + testResultLine
     + '\nThe readings are illustrative and are kept separate from any actual measurements.\n'
     + testEvidence + '\nThe same reporting unit was used for all entries in the sample.\n')

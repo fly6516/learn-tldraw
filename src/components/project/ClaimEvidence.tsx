@@ -43,6 +43,9 @@ export function ClaimEvidence({ claims, project, moves, onLocate, disabled, onDe
                 onClick={() => onLocate(match.path, match.line, id)}>{label} · {match.path}:{match.line}</button>
                 : <span className="text-amber-800">{label} · {reference.path}:{reference.line} needs fresh evidence</span>}
               {match && reference.text && <p className="font-mono text-slate-600">{reference.text}</p>}
+              {match && reference.csvHeader && <p className="break-words text-slate-600">
+                {reference.column ? 'Referenced column: ' + reference.column : 'CSV columns: ' + reference.csvHeader.join(', ')}
+              </p>}
             </div>
           })}
           {claim.calculations?.map(calculation => <CalculationEvidence key={calculation.id} calculation={calculation}

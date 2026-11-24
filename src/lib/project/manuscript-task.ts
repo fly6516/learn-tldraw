@@ -6,7 +6,7 @@ import { aiReadExclusionsSchema } from './ai-read-scope'
 const path = z.string().max(500).refine(isProjectPath)
 const notes = z.array(z.string().trim().min(1).max(450)).max(12)
 export const manuscriptDataSchema = z.array(z.object({
-  path: path.refine(value => /\.csv$/i.test(value)), startRow: z.number().int().min(1).max(24000),
+  path: path.refine(value => /\.csv$/i.test(value)), startRow: z.number().int().min(1).max(999_999),
   rowCount: z.number().int().min(1).max(12),
 })).max(4)
 const delivery = z.object({

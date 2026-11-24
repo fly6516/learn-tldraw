@@ -1,4 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
+import { readFile } from 'node:fs/promises'
+import JSZip from 'jszip'
 import { testResultLine, testScenarios } from '../../src/lib/project/test-paper'
 
 const writing = '/research-test?view=write'
@@ -21,6 +23,110 @@ async function backToProjects(page: Page) {
   await page.getByRole('link', { name: 'Back to projects' }).click()
   await expect(page.getByRole('heading', { name: 'Research projects', exact: true })).toBeVisible()
 }
+
+test('creates, compiles, reopens, and restores an English article from the project homepage', async ({ page }, info) => {
+  await page.goto('/research')
+  await page.getByRole('button', { name: 'New project', exact: true }).click()
+  const newProject = page.getByRole('dialog', { name: 'New project' })
+  await newProject.getByRole('textbox', { name: 'Project name' }).fill('Coastal measurements')
+  await newProject.getByRole('radio', { name: 'English article', exact: true }).check()
+  await expect(newProject.getByLabel('English article contents')).toContainText('Introduction · Methods · Results')
+  await newProject.getByRole('button', { name: 'Create project', exact: true }).click()
+  await expect(page).toHaveURL(/\/research\?project=[a-f0-9-]+&view=write$/)
+  const original = page.url()
+  await expect(source(page).locator('.view-lines')).toContainText('Your paper title')
+  await page.getByRole('button', { name: 'Compile PDF', exact: true }).click()
+  await expect(page.getByText(/Last successful compile.*Up to date/)).toBeVisible({ timeout: 30_000 })
+  await backToProjects(page)
+  await page.getByRole('link', { name: 'Continue writing', exact: true }).click()
+  await expect(page).toHaveURL(original)
+
+  async function exportBackup(path: string) {
+    await page.getByRole('button', { name: 'Project menu' }).click()
+    await page.getByRole('menuitem', { name: 'Project Backup', exact: true }).click()
+    const download = page.waitForEvent('download')
+    await page.getByRole('button', { name: 'Download Backup', exact: true }).click()
+    await (await download).saveAs(path)
+    await page.getByRole('dialog', { name: 'Project Backup' }).getByRole('button', { name: 'Close', exact: true }).click()
+    const zip = await JSZip.loadAsync(await readFile(path))
+    return JSON.parse(await zip.file('project.json')!.async('text')).project
+  }
+  const path = info.outputPath('article.research-canvas')
+  const saved = await exportBackup(path)
+  expect(saved.metadata.templateOrigin).toMatchObject({ id: 'english-article', version: '1.0.0', sha256: expect.stringMatching(/^[0-9a-f]{64}$/) })
+  expect(saved.files.map((file: { path: string }) => file.path)).toEqual(expect.arrayContaining(['main.tex', 'sections/methods.tex', 'references.bib']))
+  await backToProjects(page)
+  await page.getByLabel('Choose project ZIP or backup').setInputFiles(path)
+  await page.getByRole('button', { name: 'Import as new project', exact: true }).click()
+  await expect(page).toHaveURL(/\/research\?project=[a-f0-9-]+/)
+  await expect(page).not.toHaveURL(original)
+  await expect(page.getByRole('heading', { name: 'Coastal measurements', exact: true, level: 1 })).toBeVisible()
+  await page.getByRole('button', { name: 'Writing', exact: true }).click()
+  await expect(source(page).locator('.view-lines')).toContainText('Your paper title')
+  const restored = await exportBackup(info.outputPath('restored.research-canvas'))
+  expect(restored.metadata.templateOrigin).toEqual(saved.metadata.templateOrigin)
+})
+
+test('creates independent Chinese manuscripts and compiles the edited one with local TeX when enabled', async ({ page }) => {
+  await page.goto('/research')
+  const newProject = page.getByRole('dialog', { name: 'New project' })
+  async function create(name: string) {
+    await page.getByRole('button', { name: 'New project', exact: true }).click()
+    await newProject.getByRole('textbox', { name: 'Project name' }).fill(name)
+    await newProject.getByRole('radio', { name: 'Chinese research article' }).check()
+    await expect(newProject.getByLabel('Chinese research article contents')).toContainText('摘要 · 引言 · 研究方法')
+    await expect(newProject.getByLabel('Chinese research article contents')).toContainText('Fandol fonts')
+    await newProject.getByRole('button', { name: 'Create project', exact: true }).click()
+    await expect(page.getByRole('heading', { name, exact: true })).toBeVisible()
+    await expect(source(page).locator('.view-lines')).toContainText('论文标题')
+  }
+  await create('中文研究一')
+  const first = page.url()
+  const marker = '这是第一份稿件。'
+  const methods = page.getByRole('button', { name: /^methods\.tex\b/ })
+  await methods.click()
+  await expect(source(page).locator('.view-lines')).toContainText('说明研究设计')
+  await appendDraft(page, marker)
+  await expect(source(page).locator('.view-lines')).toContainText(marker)
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(page.getByText('All changes saved to project')).toBeVisible()
+
+  if (process.env.LATEX_SYSTEM_TEX_ENABLED === '1') {
+    await page.getByRole('button', { name: 'Compile PDF', exact: true }).click()
+    await expect(page.getByText(/Last successful compile.*Up to date/)).toBeVisible({ timeout: 45_000 })
+    const pdf = page.getByRole('region', { name: 'Compiled PDF, page 1' })
+    await expect(pdf).toContainText('论文标题')
+    await expect(pdf).toContainText('研究方法')
+    await expect(pdf).toContainText(marker)
+    await expect(pdf).toContainText('参考文献')
+    await expect(pdf).toContainText('Replace this sample bibliography entry')
+  }
+
+  await backToProjects(page)
+  await create('中文研究二')
+  await expect(page).not.toHaveURL(first)
+  await methods.click()
+  await expect(source(page).locator('.view-lines')).toContainText('说明研究设计')
+  await expect(source(page).locator('.view-lines')).not.toContainText(marker)
+  await page.goto(first)
+  await methods.click()
+  await expect(source(page).locator('.view-lines')).toContainText(marker)
+})
+
+test('keeps an unrecognized ZIP out of the publisher template flow', async ({ page }) => {
+  await page.goto('/research')
+  await page.getByRole('button', { name: 'New project', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'New project' })
+  await dialog.getByRole('radio', { name: 'Springer Nature journal article' }).check()
+  await expect(dialog.getByRole('link', { name: /Download the December 2024 ZIP/ }))
+    .toHaveAttribute('href', /springernature\.com\/.*latex-author-support$/)
+  await dialog.getByRole('textbox', { name: 'Project name' }).fill('Publisher manuscript')
+  await dialog.getByLabel('Choose Springer Nature ZIP').setInputFiles({
+    name: 'wrong.zip', mimeType: 'application/zip', buffer: Buffer.from('wrong archive'),
+  })
+  await expect(dialog.getByRole('alert')).toContainText('Choose the December 2024 ZIP')
+  await expect(page).toHaveURL(/\/research$/)
+})
 
 test('leaving a project revokes a pending AI save while keeping the proposal for review', async ({ page }) => {
   await page.goto('/research')
@@ -155,6 +261,58 @@ test('migrates the existing project and keeps imported copies, drafts and histor
   await page.goto('/research?project=legacy&view=write')
   await expect(source(page).locator('.view-lines')).toContainText('Existing study draft.')
   await expect(source(page).locator('.view-lines')).not.toContainText('Only the first copy')
+})
+
+test('filters and sorts projects within their current section on a small screen', async ({ page }) => {
+  await page.goto('/research')
+  await expect(page.getByText('Create a project or import a LaTeX ZIP or Research Canvas backup.')).toBeVisible()
+  for (const name of ['Alpha review', 'Zebra study']) {
+    await page.getByRole('button', { name: 'New project' }).click()
+    await page.getByRole('textbox', { name: 'Project name' }).fill(name)
+    await page.getByRole('button', { name: 'Create project' }).click()
+    await expect(page.getByRole('heading', { name, exact: true })).toBeVisible()
+    await backToProjects(page)
+  }
+  await page.setViewportSize({ width: 390, height: 844 })
+  const list = page.getByRole('list', { name: 'Project list' })
+  const headings = list.getByRole('heading')
+  const search = page.getByRole('searchbox', { name: 'Search projects' })
+  const sort = page.getByRole('combobox', { name: 'Sort by' })
+  await expect(headings).toHaveText(['Zebra study', 'Alpha review'])
+  await search.focus()
+  await page.keyboard.press('Tab')
+  await expect(sort).toBeFocused()
+  await sort.selectOption('name')
+  await expect(headings).toHaveText(['Alpha review', 'Zebra study'])
+  await search.fill('  ALPHA  ')
+  await expect(headings).toHaveText(['Alpha review'])
+  await list.getByRole('button', { name: 'Archive', exact: true }).click()
+  await expect(page.getByText('No matching projects.')).toBeVisible()
+  await page.getByRole('button', { name: 'Archived', exact: true }).click()
+  await expect(headings).toHaveText(['Alpha review'])
+  await expect(page.getByRole('button', { name: 'Clear search' })).toHaveCount(0)
+  await list.getByRole('button', { name: 'Restore' }).click()
+  await expect(page.getByText('No archived projects.')).toBeVisible()
+  await page.getByRole('button', { name: 'Projects', exact: true }).click()
+  await search.fill('absent')
+  await page.getByRole('button', { name: 'Clear search' }).click()
+  await expect(search).toHaveValue('')
+  const alpha = list.getByRole('link', { name: 'Open Alpha review' })
+  const address = await alpha.getAttribute('href')
+  await page.reload()
+  await expect(alpha).toHaveAttribute('href', address!)
+  await alpha.click()
+  await expect(page.getByRole('heading', { name: 'Alpha review', exact: true })).toBeVisible()
+})
+
+test('reports unavailable storage without showing an empty project list', async ({ page }) => {
+  await page.addInitScript(() => {
+    indexedDB.open = () => { throw new DOMException('Storage disabled', 'SecurityError') }
+  })
+  await page.goto('/research')
+  await expect(page.getByRole('alert').filter({ hasText: 'Local project storage could not be opened.' })).toBeVisible()
+  await expect(page.getByRole('searchbox', { name: 'Search projects' })).toBeDisabled()
+  await expect(page.getByText('Create a project or import a LaTeX ZIP or Research Canvas backup.')).toHaveCount(0)
 })
 
 test('creates, renames, archives, trashes and restores a project while preserving its address', async ({ page }) => {

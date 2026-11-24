@@ -88,7 +88,7 @@ export function ChapterAiPanel({ project, path, main, source, draft, compiler, b
         Editing instruction (optional)
         <Textarea value={instruction} onChange={event => setInstruction(event.target.value)} maxLength={1000} disabled={busy} />
       </label>
-      {draft.length > maxChapterLength && <p className="text-sm">Chapter AI supports up to {maxChapterLength.toLocaleString()} characters per file.</p>}
+      {draft.length > maxChapterLength && <p className="text-sm">For files over {maxChapterLength.toLocaleString()} characters, use Writing AI and select a passage or name a section.</p>}
       <div className="flex flex-wrap gap-2">
         <Button variant="outline" onClick={() => requestSuggestion('review')} disabled={busy || disabled || !draft.trim() || draft.length > maxChapterLength}>Review Chapter</Button>
         <Button variant="outline" onClick={() => requestSuggestion('rewrite')} disabled={busy || disabled || !draft.trim() || draft.length > maxChapterLength}>Rewrite Chapter</Button>

@@ -9,11 +9,12 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { Textarea } from '@/components/ui/textarea'
 import { applyProjectEdits, buildChapterContext, maxChapterLength, type ChapterEditRequest } from '@/lib/project/ai-edit'
+import { excerptEnd, locateExactReplacement, locateSourceRanges, maxSourceRanges, mergeSourceRanges, namedSourcePaths, sourceExcerpt, type SourceRange } from '@/lib/project/ai-source-ranges'
 import { confirmChatReply, listRevisionRounds, readChatCheckpoints, readChatHistory, readChatTaskSteps, readChatVerifications, recordChatTaskStep, writeChatHistory, writeChatVerification } from '@/lib/project/storage'
 import { chatEditSchema, editPermissionRequestSchema, replyChatSchema, revisionRoundRequestSchema, reviewerCommentRequestSchema, submissionChatSchema, writingWorkflows, type ChatCheckpoint, type ChatCompileFeedback, type ChatConversation, type ChatHistory, type ChatRevisionSetup, type ChatRun, type ChatTaskStep, type ChatWorkflow, type ReplyChatRequest, type SubmissionChatRequest, type WritingChatMessage } from '@/lib/project/writing-chat'
 import type { ChatAction } from '@/lib/project/writing-chat-actions'
 import { validateChatProposal, verificationBaseline, type ChatVerification, type ManuscriptBuild } from '@/lib/project/writing-chat-validation'
-import { editableSource, type WritingDrafts, type WritingKey } from '@/lib/project/writing-drafts'
+import { editableSource, sameDraft, type WritingDrafts, type WritingKey } from '@/lib/project/writing-drafts'
 import type { ProjectFileSystem } from '@/lib/project/types'
 import { inlineEvidenceTargets, locateEvidence, type SourceMove } from '@/lib/project/writing-ai-evidence'
 import { collectBibliography, findNewUnknownCitations, indexCanvasReferences } from '@/lib/project/references'
@@ -36,11 +37,23 @@ import { aiReadScope, restrictAiProject, type AiContextReceipt } from '@/lib/pro
 import { AiContextDetails, AiContextPreview, AiReadExclusionsDialog } from './AiContextDisclosure'
 import { aiContextApprovalKey } from '@/lib/project/ai-context-approval'
 import { useAiContextApproval } from './useAiContextApproval'
+import { modelFailureMessages } from '@/lib/project/workbench-status'
+import type { AiMedia } from '@/lib/project/ai-media'
 
 const Diff = dynamic(() => import('./MonacoSourceEditor').then(module => module.WritingDraftComparison), { ssr: false })
 type DraftAccess = 'all' | string[]
 type DraftGrant = { id: string; access: DraftAccess; controller: AbortController }
 type SourceWorkflow = Exclude<ChatWorkflow, 'revision'>
+type RepairRequest = { id: string; report: ChatVerification; proposal?: NonNullable<ReturnType<typeof editProposal>>;
+  reverify?: boolean; manuscriptTask?: boolean }
+type SourceTaskMode = 'plan' | 'batch' | 'evidence'
+type PreparedMedia = { blob: Blob; media: AiMedia }
+type SourceRequestPosition = { selection: SourceRange | null; ranges?: SourceRange[]; workflow?: SourceWorkflow; primary?: string; media?: PreparedMedia }
+type RetryStep = { id: string; valid: () => boolean } & (
+  { kind: 'source'; text: string; repair?: RepairRequest; paths: string[]; mode?: SourceTaskMode;
+    evidence?: ReviewedClaim; example: boolean; position: SourceRequestPosition }
+  | { kind: 'revision'; text: string; request: ReplyChatRequest; target: NonNullable<ChatRun['reply']> }
+)
 type Checkpoints = Record<string, ChatCheckpoint['state']>
 type WorkbenchProps = {
   storage: IDBDatabase; projectKey: WritingKey; project: ProjectFileSystem; working: ProjectFileSystem; saved: ProjectFileSystem
@@ -260,7 +273,6 @@ function Conversation(props: WorkbenchProps & {
   const [error, setError] = useState('')
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [mutating, setMutating] = useState(false)
-  const [stopped, setStopped] = useState(false)
   const [exclusionsOpen, setExclusionsOpen] = useState(false)
   const contextApproval = useAiContextApproval(props.active, setError)
   const [manuscript, setManuscript] = useState(props.conversation.manuscript)
@@ -274,14 +286,36 @@ function Conversation(props: WorkbenchProps & {
   const [undoBatches, setUndoBatches] = useState<string[]>()
   const [undoError, setUndoError] = useState('')
   const [repairBuild, setRepairBuild] = useState(false)
+  const [failedRun, setFailedRun] = useState<string>()
+  const retryStep = useRef<RetryStep>(null)
+  const [attachmentPath, setAttachmentPath] = useState('')
+  const [attachmentPage, setAttachmentPage] = useState('1')
+  const [preparedMedia, setPreparedMedia] = useState<PreparedMedia>()
+  const [preparingMedia, setPreparingMedia] = useState(false)
+  const [rangeChoices, setRangeChoices] = useState<{ choices: { range: SourceRange; title: string }[]; choose: (range: SourceRange) => void }>()
   const localOperation = useRef<AbortController>(null)
   const replyInProgress = useRef(false)
   const [letters, setLetters] = useState<Record<string, Awaited<ReturnType<typeof prepareChatLetter>>>>({})
   const readScope = useMemo(() => aiReadScope(props.project.metadata.aiReadExclusions ?? [], props.sourceMoves),
     [props.project.metadata.aiReadExclusions, props.sourceMoves])
   const shareable = useMemo(() => restrictAiProject(props.working, readScope), [props.working, readScope])
-  const files = [...shareable.files.keys()].filter(path => /\.tex$/i.test(path)
-    && (editableSource(props.working, path)?.length ?? Infinity) <= maxChapterLength)
+  const mediaFiles = [...shareable.files.values()].flatMap(file => 'blob' in file && file.blob && /\.(pdf|png|jpe?g)$/i.test(file.path)
+    ? [{ path: file.path, blob: file.blob }] : [])
+  const fileToPrepare = mediaFiles.find(file => file.path === attachmentPath)
+  async function prepareMedia() {
+    if (!fileToPrepare || preparingMedia) return
+    setError('')
+    setPreparedMedia(undefined)
+    setPreparingMedia(true)
+    try {
+      const { readAiMedia } = await import('./readAiMedia')
+      const media = await readAiMedia(fileToPrepare.path, fileToPrepare.blob, Number(attachmentPage))
+      setPreparedMedia({ blob: fileToPrepare.blob, media })
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The attachment could not be prepared.')
+    } finally { setPreparingMedia(false) }
+  }
+  const files = [...shareable.files.keys()].filter(path => /\.tex$/i.test(path) && Boolean(editableSource(shareable, path)?.trim()))
   const targets = (scope ?? (Array.isArray(permission) ? permission : [props.selected])).filter(path => files.includes(path))
   const grant = useRef<DraftGrant>(null)
   const [wasActive, setWasActive] = useState(props.active)
@@ -289,7 +323,8 @@ function Conversation(props: WorkbenchProps & {
     setWasActive(props.active)
     if (!props.active) { setPermission(undefined); setConsent(undefined); setRunningManuscript(false) }
   }
-  const pending = useRef<{ id: string; grant?: string; manuscriptId?: string; claimId?: string; example?: boolean; readRules?: string[] } | null>(null)
+  const pending = useRef<{ id: string; grant?: string; manuscriptId?: string; claimId?: string; example?: boolean;
+    readRules?: string[]; expects?: 'plan' | 'repair' } | null>(null)
   const [runSnapshots, setRunSnapshots] = useState(props.conversation.runs)
   const runs = useRef(props.conversation.runs)
   const latest = useRef(props)
@@ -301,13 +336,19 @@ function Conversation(props: WorkbenchProps & {
   const { messages, sendMessage, setMessages, status, stop, clearError, error: streamError } = useChat({
     id: props.conversation.id, transport: chatTransport, messages: props.conversation.messages,
     experimental_throttle: 50,
+    onError: () => {
+      pending.current = null
+      setRunningManuscript(false)
+      setFailedRun(retryStep.current?.id)
+    },
     onFinish: ({ message, messages, isAbort, isDisconnect, isError }) => {
-      if (isAbort || isDisconnect || isError) {
+      if (isAbort || isDisconnect || isError || !message.metadata?.complete) {
         const interrupted = { ...message, metadata: message.metadata && { ...message.metadata, complete: false } }
         setMessages(messages.map(item => item.id === message.id ? interrupted : item))
         latest.current.onPersist(messages.map(item => item.id === message.id ? interrupted : item), runs.current)
         pending.current = null
         setRunningManuscript(false)
+        setFailedRun(retryStep.current?.id)
         return
       }
       if (revisionSetupRequest(message)) void resolveRevisionSetup(message)
@@ -318,7 +359,15 @@ function Conversation(props: WorkbenchProps & {
       const run = runId ? runs.current[runId] : undefined
       const plan = toolResult(message, 'tool-plan_manuscript', manuscriptPlanSchema)
       const original = messages.find(item => item.role === 'user' && item.metadata?.run === runId)
-      if (plan && original && !manuscriptRef.current && latest.current.active) {
+      if (task?.id === runId && task?.expects === 'plan' && !plan) {
+        setError('The model did not return a usable manuscript plan.')
+        setFailedRun(runId)
+      }
+      if (task?.id === runId && task?.expects === 'repair' && !proposal) {
+        setError('The model did not return a usable repair.')
+        setFailedRun(runId)
+      }
+      if (plan && original && task?.id === runId && !manuscriptRef.current && latest.current.active) {
         updateManuscript({ ...plan, id: crypto.randomUUID(), goal: chatText(original).slice(0, 12000), batches: [],
           example: task?.example, readRules: task?.readRules })
       }
@@ -329,7 +378,10 @@ function Conversation(props: WorkbenchProps & {
           updateManuscript({ ...projectTask, claimReviews: { ...projectTask.claimReviews,
             [task.claimId]: { decision: 'requested', evidence, revision: run.pathRevision ?? 0 } } })
           openReview()
-        } else setError('No fresh evidence was linked. The claim still needs review.')
+        } else {
+          setError('No fresh evidence was linked. The claim still needs review.')
+          setFailedRun(runId)
+        }
       }
       if (runId && projectTask && run?.manuscriptId === projectTask.id && task?.id === runId && !task.claimId) {
         if (proposal && projectTask.batches.length < 120) {
@@ -341,6 +393,7 @@ function Conversation(props: WorkbenchProps & {
           setRunningManuscript(false)
           if (!toolResult(message, 'tool-request_edit_permission', editPermissionRequestSchema)) {
             setError('The task paused because this batch did not return an edit proposal.')
+            setFailedRun(runId)
           }
         }
       }
@@ -453,6 +506,7 @@ function Conversation(props: WorkbenchProps & {
       grant.current?.controller.abort()
       grant.current = null
       pending.current = null
+      retryStep.current = null
       localOperation.current?.abort()
     }
   }, [props.active])
@@ -508,7 +562,7 @@ function Conversation(props: WorkbenchProps & {
     return id
   }
 
-  async function startReply(request: ReplyChatRequest, text: string) {
+  async function startReply(request: ReplyChatRequest, text: string, expected?: NonNullable<ChatRun['reply']>) {
     if (streaming || props.disabled || !props.active || replyInProgress.current || contextApproval.pending()) return
     if (readScope.restricted && !props.sourceMoves) {
       setError('The source move history is unavailable. Reopen the project before sharing archived excerpts.')
@@ -523,6 +577,10 @@ function Conversation(props: WorkbenchProps & {
     try {
       const { reply, revision } = await prepareChatReply(props.storage, props.projectKey, request, readScope.denies)
       if (controller.signal.aborted) return
+      if (expected && (expected.round !== reply.round || expected.comment !== reply.comment
+        || expected.commentText !== reply.commentText || expected.originalId !== reply.originalId || expected.revisedId !== reply.revisedId)) {
+        throw new Error('The reviewer comment or archive changed. Reopen the original reply action.')
+      }
       const id = crypto.randomUUID()
       const receipt: AiContextReceipt = {
         files: revision.changes.map(change => ({ path: change.path, kind: 'archive', partial: true })),
@@ -533,11 +591,12 @@ function Conversation(props: WorkbenchProps & {
       contextApproval.start({ receipt, purpose, fingerprint: aiContextApprovalKey(receipt, purpose, null, revision),
         valid: () => latest.current.active && !latest.current.disabled && exclusions === latest.current.project.metadata.aiReadExclusions,
         send: (expectedRecipient, confirmation) => {
+          retryStep.current = { kind: 'revision', id, request, text, target: reply, valid: () => latest.current.active }
+          setFailedRun(undefined)
           runs.current = { ...runs.current, [id]: { sources: {}, reply, context: { ...receipt, confirmation } } }
           setRunSnapshots(runs.current)
           pending.current = null
           clearError()
-          setStopped(false)
           setPrompt('')
           atBottom.current = true
           void sendMessage({ text, metadata: { run: id } }, {
@@ -655,12 +714,13 @@ function Conversation(props: WorkbenchProps & {
       ? { ...item, metadata: { ...item.metadata, ...metadata } } : item))
   }
 
-  function submit(value: string, repair?: { id: string; report: ChatVerification; proposal?: NonNullable<ReturnType<typeof editProposal>>;
-    reverify?: boolean; manuscriptTask?: boolean },
-    approvedScope?: string[], taskMode?: 'plan' | 'batch' | 'evidence', evidence?: ReviewedClaim, example = false, preview = false) {
+  function submit(value: string, repair?: RepairRequest,
+    approvedScope?: string[], taskMode?: SourceTaskMode, evidence?: ReviewedClaim, example = false, preview = false,
+    position?: SourceRequestPosition) {
     const text = value.trim()
-    if (!text || streaming || props.disabled || mutating || !props.active || contextApproval.pending()) return false
+    if (!text || streaming || props.disabled || mutating || preparingMedia || !props.active || contextApproval.pending()) return false
     setError('')
+    setRangeChoices(undefined)
     atBottom.current = true
     const command = /^\/([a-z]+)(?:\s+([\s\S]*))?$/i.exec(text)
     const layout = /^(?:把\s*AI\s*面板切到|AI\s*面板切到)\s*(同层|浮层|上层)[。！]?$/i.exec(text)
@@ -700,42 +760,111 @@ function Conversation(props: WorkbenchProps & {
       setError('This claim belongs to a file excluded from AI reading.')
       return false
     }
-    const current = shareable.files.get(props.selected)
+    const access = grant.current?.access
+    const attachment = taskMode || repair ? undefined : position ? position.media : preparedMedia
+    const media = attachment?.media
+    if (attachment && !mediaFiles.some(file => file.path === attachment.media.path && file.blob === attachment.blob)) {
+      setError('The attachment changed or was excluded. Remove it or prepare it again.')
+      return false
+    }
+    const requested = approvedScope ?? scope ?? (taskMode !== 'plan' && Array.isArray(access) ? access : undefined)
+    if (approvedScope?.some(path => !files.includes(path))) {
+      setError('A requested file is excluded from AI reading or is no longer editable.')
+      return false
+    }
+    const turnWorkflow = position?.workflow ?? (taskMode || repair?.reverify || repair?.manuscriptTask ? 'auto' : workflow)
+    const cursor = position ? position.selection ?? undefined : repair || taskMode === 'evidence' ? undefined : props.selection()
+    const longPaths = (evidence ? [evidence.claim.path] : requested ?? files)
+      .filter(path => (editableSource(shareable, path)?.length ?? 0) > maxChapterLength)
+    const selection = cursor && !readScope.denies(cursor.path) && (!requested || requested.includes(cursor.path))
+      && (!taskMode || longPaths.includes(cursor.path)) ? cursor : undefined
+    const locatorRequest = taskMode === 'batch' ? existing?.goal ?? text : text
+    const namedPaths = namedSourcePaths(requested ?? files, locatorRequest)
+    const locatePaths = namedPaths.length ? longPaths.filter(path => namedPaths.includes(path)) : longPaths
+    const selectedLong = selection && longPaths.includes(selection.path)
+    const diagnosticRanges = repair?.report.diagnostics.flatMap(issue => {
+      if (issue.severity !== 'error' || !longPaths.includes(issue.path)) return []
+      const line = issue.sourceLine ?? issue.line
+      const length = editableSource(shareable, issue.path)?.split(/\r\n|\r|\n/).length ?? 0
+      return line > 0 && line <= length ? [{ path: issue.path, start: Math.max(1, line - 5), end: Math.min(length, line + 8) }] : []
+    }) ?? []
+    for (const edit of repair?.proposal?.edits ?? []) {
+      if (!longPaths.includes(edit.path)) continue
+      const content = editableSource(shareable, edit.path)
+      const range = content && locateExactReplacement(content, edit.path, edit.before)
+      if (range) diagnosticRanges.push(range)
+    }
+    const located = !position?.ranges && !selectedLong && !diagnosticRanges.length && locatePaths.length
+      ? locateSourceRanges(shareable, locatePaths, locatorRequest, props.selected) : undefined
+    if (located?.ambiguous.length) {
+      if (located.ambiguousClues > 1) {
+        setError('Several targets have more than one match. Specify the file and an exact heading or label for each passage.')
+        return false
+      }
+      setRangeChoices({ choices: located.ambiguous.slice(0, 12), choose: range => {
+        const ambiguous = new Set(located.ambiguous.map(item => JSON.stringify(item.range)))
+        submit(text, repair, approvedScope, taskMode, evidence, example, preview, {
+          selection: selection ?? null, workflow: turnWorkflow,
+          media: attachment,
+          ranges: [range, ...located.matches.filter(item => !ambiguous.has(JSON.stringify(item.range))).map(item => item.range)],
+        })
+      } })
+      setError('Several source ranges match. Choose the passage to share.')
+      return false
+    }
+    const ranges = mergeSourceRanges(position?.ranges ?? (selectedLong ? [selection] : diagnosticRanges.length
+      ? diagnosticRanges : located?.matches.map(item => item.range) ?? []))
+    const excerpts = ranges.flatMap(range => {
+      const content = editableSource(shareable, range.path)
+      const excerpt = content && sourceExcerpt(content, range)
+      return excerpt ? [excerpt] : []
+    })
+    if (excerpts.length !== ranges.length || excerpts.length > maxSourceRanges) {
+      setError('The selected passages exceed the limit or are no longer available. Select fewer lines or handle one section at a time.')
+      return false
+    }
+    const rangedPaths = new Set(excerpts.map(excerpt => excerpt.path))
+    const requiredLong = longPaths.filter(path => requested?.includes(path) || path === evidence?.claim.path
+      || (!position?.ranges && (namedPaths.includes(path) || (!namedPaths.length && path === props.selected))))
+    if (requiredLong.some(path => !rangedPaths.has(path))) {
+      setError('Select lines in the long LaTeX file or name an exact heading, label, or quoted passage to locate it.')
+      return false
+    }
+    const current = shareable.files.get(position?.primary ?? position?.selection?.path ?? props.selected)
     const currentSource = current && 'content' in current && /\.tex$/i.test(current.path) && current.content
       && current.content.length <= maxChapterLength ? current : undefined
     const main = props.main && !readScope.denies(props.main) ? props.main : undefined
-    const primary = currentSource?.path ?? targets[0] ?? main ?? files[0]
+    const primary = excerpts[0]?.path ?? currentSource?.path ?? evidence?.claim.path ?? requested?.[0] ?? targets[0] ?? main ?? files[0]
     const file = primary && shareable.files.get(primary)
-    if (!primary || !file || !('content' in file) || !file.content || file.content.length > maxChapterLength || !props.main) {
-      setError('Open a complete LaTeX chapter included in AI reading before sending.')
-      return
+    const primarySource = excerpts[0]?.source ?? (file && 'content' in file ? file.content : undefined)
+    if (!primary || !primarySource || primarySource.length > maxChapterLength || !props.main) {
+      setError('Open a LaTeX chapter included in AI reading, or select a passage in a long file.')
+      return false
     }
     clearError()
     setError('')
-    setStopped(false)
     const id = crypto.randomUUID()
-    const access = grant.current?.access
-    const requested = approvedScope ?? scope ?? (taskMode !== 'plan' && Array.isArray(access) ? access : undefined)
     const context = buildChapterContext(shareable, primary, main ?? primary, [
       ...(requested ?? targets), ...files.filter(path => text.includes(path) || text.includes(path.split('/').at(-1)!)),
-    ])
-    const completeFiles = new Set([primary, ...context.filter(entry => !entry.truncated).map(entry => entry.path)])
-    const turnWorkflow = taskMode || repair?.reverify || repair?.manuscriptTask ? 'auto' : workflow
+    ], [...rangedPaths], excerpts.reduce((size, excerpt) => size + excerpt.source.length, 0))
+    const available = new Set([primary, ...rangedPaths, ...context.filter(entry => !entry.truncated && entry.source.length <= maxChapterLength).map(entry => entry.path)])
     const automaticScope = !requested && (turnWorkflow === 'auto' || access === 'all')
-    const editPaths = (requested ?? (automaticScope ? files : targets)).filter(path => files.includes(path) && completeFiles.has(path))
+    const candidates = requested ?? (excerpts.length ? [...new Set([...rangedPaths, ...namedPaths])] : automaticScope ? files : targets)
+    const editPaths = candidates.filter(path => files.includes(path) && available.has(path)
+      && (!selectedLong || path === selection.path || taskMode === 'batch'))
+    if (taskMode === 'batch' && approvedScope?.some(path => !editPaths.includes(path))) {
+      setError('Some files in this batch are outside the available source ranges. Choose a smaller scope or locate their passages.')
+      return false
+    }
     const sources = Object.fromEntries(editPaths.flatMap(path => {
       const saved = editableSource(props.project, path)
       return saved === undefined ? [] : [[path, { saved, draft: props.drafts[path] }] as const]
     }))
-    if (approvedScope?.some(path => readScope.denies(path))) {
-      setError('The requested edit scope includes a file excluded from AI reading.')
-      return false
-    }
     const task = changedRules ? undefined : existing
     const manuscriptId = taskMode === 'batch' || taskMode === 'evidence' || repair?.manuscriptTask
       ? task?.id : repair ? runs.current[repair.id]?.manuscriptId : undefined
     const writingExample = example || (taskMode === 'batch' && Boolean(task?.example))
-    const source: ChapterEditRequest = { mode: 'rewrite', path: primary, main: main ?? primary, source: file.content,
+    const source: ChapterEditRequest = { mode: 'rewrite', path: primary, main: main ?? primary, source: primarySource,
       instruction: '', compiler: readScope.restricted ? { state: 'unavailable', diagnostics: [], log: '' } : props.compiler, context }
     const resultTime = (message: WritingChatMessage) => props.tasks[message.metadata!.run]?.findLast(step =>
       step.kind === 'passed' || step.kind === 'failed')?.at ?? 0
@@ -756,8 +885,6 @@ function Conversation(props: WorkbenchProps & {
       : undefined)
     const previousRun = repair?.id ?? (failedProposal && /repair|fix|error|修复|修正|报错/i.test(text) ? resultId : undefined)
     const revisionOf = previousRun && (runs.current[previousRun]?.revisionOf ?? previousRun)
-    const cursor = revisionOf || taskMode ? undefined : props.selection()
-    const selection = cursor && !readScope.denies(cursor.path) ? cursor : undefined
     const repairFiles = failedProposal ? [...new Set(failedProposal.edits.map(edit => edit.path))] : editPaths
     const taskContext: ManuscriptContext | undefined = taskMode === 'plan' ? { mode: 'plan', goal: text, files: editPaths }
       : taskMode === 'evidence' && task && evidence ? { mode: 'evidence', goal: task.goal, files: [], data: task.delivery?.data,
@@ -779,27 +906,59 @@ function Conversation(props: WorkbenchProps & {
       action: step.kind, paths: step.paths?.slice(0, 6), detail: step.detail?.slice(0, 300),
     }))
     const attachments = buildAttachmentContext(shareable,
-      [text, taskContext?.goal, ...(taskContext?.data ?? []).map(file => file.path)].filter(Boolean).join('\n'))
+      [text, taskContext?.goal, ...(taskContext?.data ?? []).map(file => file.path)].filter(Boolean).join('\n'), taskContext?.data)
     const contextReceipt: AiContextReceipt = {
-      files: [{ path: primary, kind: props.drafts[primary] ? 'draft' : 'saved' },
-        ...context.map(({ path, truncated }) => ({ path, kind: props.drafts[path] ? 'draft' as const : 'saved' as const, partial: truncated })),
+      files: [...(rangedPaths.has(primary) ? [] : [{ path: primary, kind: props.drafts[primary] ? 'draft' as const : 'saved' as const }]),
+        ...excerpts.map(excerpt => ({ path: excerpt.path, kind: props.drafts[excerpt.path] ? 'draft' as const : 'saved' as const,
+          partial: true, lines: { start: excerpt.start, end: excerptEnd(excerpt) } })),
+        ...context.map(({ path, source, truncated }) => ({ path, kind: props.drafts[path] ? 'draft' as const : 'saved' as const,
+          partial: truncated, lines: truncated ? { start: 1, end: source.split(/\r\n|\r|\n/).length } : undefined })),
         ...attachments.csv.map(({ path, truncated }) => ({ path, kind: props.drafts[path] ? 'csv_draft' as const : 'csv' as const, partial: truncated })),
+        ...(attachments.csvWindows ?? []).map(({ path, rows }) => ({
+          path, kind: props.drafts[path] ? 'csv_draft' as const : 'csv' as const, partial: true,
+          lines: { start: rows[0].line, end: rows.at(-1)!.endLine },
+        })),
+        ...(media ? [{ path: media.path, kind: media.kind, ...(media.kind === 'pdf_page' ? { page: media.page, partial: true } : {}) }] : []),
         ...attachments.entries.filter(entry => !entry.csv).map(({ path }) => ({ path, kind: 'attachment' as const }))],
       diagnostics: Boolean(source.compiler.diagnostics.length || source.compiler.log || feedback),
       taskNotes: Boolean(taskContext && taskContext.mode !== 'plan'), restricted: readScope.restricted,
     }
     const send = (expectedRecipient: string, confirmation: NonNullable<AiContextReceipt['confirmation']>) => {
+      const retryPaths = [...new Set([primary, ...editPaths, ...ranges.map(range => range.path), ...(evidence ? [evidence.claim.path] : [])])]
+      const resumeRepair = repair ?? (previousRun && report ? { id: previousRun, report, proposal: failedProposal } : undefined)
+      retryStep.current = { id, kind: 'source', text, repair: resumeRepair,
+        paths: editPaths, mode: taskMode, evidence, example,
+        position: { selection: selection ?? null, ranges, workflow: turnWorkflow, primary, media: attachment },
+        valid: () => {
+          const current = latest.current
+          const currentTask = manuscriptRef.current
+          const sameTask = !taskMode || (evidence
+            ? currentTask?.id === existing?.id && currentTask?.batches === existing?.batches
+              && currentTask?.claimReviews?.[evidence.id]?.decision === 'requested'
+            : currentTask === existing)
+          const sameBatch = taskMode !== 'batch' || Boolean(currentTask && !manuscriptProgress(currentTask, current.checkpoints, current.tasks).pending
+            && JSON.stringify(manuscriptProgress(currentTask, current.checkpoints, current.tasks).remaining.slice(0, 3)) === JSON.stringify(editPaths))
+          return current.active && current.main === props.main && sameTask && sameBatch
+            && retryPaths.every(path => editableSource(current.working, path) === editableSource(props.working, path)
+              && editableSource(current.project, path) === editableSource(props.project, path)
+              && sameDraft(current.drafts[path], props.drafts[path]))
+            && (!resumeRepair || current.verifications[resumeRepair.id] === resumeRepair.report
+              && current.working.files === props.working.files && current.project.metadata.compileProfile === props.project.metadata.compileProfile)
+        },
+      }
+      setFailedRun(undefined)
       pending.current = { id, grant: repair?.manuscriptTask ? undefined : grant.current?.id, manuscriptId, claimId: evidence?.id,
-        example: writingExample || undefined, readRules: rules }
+        example: writingExample || undefined, readRules: rules, expects: taskMode === 'plan' ? 'plan' : resumeRepair ? 'repair' : undefined }
       runs.current = { ...runs.current, [id]: { main: props.project.metadata.mainFile, pathRevision: props.sourceMoves?.length, sources, revisionOf,
         context: { ...contextReceipt, confirmation }, manuscriptId, replacesBatch: repair && !repair.manuscriptTask && manuscriptId && !props.checkpoints[repair.id] ? repair.id : undefined,
         verifyRepair: repair?.reverify } }
       setRunSnapshots(runs.current)
       setPrompt('')
+      if (attachment) setPreparedMedia(undefined)
       void sendMessage({ text, metadata: { run: id, selection } }, {
         body: { run: id, workflow: turnWorkflow, scope: editPaths, source, selection, feedback, previousProposal: failedProposal,
           workspaceActivity, draftPermission: Array.isArray(access) ? access.filter(path => !readScope.denies(path)) : access,
-          manuscript: taskContext, writingExample: writingExample || undefined, attachments,
+          manuscript: taskContext, writingExample: writingExample || undefined, attachments, excerpts: excerpts.length ? excerpts : undefined, media,
           latestMessageOnly: readScope.restricted || undefined, expectedRecipient },
       })
     }
@@ -809,12 +968,27 @@ function Conversation(props: WorkbenchProps & {
     const compilerKey = JSON.stringify(source.compiler)
     return contextApproval.start({ receipt: contextReceipt, purpose,
       fingerprint: aiContextApprovalKey(contextReceipt, purpose, diagnosticContext, [rules, taskMode === 'batch' ? editPaths : undefined]),
-      valid: () => latest.current.project.files === props.project.files && latest.current.drafts === props.drafts
+        valid: () => latest.current.project.files === props.project.files && latest.current.drafts === props.drafts
         && latest.current.main === props.main && latest.current.project.metadata.aiReadExclusions === rules
         && !latest.current.disabled && latest.current.active && (readScope.restricted || JSON.stringify(latest.current.compiler) === compilerKey)
         && (!resultId || readScope.restricted || latest.current.verifications[resultId] === props.verifications[resultId]),
       send, cancel: () => { if (taskMode === 'batch') setRunningManuscript(false) },
-    }, { force: preview, example: writingExample })
+    }, { force: preview || Boolean(media), example: writingExample })
+  }
+
+  function retryFailedStep() {
+    const step = retryStep.current
+    if (!step || step.id !== failedRun) return
+    if (!step.valid()) {
+      setFailedRun(undefined)
+      setError('The source, task or verification changed. Reopen the original action to prepare a new request.')
+      return
+    }
+    if (step.kind === 'revision') void startReply(step.request, step.text, step.target)
+    else {
+      const started = submit(step.text, step.repair, step.paths, step.mode, step.evidence, step.example, false, step.position)
+      if (started && step.mode === 'batch') setRunningManuscript(true)
+    }
   }
 
   const runNextBatch = useEffectEvent(() => {
@@ -897,8 +1071,9 @@ function Conversation(props: WorkbenchProps & {
     finally { setMutating(false) }
   }
 
-  const anyError = error || (streamError ? 'The request failed. Check the model configuration or retry.' : '') || props.storageError
-  const lastPrompt = [...messages].reverse().find(message => message.role === 'user')
+  const streamMessage = streamError && (Object.values(modelFailureMessages).includes(streamError.message)
+    ? streamError.message : 'The request failed. Check Workbench setup or retry this step.')
+  const anyError = error || streamMessage || props.storageError
   const bibliographyDefinitions = useMemo(() => indexCanvasReferences(props.working, collectBibliography(props.working)).definitions, [props.working])
   function requestFreshEvidence(path: string) {
     setPrompt(previous => [previous, `Find fresh source evidence in the current project for the earlier reference to ${path}. Report reliable file and line locations.`]
@@ -1055,7 +1230,11 @@ function Conversation(props: WorkbenchProps & {
                     if (original) {
                       const batch = run?.manuscriptId === manuscriptRef.current?.id && Boolean(run?.manuscriptId)
                       if (batch) setRunningManuscript(true)
-                      submit(chatText(original), undefined, editPermission.paths, batch ? 'batch' : undefined)
+                      const step = retryStep.current
+                      const position = step?.id === runId && step.kind === 'source' ? step.position : undefined
+                      submit(chatText(original), undefined, editPermission.paths, batch ? 'batch' : undefined,
+                        undefined, false, false, position && { ...position,
+                          ranges: position.ranges?.filter(range => editPermission.paths.includes(range.path)) })
                     }
                   }}>Approve and continue</Button>
                 <Button variant="outline" size="sm" disabled={streaming || mutating} onClick={() => void props.onTaskStep(runId,
@@ -1157,10 +1336,39 @@ function Conversation(props: WorkbenchProps & {
       {mutating && !streaming && localOperation.current && <Button size="sm" variant="ghost"
         onClick={() => localOperation.current?.abort()}>Cancel local operation</Button>}
       {anyError && <p role="alert" className="text-xs text-red-800">{anyError}</p>}
-      {!streaming && (streamError || stopped || messages.at(-1)?.role === 'assistant' && !messages.at(-1)?.metadata?.complete) && lastPrompt
-        && <Button size="sm" variant="outline" disabled={props.disabled} onClick={() => submit(chatText(lastPrompt))}>Retry request</Button>}
+      {!streaming && failedRun && retryStep.current?.id === failedRun
+        && <Button size="sm" variant="outline" disabled={props.disabled || mutating || contextApproval.busy} onClick={retryFailedStep}>Retry request</Button>}
+      {rangeChoices && <ul aria-label="Matching source passages" className="space-y-1">
+        {rangeChoices.choices.map(({ range, title }) => <li key={`${range.path}:${range.start}:${range.end}`}>
+          <Button size="sm" variant="outline" className="h-auto max-w-full whitespace-normal text-left"
+            onClick={() => rangeChoices.choose(range)}>{title} · {range.path}:{range.start}–{range.end}</Button>
+        </li>)}
+      </ul>}
     </div>
     <form className="shrink-0 space-y-1 border-t bg-white p-2" onSubmit={event => { event.preventDefault(); submit(prompt) }}>
+      {mediaFiles.length > 0 && <details className="mb-1 rounded border px-2 py-1 text-xs">
+        <summary className="cursor-pointer">{preparedMedia ? 'Attachment ready: ' + preparedMedia.media.path : 'Share a PDF page or image'}</summary>
+        <div className="flex flex-wrap items-end gap-2 py-1">
+          <label className="grid min-w-0 flex-1 gap-1">Attachment
+            <select className="w-full rounded border bg-white p-1" value={attachmentPath} disabled={preparingMedia || streaming}
+              onChange={event => { setAttachmentPath(event.target.value); setPreparedMedia(undefined) }}>
+              <option value="">Choose a project file</option>
+              {mediaFiles.map(file => <option key={file.path} value={file.path}>{file.path}</option>)}
+            </select>
+          </label>
+          {/\.pdf$/i.test(attachmentPath) && <label className="grid gap-1">PDF page
+            <input className="w-16 rounded border p-1" type="number" min="1" value={attachmentPage} disabled={preparingMedia || streaming}
+              onChange={event => { setAttachmentPage(event.target.value); setPreparedMedia(undefined) }} />
+          </label>}
+          <Button type="button" size="sm" variant="outline" disabled={!fileToPrepare || preparingMedia || streaming}
+            onClick={() => void prepareMedia()}>{preparingMedia ? 'Preparing…' : 'Prepare attachment'}</Button>
+          {preparedMedia && <Button type="button" size="sm" variant="ghost" onClick={() => setPreparedMedia(undefined)}>Remove attachment</Button>}
+        </div>
+        {preparedMedia?.media.kind === 'pdf_page' && <p className="max-h-24 overflow-auto whitespace-pre-wrap">
+          {preparedMedia.media.text}
+        </p>}
+        {preparedMedia?.media.kind === 'image' && <p>The selected image will be shared with the model on the next reviewed request.</p>}
+      </details>}
       <Textarea ref={composer} aria-label="Message Writing AI" className="min-h-8 max-h-24 resize-y px-2 py-1 text-sm" value={prompt} maxLength={12_000}
         placeholder={workflow === 'diagnostics' ? 'What is causing these compiler diagnostics?' : 'Ask or request an edit…'}
         onChange={event => setPrompt(event.target.value)} onKeyDown={event => {
@@ -1200,7 +1408,7 @@ function Conversation(props: WorkbenchProps & {
           onClick={() => { const id = localMessage('Preview compile requested.'); void compilePreview({ id, role: 'assistant', parts: [], metadata: { run: id } }) }}>Compile PDF</Button>}
         {streaming ? <Button className="ml-auto" type="button" size="sm" variant="outline" onClick={() => {
           pending.current = null
-          setStopped(true)
+          setFailedRun(retryStep.current?.id)
           setRunningManuscript(false)
           void stop()
         }}>Stop</Button> : <Button className="ml-auto" size="sm" type="submit" disabled={!prompt.trim() || props.disabled || mutating || contextApproval.busy}>Send</Button>}
@@ -1354,15 +1562,17 @@ function Proposal({ proposal, run, state, disabled, onAction, project, input, ve
   const fingerprint = applied ? baseline?.working : baseline?.raw
   const verified = applied ? verification?.compiledBaseline : verification?.baseline
   const stale = verification && (verification.main !== input.main
-    || verification.selected.join(',') !== selected.join(',') || (fingerprint !== undefined && verified !== fingerprint))
+    || verification.selected.join(',') !== selected.join(',') || (fingerprint !== undefined && verified !== fingerprint)
+    || (state === 'draft' && verification.working && baseline !== undefined && verification.baseline !== baseline.raw))
   const pendingBaseline = verification && !stale && baseline === undefined
   const reuseVerification = !applied && verification?.status === 'passed' && !verification.working && !stale && !pendingBaseline
+  const verifiedDraft = state === 'draft' && verification?.status === 'passed' && verification.working && !stale && !pendingBaseline
   const dependencyFailure = verification?.status === 'failed' && !verification.diagnostics.some(issue => issue.severity === 'error')
     && /could not load a font|physical.*font for PDF output|missing bundle|Tectonic executable not found|enable Tectonic|timed out|Another compile is in progress/i.test(
       verification.message + '\n' + verification.log)
 
   async function verify(save: boolean) {
-    if (request.current || !input.main || !changes.length || (save && applied)) return
+    if (request.current || !input.main || !changes.length || (save && applied && !verifiedDraft)) return
     const controller = new AbortController()
     request.current = controller
     const { signal } = controller
@@ -1372,6 +1582,11 @@ function Proposal({ proposal, run, state, disabled, onAction, project, input, ve
     try {
       await onTaskStep({ kind: save ? 'authorize-save' : 'verify', selected: selected.length, selection: selected,
         paths: [...new Set(changes.map(edit => edit.path))] })
+      if (save && verifiedDraft) {
+        if (!signal.aborted && current.current.active) await onAction({ kind: 'save', signal })
+        recorded = !signal.aborted
+        return
+      }
       const reusable = save && reuseVerification
       const report = reusable ? verification : await validateChatProposal({ ...input, run, edits: changes, selected, signal, verifyWorking: applied })
       if (signal.aborted) return
@@ -1415,13 +1630,13 @@ function Proposal({ proposal, run, state, disabled, onAction, project, input, ve
     <ClaimEvidence claims={claims} project={project} moves={sourceMoves ?? []} onLocate={onLocate} />
     {state ? <div className="flex flex-wrap items-center gap-2">
       <span role="status" className="text-xs">{state === 'draft' ? 'Applied to local drafts' : state === 'saved' ? 'Saved to project' : state === 'undone' ? 'Undone' : 'Rejected'}</span>
-      {state === 'draft' && <p className="w-full text-xs text-slate-600">These working drafts are kept in this browser. Project save and PDF verification are separate actions.</p>}
+      {state === 'draft' && <p className="w-full text-xs text-slate-600">These working drafts are kept in this browser. Verify them before saving this proposal to the project.</p>}
       {applied && [...after.keys()].map(path => <Button key={path} size="sm" variant="ghost" className="h-auto max-w-full whitespace-normal break-all"
         onClick={() => setPreview(path)}>Review AI diff · {path}</Button>)}
       {applied && <Button size="sm" variant="outline" disabled={disabled || checking || !input.main}
         onClick={() => void verify(false)}>Verify working drafts</Button>}
-      {state === 'draft' && <Button size="sm" variant="outline" disabled={disabled || checking} onClick={() => onAction({ kind: 'save' })}>
-        {verification?.status === 'passed' && !stale && !pendingBaseline ? 'Save to project' : 'Save to project without verification'}
+      {state === 'draft' && <Button size="sm" variant="outline" disabled={disabled || checking || !verifiedDraft} onClick={() => void verify(true)}>
+        Save to project
       </Button>}
       {(state === 'draft' || state === 'saved') && <Button size="sm" variant="ghost" disabled={disabled} onClick={() => onAction({ kind: 'undo' })}>Undo AI changes</Button>}
     </div> : <>
@@ -1455,7 +1670,7 @@ function Proposal({ proposal, run, state, disabled, onAction, project, input, ve
       </div>
     </>}
     {checking && <div className="flex flex-wrap items-center gap-1">
-      <p className="text-xs" role="status">{reuseVerification ? 'Checking verified changes…' : applied ? 'Compiling working drafts…' : 'Compiling the temporary snapshot…'}</p>
+      <p className="text-xs" role="status">{reuseVerification || verifiedDraft ? 'Checking verified changes…' : applied ? 'Compiling working drafts…' : 'Compiling the temporary snapshot…'}</p>
       <Button size="sm" variant="ghost" onClick={() => request.current?.abort()}>Cancel verification</Button>
     </div>}
     {validationError && <p className="text-xs text-red-800" role="alert">{validationError}</p>}

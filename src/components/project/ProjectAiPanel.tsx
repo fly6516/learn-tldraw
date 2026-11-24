@@ -82,6 +82,10 @@ export function ProjectAiPanel({ project, saved, main, compiler, conflicts, disa
     <fieldset disabled={busy} className="space-y-1">
       <legend className="font-medium">LaTeX files for this run</legend>
       <p className="text-xs text-slate-600">Select two to six files. The provider receives the initial chapter and the project excerpts it requests.</p>
+      {[...project.files.values()].some(file => file.type === 'editable' && /\.tex$/i.test(file.path)
+        && (file.content?.length ?? 0) > maxChapterLength) && <p className="text-xs text-slate-600">
+        Use Writing AI to work on a passage in a long file.
+      </p>}
       <div className="max-h-32 space-y-1 overflow-auto rounded border p-2">
         {candidates.map(path => <label key={path} className="flex items-start gap-2 break-all"><input type="checkbox" className="mt-1"
           checked={eligible.includes(path)} disabled={!eligible.includes(path) && eligible.length >= 6}

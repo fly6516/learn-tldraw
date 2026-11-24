@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import { createChapterTools } from './ai-tools'
 import { buildChapterContext, editRequestSchema } from './ai-edit'
+import { buildAttachmentContext } from './ai-attachments'
 
 test('tool responses are bounded to allowed project paths and current diagnostic evidence', async () => {
   const input = { path: 'results.tex', source: '\\section{Results}', main: 'main.tex',
@@ -27,4 +28,26 @@ test('enforces the shared context character budget after clipping individual fil
   expect(context.every(item => item.truncated)).toBe(true)
   expect(editRequestSchema.safeParse({ mode: 'review', path: 'target.tex', main: 'section0.tex', source: 'target', instruction: '',
     compiler: { state: 'unavailable', diagnostics: [], log: '' }, context }).success).toBe(true)
+})
+
+test('reads and calculates using approved CSV rows after the initial file prefix', async () => {
+  const path = 'data/long.csv'
+  const content = 'session,shaded_c,exposed_c\n'
+    + Array.from({ length: 1900 }, (_, i) => `${i + 1},28.1,30.7,unshared-marker\n`).join('')
+    + '1901,21.4,27.3\n1902,23.4,30.0\n'
+  const files = new Map([[path, { path, type: 'editable', content }]])
+  const attachments = buildAttachmentContext({ files }, 'Read rows 1902 through 1903 of data/long.csv.')
+  expect(attachments.csv).toEqual([])
+  expect(JSON.stringify(attachments)).not.toContain('unshared-marker')
+  const outOfBounds = buildAttachmentContext({ files }, 'Read row 90000 of data/long.csv.')
+  expect(outOfBounds).toMatchObject({ entries: [{ path, csv: false }], csv: [] })
+  expect(outOfBounds.csvWindows).toBeUndefined()
+  const { tools, claimEvidence } = createChapterTools({ path: 'main.tex', source: 'Text', context: [] }, attachments)
+  expect(await tools.read_csv_rows.execute({ path, startRow: 1901, rowCount: 1 })).toHaveProperty('unavailable')
+  expect(await tools.read_csv_rows.execute({ path, startRow: 1902, rowCount: 2 })).toMatchObject({
+    rows: [{ line: 1902, cells: ['1901', '21.4', '27.3'] }, { line: 1903, cells: ['1902', '23.4', '30.0'] }],
+  })
+  expect(claimEvidence[0]).toMatchObject({ csvHeader: ['session', 'shaded_c', 'exposed_c'] })
+  expect(await tools.calculate_csv.execute({ path, operation: 'mean', decimals: 1,
+    cells: [{ row: 1902, column: 'shaded_c' }, { row: 1903, column: 'shaded_c' }] })).toMatchObject({ result: 22.4 })
 })

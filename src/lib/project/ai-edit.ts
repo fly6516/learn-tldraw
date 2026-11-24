@@ -66,10 +66,11 @@ export function applyProjectEdits(sources: ReadonlyMap<string, string>, edits: P
   return new Map([...grouped].map(([path, edits]) => [path, applyChapterEdits(sources.get(path)!, edits)]))
 }
 
-export function buildChapterContext(project: ProjectFileSystem, selected: string, main: string, priority: readonly string[] = []) {
+export function buildChapterContext(project: ProjectFileSystem, selected: string, main: string, priority: readonly string[] = [],
+  omittedPaths: readonly string[] = [], reserved = 0) {
   const context: ChapterEditRequest['context'] = []
-  const paths = new Set<string>([selected])
-  let remaining = maxContextLength
+  const paths = new Set<string>([selected, ...omittedPaths])
+  let remaining = maxContextLength - reserved
   const directory = selected.slice(0, selected.lastIndexOf('/') + 1)
   const entries = [...project.files.values()].sort((a, b) => a.path.localeCompare(b.path))
   const candidates = [

@@ -5,7 +5,8 @@ import { sameDraft } from './writing-drafts'
 export type ChatAction =
   | { kind: 'apply'; run: ChatRun; edits: ProjectSuggestion['edits']; selection?: number[]; automatic?: boolean; signal?: AbortSignal }
   | { kind: 'apply-save'; run: ChatRun; edits: ProjectSuggestion['edits']; signal: AbortSignal; selection?: number[] }
-  | { kind: 'save' | 'undo' | 'reject' }
+  | { kind: 'save'; signal?: AbortSignal }
+  | { kind: 'undo' | 'reject' }
 
 export function chatActionPaths(action: ChatAction, checkpoint?: ChatCheckpoint) {
   return action.kind === 'apply' || action.kind === 'apply-save'
