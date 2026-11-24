@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { createServer } from 'node:net'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 
@@ -12,6 +13,19 @@ if (!Number.isInteger(port) || port < 1024 || port > 65535) {
 
 const url = `http://127.0.0.1:${port}/research`
 const win = process.platform === 'win32'
+try {
+  await new Promise((resolve, reject) => {
+    const probe = createServer()
+    probe.once('error', reject)
+    probe.listen(port, '127.0.0.1', () => probe.close(error => error ? reject(error) : resolve()))
+  })
+} catch (error) {
+  if (error.code !== 'EADDRINUSE') throw error
+  console.error(`Port ${port} is already in use. If Research Canvas is already running there, reopen ${url}.`)
+  console.error('Otherwise close the app using that port, or set RESEARCH_TRIAL_PORT before starting this launcher again.')
+  console.error('Projects are stored separately for each browser address. Return to the original address or import a recovery backup to access them.')
+  process.exit(1)
+}
 const server = spawn(process.execPath, [join(root, 'app', 'server.js')], {
   cwd: join(root, 'app'),
   env: { ...process.env, PORT: String(port), HOSTNAME: '127.0.0.1', NEXT_TELEMETRY_DISABLED: '1',

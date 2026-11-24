@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { promisify } from 'node:util'
@@ -7,12 +7,12 @@ import { gunzipSync } from 'node:zlib'
 import { importSourceArchive, isProjectPath } from '@/lib/project/source-archive'
 import { compileFailureMessage, compileLog, parseCompileDiagnostics, type CompileReport } from '@/lib/project/compile-diagnostics'
 import { readSyncTex } from '@/lib/project/read-synctex'
+import { claimLocalCompiler, currentLocalCompile, writeCompileSources } from '@/lib/project/local-compile'
 
 export const runtime = 'nodejs'
 
 const exec = promisify(execFile)
 const maxBytes = 32 * 1024 * 1024
-let compiling = false
 
 export async function POST(request: Request) {
   if (process.env.LATEX_COMPILE_ENABLED !== '1') {
@@ -33,8 +33,10 @@ export async function POST(request: Request) {
   if (!Number.isSafeInteger(length) || length < 1 || length > maxBytes) {
     return Response.json({ error: 'The compile request must be a ZIP of at most 32 MB.' }, { status: 413 })
   }
-  if (compiling) return Response.json({ error: 'Another compile is in progress.' }, { status: 429 })
-  compiling = true
+  const release = claimLocalCompiler('project')
+  if (!release) return Response.json({ error: currentLocalCompile() === 'resources'
+    ? 'Setup is preparing TeX resources. Wait for it to finish, then compile again.'
+    : 'Another compile is in progress.' }, { status: 429 })
   let work: string | undefined
   try {
     let project
@@ -52,15 +54,7 @@ export async function POST(request: Request) {
     const sources = join(work, 'sources')
     const output = join(work, 'output')
     await mkdir(output)
-    for (const entry of project.files.values()) {
-      const path = join(sources, entry.path)
-      if (entry.type === 'directory') {
-        await mkdir(path, { recursive: true })
-      } else if ('blob' in entry && entry.blob) {
-        await mkdir(dirname(path), { recursive: true })
-        await writeFile(path, new Uint8Array(await entry.blob.arrayBuffer()), { flag: 'wx' })
-      }
-    }
+    await writeCompileSources(sources, project)
 
     const job = basename(mainFile).replace(/\.tex$/i, '')
     const readLog = () => readFile(join(output, job + '.log'), 'utf8').catch(() => '')
@@ -121,7 +115,7 @@ export async function POST(request: Request) {
     try {
       if (work) await rm(work, { recursive: true, force: true })
     } finally {
-      compiling = false
+      release()
     }
   }
 }

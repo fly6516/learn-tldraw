@@ -40,10 +40,23 @@ Keep the notices from the original runtime distributions and distribute the whol
 folder with **START HERE.txt**. The application runs without Bun, developer tools
 or a model key on the recipient's machine. The first compile may fetch LaTeX resources.
 
-For a fresh participant, start the timer at extraction. Ask them to launch the
-workbench, start the sample, compile the first PDF and download a recovery backup.
-Record OS, browser, time to first PDF, steps requiring help and any compiler error.
-Use synthetic data for trial feedback.
+### Independent trial
+
+Give each participant the ZIP and its `START HERE.txt`. Start timing at
+extraction and let the participant drive with no walkthrough.
+
+- Ask three to five people to launch the workbench, prepare TeX in **Setup**,
+  compile a first PDF, export a submission, and restore a backup into a fresh
+  browser profile. Use the built-in sample for some sessions and have at least
+  one participant bring a multi-file template they can share.
+- For each attempt record the operating system, browser, template and engine,
+  time to first PDF, the first point requiring help, and whether the final
+  submission and recovery succeeded. Record whether TeX was already cached.
+- With the participant's consent, capture a compiler error or screenshot with
+  manuscript content, filenames and local paths removed. Rank blockers by how
+  often they stop the task.
 
 To test a running bundle, set `RESEARCH_TRIAL_E2E_URL` to its loopback origin and run
 `bun run test:e2e tests/e2e/workbench-setup.spec.ts tests/e2e/writing-sample.spec.ts`.
+Set `RESEARCH_TRIAL_PREPARE=1` with an empty `TECTONIC_CACHE_DIR` to run the
+resource preparation test against the actual bundled compiler.

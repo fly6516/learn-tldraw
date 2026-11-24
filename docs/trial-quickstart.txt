@@ -4,7 +4,9 @@ Research Canvas local trial
 2. On Windows, open “Start Research Canvas.cmd”. On macOS or Linux, run
    ./start-research-canvas.sh from the extracted folder.
 3. Open http://127.0.0.1:3000/research if it does not open automatically.
-4. Choose “Try a writing sample” and “Use example edits”. Follow the sample
+4. Open “Setup” and choose “Prepare TeX resources”. Stay online while
+   Tectonic prepares the sample. You can check progress or retry in Setup.
+5. Choose “Try a writing sample” and “Use example edits”. Follow the sample
    through review, PDF compilation and submission export. No model key is needed.
 
 Keep the launcher window open while editing. The first LaTeX compile might take
@@ -14,5 +16,7 @@ several minutes while the bundled Tectonic compiler downloads LaTeX resources.
 Your projects stay in your browser at this address. Before changing browsers,
 ports or devices, use Project menu → Project Backup → Complete recovery backup.
 
-If port 3000 is occupied, stop the other server or set RESEARCH_TRIAL_PORT to an
-available port before launching. Browser data is separate for each port.
+If port 3000 is occupied, check whether the workbench is already running or
+close the other application using that port. If you choose another port, your
+projects remain at the original address. Return to that address or import a
+recovery backup to access them.
