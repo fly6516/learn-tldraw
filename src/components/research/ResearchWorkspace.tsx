@@ -518,10 +518,10 @@ function Workspace({ sample, initialProject, notice, projectListHref, onViewChan
     : <p role="status">Opening research project…</p>
 
   return (
-    <main className="flex h-dvh min-h-0 min-w-0 flex-col overflow-hidden bg-background text-foreground">
-      <header aria-label="Project" className="z-30 grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 border-b bg-background px-3 py-2 md:flex md:px-4">
+    <main className="research-theme flex h-dvh min-h-0 min-w-0 flex-col overflow-hidden bg-workbench-canvas text-foreground">
+      <header aria-label="Project" className="z-30 grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 border-b border-workbench-line bg-workbench-toolbar px-3 py-2 text-workbench-ink md:flex md:px-4">
         <div className="flex min-w-0 items-center gap-2">
-          <Link href={projectListHref ?? "/"} aria-label={projectListHref ? "Back to projects" : "Research Canvas home"} className="rounded-md bg-indigo-100 p-2 text-indigo-700 hover:bg-indigo-200"
+          <Link href={projectListHref ?? "/"} aria-label={projectListHref ? "Back to projects" : "Research Canvas home"} className="rounded-md border border-workbench-line bg-workbench-selection p-2 text-workbench-accent hover:bg-workbench-selection-strong focus-visible:outline-2 focus-visible:outline-workbench-accent"
             onNavigate={event => {
               if (projectListHref) {
                 event.preventDefault()
@@ -532,10 +532,10 @@ function Workspace({ sample, initialProject, notice, projectListHref, onViewChan
           </Link>
           <h1 className="min-w-0 max-w-56 truncate text-sm font-semibold md:max-w-36 xl:max-w-56" title={fileSystem.metadata.projectName}>{fileSystem.metadata.projectName}</h1>
         </div>
-        <nav aria-label="Project views" className={(view === 'write' ? 'col-span-2 ' : '') + 'order-3 flex w-fit shrink-0 rounded-lg bg-muted p-0.5 md:order-none'}>
-          <Button size="sm" variant={view === 'canvas' ? 'outline' : 'ghost'} aria-current={view === 'canvas' ? 'page' : undefined}
+        <nav aria-label="Project views" className={(view === 'write' ? 'col-span-2 ' : '') + 'order-3 flex w-fit shrink-0 rounded-lg bg-workbench-panel p-0.5 md:order-none'}>
+          <Button size="sm" variant={view === 'canvas' ? 'secondary' : 'ghost'} aria-current={view === 'canvas' ? 'page' : undefined}
             onClick={() => switchView('canvas')}><LayoutGrid className="size-4" /> Canvas</Button>
-          <Button size="sm" variant={view === 'write' ? 'outline' : 'ghost'} aria-current={view === 'write' ? 'page' : undefined}
+          <Button size="sm" variant={view === 'write' ? 'secondary' : 'ghost'} aria-current={view === 'write' ? 'page' : undefined}
             onClick={() => switchView('write')}><FileCode2 className="size-4" /> Writing</Button>
         </nav>
         <DropdownMenu>
@@ -573,7 +573,7 @@ function Workspace({ sample, initialProject, notice, projectListHref, onViewChan
           return true
         }} />}
       <div className={view === 'canvas' ? 'flex min-h-0 flex-1 flex-col overflow-hidden' : 'hidden'}>
-        <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b bg-muted/35 px-2 py-1.5 sm:px-3">
+        <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b bg-workbench-panel px-2 py-1.5 sm:px-3">
           <Button size="icon-sm" variant="ghost" className="hidden lg:inline-flex" aria-label="Toggle Canvas explorer"
             aria-expanded={showFiles} onClick={() => setShowFiles(open => !open)}><PanelLeft /></Button>
           <Button size="icon-sm" variant="ghost" className="lg:hidden" aria-label="Open Canvas explorer"
@@ -592,9 +592,9 @@ function Workspace({ sample, initialProject, notice, projectListHref, onViewChan
         </div>
         <div className="relative flex min-h-0 flex-1 overflow-hidden">
           {view === 'canvas' && (showFiles || mobileExplorer) && <aside aria-label="Canvas explorer"
-            className={`min-h-0 w-60 max-w-[90vw] shrink-0 flex-col border-r bg-background ${showFiles ? 'lg:flex' : 'lg:hidden'} ${mobileExplorer ? 'absolute inset-y-0 left-0 z-20 flex shadow-lg lg:relative lg:shadow-none' : 'hidden'}`}>
+            className={`min-h-0 w-60 max-w-[90vw] shrink-0 flex-col border-r bg-workbench-explorer ${showFiles ? 'lg:flex' : 'lg:hidden'} ${mobileExplorer ? 'absolute inset-y-0 left-0 z-20 flex shadow-lg lg:relative lg:shadow-none' : 'hidden'}`}>
             <div className="flex items-center justify-between border-b px-3 py-2">
-              <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Explorer</h2>
+              <h2 className="font-mono text-[11px] font-semibold uppercase tracking-[0.13em] text-workbench-muted">Explorer</h2>
               <Button size="icon-sm" variant="ghost" className="lg:hidden" aria-label="Close Canvas explorer" onClick={() => setMobileExplorer(false)}><X /></Button>
             </div>
             <div role="group" aria-label="Explorer content" className="flex gap-1 border-b p-1">

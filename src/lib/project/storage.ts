@@ -1,4 +1,4 @@
-import { legacyProjectId, legacyStorageKey, libraryStorageKey, type LibraryProject, type LibraryProjectState, type LibraryView, type RecoveryReceipt } from './project-library'
+import { legacyProjectId, legacyStorageKey, libraryChangesChannel, libraryStorageKey, type LibraryProject, type LibraryProjectState, type LibraryView, type RecoveryReceipt } from './project-library'
 import type { BackupHistorySelection, PortableProjectHistory } from './backup-history'
 import type { SourceMove } from './writing-ai-evidence'
 import { verificationBaseline, verificationPatch, type ChatVerification, type ManuscriptBuild } from './writing-chat-validation'
@@ -432,9 +432,7 @@ function historyRange(bucket: string, key: WritingKey) {
     return IDBKeyRange.bound(prefix, [...prefix, []], true, true)
 }
 
-export async function readBackupHistory(database: IDBDatabase, key: WritingKey, selection: BackupHistorySelection): Promise<PortableProjectHistory> {
-    const transaction = database.transaction(storeName)
-    const store = transaction.objectStore(storeName)
+function backupHistoryReader(store: IDBObjectStore, key: WritingKey, selection: BackupHistorySelection) {
     const readRecord = <T>(bucket: string) => {
         const range = historyRange(bucket, key)
         const keys = store.getAllKeys(range)
@@ -452,35 +450,42 @@ export async function readBackupHistory(database: IDBDatabase, key: WritingKey, 
         tasks: readRecord<ChatTaskStep[]>('ai-task'), checkpoints: readRecord<ChatCheckpoint>('ai-change'),
         verifications: readRecord<ChatVerification>('ai-verify'), builds: readRecord<ManuscriptBuild>('ai-manuscript-build'),
     } : undefined
-    await complete(transaction)
+    return (): PortableProjectHistory => {
+        const backup: PortableProjectHistory = {}
+        if (publication) {
+            const files = publication.files()
+            const submissions = (publication.submissions.result as SubmissionVersionInfo[]).map(info => {
+                const pair = files[info.id]
+                if (!(pair?.pdf instanceof Blob) || !(pair?.zip instanceof Blob)) throw new Error(`Archived PDF or ZIP is unavailable for ${info.name}.`)
+                return { ...info, ...pair }
+            })
+            backup.publication = { submissions, rounds: publication.rounds.result as RevisionRound[] }
+        }
+        if (snapshots) {
+            const projects = snapshots.projects()
+            backup.snapshots = ((snapshots.list.result ?? []) as ProjectSnapshotInfo[]).map(info => {
+                if (!projects[info.id]) throw new Error(`The snapshot ${info.name} is unavailable.`)
+                return { ...info, project: projects[info.id] }
+            })
+        }
+        if (ai) {
+            const history = ai.history.result as ChatHistory | undefined
+            const verifications = ai.verifications()
+            const taskIds = new Set(history?.conversations.map(item => item.manuscript?.id))
+            const builds = Object.fromEntries(Object.entries(ai.builds()).filter(([run, build]) =>
+                taskIds.has(run) && verifications[run]?.status === 'passed' && verifications[run]?.manuscript
+                && verifications[run].compiledBaseline === build.compiledBaseline))
+            backup.ai = { history, moves: ai.moves.result ?? [], tasks: ai.tasks(), checkpoints: ai.checkpoints(), verifications, builds }
+        }
+        return backup
+    }
+}
 
-    const backup: PortableProjectHistory = {}
-    if (publication) {
-        const files = publication.files()
-        const submissions = (publication.submissions.result as SubmissionVersionInfo[]).map(info => {
-            const pair = files[info.id]
-            if (!(pair?.pdf instanceof Blob) || !(pair?.zip instanceof Blob)) throw new Error(`Archived PDF or ZIP is unavailable for ${info.name}.`)
-            return { ...info, ...pair }
-        })
-        backup.publication = { submissions, rounds: publication.rounds.result as RevisionRound[] }
-    }
-    if (snapshots) {
-        const projects = snapshots.projects()
-        backup.snapshots = ((snapshots.list.result ?? []) as ProjectSnapshotInfo[]).map(info => {
-            if (!projects[info.id]) throw new Error(`The snapshot ${info.name} is unavailable.`)
-            return { ...info, project: projects[info.id] }
-        })
-    }
-    if (ai) {
-        const history = ai.history.result as ChatHistory | undefined
-        const verifications = ai.verifications()
-        const taskIds = new Set(history?.conversations.map(item => item.manuscript?.id))
-        const builds = Object.fromEntries(Object.entries(ai.builds()).filter(([run, build]) =>
-            taskIds.has(run) && verifications[run]?.status === 'passed' && verifications[run]?.manuscript
-            && verifications[run].compiledBaseline === build.compiledBaseline))
-        backup.ai = { history, moves: ai.moves.result ?? [], tasks: ai.tasks(), checkpoints: ai.checkpoints(), verifications, builds }
-    }
-    return backup
+export async function readBackupHistory(database: IDBDatabase, key: WritingKey, selection: BackupHistorySelection) {
+    const transaction = database.transaction(storeName)
+    const read = backupHistoryReader(transaction.objectStore(storeName), key, selection)
+    await complete(transaction)
+    return read()
 }
 
 function restoreBackupHistory(store: IDBObjectStore, key: WritingKey, history: PortableProjectHistory) {
@@ -524,41 +529,95 @@ function storeImportedProject(store: IDBObjectStore, key: WritingKey, project: P
     return saved
 }
 
-type LibraryEntry = Omit<LibraryProject, 'name'>
+type LibraryEntry = Omit<LibraryProject, 'name' | 'templateOrigin'>
 const libraryRange = () => IDBKeyRange.bound(['project-library'], ['project-library', []], true, true)
 const libraryEntry = (id: string) => ['project-library', id]
+
+function announceLibraryChange() {
+    try {
+        if (typeof BroadcastChannel === 'undefined') {
+            globalThis.localStorage?.setItem(libraryChangesChannel, crypto.randomUUID())
+            return
+        }
+        const channel = new BroadcastChannel(libraryChangesChannel)
+        try { channel.postMessage('changed') } finally { channel.close() }
+    } catch {
+        // The library also refreshes when its window regains focus.
+    }
+}
+
+function recoveryStateReader(store: IDBObjectStore, workspace: string, project: ProjectFileSystem) {
+    const key: WritingKey = [workspace, project.metadata.createdAt]
+    const drafts = readDraftRecords(store, key)
+    const submissions = store.getAll(historyRange('submission-info', key))
+    const rounds = store.getAll(historyRange('revision-round', key))
+    const snapshots = store.get(snapshotList(key))
+    return () => ({
+        version: project.storageRevision ?? project.metadata.updatedAt,
+        drafts: Object.fromEntries(drafts.keys.result.map((entry, index) =>
+            [(entry as [string, ...WritingKey, string])[3], drafts.values.result[index]])),
+        history: [submissions.result, rounds.result, snapshots.result],
+    })
+}
+
+async function recoveryHash(state?: ReturnType<ReturnType<typeof recoveryStateReader>>) {
+    if (!state) return undefined
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(state)))
+    return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
+}
 
 export async function readRecoveryBaseline(database: IDBDatabase, workspace: string) {
     const transaction = database.transaction(storeName)
     const store = transaction.objectStore(storeName)
     const request = store.get(workspace)
-    let readState: (() => { version: string; drafts: WritingDrafts; history: unknown }) | undefined
+    let readState: ReturnType<typeof recoveryStateReader> | undefined
     request.onsuccess = () => {
         const project = request.result as ProjectFileSystem | undefined
         if (!project) return
-        const key: WritingKey = [workspace, project.metadata.createdAt]
-        const drafts = readDraftRecords(store, key)
-        const submissions = store.getAll(historyRange('submission-info', key))
-        const rounds = store.getAll(historyRange('revision-round', key))
-        const snapshots = store.get(snapshotList(key))
-        readState = () => ({
-            version: project.storageRevision ?? project.metadata.updatedAt,
-            drafts: Object.fromEntries(drafts.keys.result.map((entry, index) => [(entry as [string, ...WritingKey, string])[3], drafts.values.result[index]])),
-            history: [submissions.result, rounds.result, snapshots.result],
-        })
+        readState = recoveryStateReader(store, workspace, project)
     }
     const receipt = store.get(['recovery-receipt', workspace])
     await complete(transaction)
     const state = readState?.()
-    const digest = state && await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(state)))
-    const baseline = digest ? Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('') : undefined
+    const baseline = await recoveryHash(state)
     return { baseline, version: state?.version, drafts: state?.drafts ?? {}, receipt: receipt.result as RecoveryReceipt | undefined }
+}
+
+export async function readLibraryBackup(database: IDBDatabase, id: string) {
+    const transaction = database.transaction(storeName)
+    const store = transaction.objectStore(storeName)
+    const workspace = libraryStorageKey(id)
+    const entry = store.get(libraryEntry(id))
+    const saved = store.get(workspace)
+    let read: (() => { project: ProjectFileSystem; writing: PortableWritingState; history: PortableProjectHistory;
+        state: ReturnType<ReturnType<typeof recoveryStateReader>> }) | undefined
+    saved.onsuccess = () => {
+        const project = saved.result as ProjectFileSystem | undefined
+        if (!entry.result || !project) return
+        const key: WritingKey = [workspace, project.metadata.createdAt]
+        const getState = recoveryStateReader(store, workspace, project)
+        const getHistory = backupHistoryReader(store, key, { publication: true, snapshots: true, ai: false })
+        const view = store.get(['view', ...key])
+        read = () => {
+            const state = getState()
+            return { project, state, writing: { drafts: state.drafts, view: view.result }, history: getHistory() }
+        }
+    }
+    await complete(transaction)
+    const snapshot = read?.()
+    if (!snapshot) throw new Error('This project is no longer available for backup.')
+    const { state, ...contents } = snapshot
+    return { ...contents, baseline: await recoveryHash(state) }
 }
 
 export async function recordProjectBackup(database: IDBDatabase, workspace: string, receipt: RecoveryReceipt) {
     const transaction = database.transaction(storeName, 'readwrite')
-    transaction.objectStore(storeName).put(receipt, ['recovery-receipt', workspace])
+    const store = transaction.objectStore(storeName)
+    const project = store.getKey(workspace)
+    project.onsuccess = () => { if (project.result) store.put(receipt, ['recovery-receipt', workspace]) }
     await complete(transaction)
+    if (!project.result) throw new Error('This project is no longer available.')
+    announceLibraryChange()
 }
 
 export async function listLibraryProjects(database: IDBDatabase): Promise<LibraryProject[]> {
@@ -579,7 +638,7 @@ export async function listLibraryProjects(database: IDBDatabase): Promise<Librar
             const request = store.get(libraryStorageKey(entry.id))
             request.onsuccess = () => {
                 const project = request.result as ProjectFileSystem | undefined
-                if (project) projects.push({ ...entry, name: project.metadata.projectName })
+                if (project) projects.push({ ...entry, name: project.metadata.projectName, templateOrigin: project.metadata.templateOrigin })
             }
         }
     }
@@ -595,7 +654,8 @@ export async function addLibraryProject(database: IDBDatabase, project: ProjectF
     store.add(entry, libraryEntry(entry.id))
     storeImportedProject(store, [libraryStorageKey(entry.id), project.metadata.createdAt], project, writing, history)
     await complete(transaction)
-    return { ...entry, name: project.metadata.projectName }
+    announceLibraryChange()
+    return { ...entry, name: project.metadata.projectName, templateOrigin: project.metadata.templateOrigin }
 }
 
 export async function updateLibraryProject(database: IDBDatabase, id: string,
@@ -625,6 +685,36 @@ export async function updateLibraryProject(database: IDBDatabase, id: string,
     }
     await complete(transaction)
     if (!updated) throw new Error('This project is no longer available.')
+    announceLibraryChange()
+}
+
+export async function deleteTrashedLibraryProject(database: IDBDatabase, id: string) {
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    const store = transaction.objectStore(storeName)
+    const entry = libraryEntry(id)
+    const workspace = libraryStorageKey(id)
+    const record = store.get(entry)
+    let deleted = false
+    record.onsuccess = () => {
+        if ((record.result as LibraryEntry | undefined)?.state !== 'trash') return
+        store.delete(entry)
+        store.delete(workspace)
+        // Workspace-scoped compound keys include drafts, assets for archived submissions, and AI history.
+        // Match the workspace across manuscript identities so older restored copies are also removed.
+        const keys = store.openKeyCursor(IDBKeyRange.lowerBound([]))
+        keys.onsuccess = () => {
+            const cursor = keys.result
+            if (!cursor) return
+            if (Array.isArray(cursor.key) && cursor.key[0] !== 'project-library' && cursor.key[1] === workspace) {
+                store.delete(cursor.key)
+            }
+            cursor.continue()
+        }
+        deleted = true
+    }
+    await complete(transaction)
+    if (!deleted) throw new Error('This project is no longer in Trash.')
+    announceLibraryChange()
 }
 
 export async function restoreProjectBackup(database: IDBDatabase, current: WritingKey, project: ProjectFileSystem,

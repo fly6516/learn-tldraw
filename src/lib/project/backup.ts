@@ -13,6 +13,10 @@ const format = 'research-canvas'
 export const projectBackupExtension = '.research-canvas'
 const manifestName = 'project.json'
 
+export function projectBackupFilename(projectName: string) {
+  return (projectName.replace(/[<>:"/\\|?*]/g, '_').trim() || 'Research Project') + projectBackupExtension
+}
+
 const fileEntry = z.object({
   path: z.string().min(1),
   name: z.string().min(1),

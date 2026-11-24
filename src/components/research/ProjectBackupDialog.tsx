@@ -6,8 +6,9 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
 import {
-  decodeProjectBackup, encodeProjectBackup, projectBackupExtension,
+  decodeProjectBackup, encodeProjectBackup, projectBackupExtension, projectBackupFilename,
 } from '@/lib/project/backup'
+import { downloadFile } from '@/lib/export/export-actions'
 import type { BackupHistorySelection, PortableProjectHistory } from '@/lib/project/backup-history'
 import type { RecoveryReceipt } from '@/lib/project/project-library'
 import type { ResearchCanvas } from '@/lib/project/research-graph'
@@ -64,15 +65,7 @@ export function ProjectBackupDialog({ canvas, project, writing, recovery = false
       const draftsIncluded = (workingOnly || includeDrafts) && writing
       const backup = await encodeProjectBackup(canvas, project, draftsIncluded || undefined, history)
       await decodeProjectBackup(backup)
-      const url = URL.createObjectURL(backup)
-      const link = document.createElement('a')
-      link.href = url
-      const name = project.metadata.projectName.replace(/[<>:"/\\|?*]/g, '_').trim()
-      link.download = (name || 'Research Project') + projectBackupExtension
-      document.body.appendChild(link)
-      link.click()
-      link.remove()
-      setTimeout(() => URL.revokeObjectURL(url), 1000)
+      downloadFile(backup, projectBackupFilename(project.metadata.projectName))
       setMessage('Backup validated and sent to the browser for download.')
       if (onExport) {
         const scope = ['files and Canvas', draftsIncluded && 'local drafts', history?.publication && 'submissions and revisions',

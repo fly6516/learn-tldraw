@@ -25,7 +25,7 @@ export function RightToolPanel({ id, title, open, expanded, onResize, layout, on
 )) {
   const layoutAction = layout === 'docked' ? 'Float panel' : 'Dock panel'
   return <aside id={id} aria-label={title} hidden={!open}
-    className={`flex min-h-0 min-w-0 shrink-0 flex-col overflow-hidden bg-background
+    className={`flex min-h-0 min-w-0 shrink-0 flex-col overflow-hidden bg-workbench-panel
       ${layout ? '@container size-full' : `absolute inset-y-0 right-0 z-20 border-l shadow-lg xl:relative xl:z-auto xl:shadow-none
         ${expanded ? 'w-full sm:w-[min(100%,36rem)] xl:w-[clamp(28rem,33vw,36rem)]' : 'w-[min(90%,24rem)] xl:w-[clamp(19rem,24vw,26rem)]'}`}`}
     style={open ? undefined : { display: 'none' }}

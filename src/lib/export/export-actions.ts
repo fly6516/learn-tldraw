@@ -11,9 +11,9 @@ import { exportSourceArchive } from '@/lib/project/source-archive'
 /**
  * Download a file in the browser
  */
-export function downloadFile(content: string, filename: string, mimeType: string = 'text/plain'): void {
+export function downloadFile(content: string | Blob, filename: string, mimeType: string = 'text/plain'): void {
     // Create a blob from the content
-    const blob = new Blob([content], { type: mimeType })
+    const blob = typeof content === 'string' ? new Blob([content], { type: mimeType }) : content
 
     // Create a temporary URL for the blob
     const url = URL.createObjectURL(blob)
@@ -27,7 +27,7 @@ export function downloadFile(content: string, filename: string, mimeType: string
 
     // Cleanup
     document.body.removeChild(link)
-    URL.revokeObjectURL(url)
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
 export function generateProjectSource(page: ResearchPage, fileSystem: ProjectFileSystem,

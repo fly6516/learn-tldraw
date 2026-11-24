@@ -3,6 +3,20 @@
 
 @custom-variant dark (&:is(.dark *));
 
+@theme {
+  --color-workbench-ink: #252035;
+  --color-workbench-toolbar: #ffffff;
+  --color-workbench-explorer: #f6f4fa;
+  --color-workbench-panel: #faf9fd;
+  --color-workbench-canvas: #f8f7fb;
+  --color-workbench-line: #e3dfed;
+  --color-workbench-selection: #f2edfc;
+  --color-workbench-selection-strong: #ebe2fa;
+  --color-workbench-accent: #5a3bc0;
+  --color-workbench-accent-hover: #472a9f;
+  --color-workbench-muted: #625975;
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -41,6 +55,23 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+}
+
+.research-theme,
+body:has(main.research-theme) {
+  --background: var(--color-workbench-toolbar);
+  --foreground: var(--color-workbench-ink);
+  --muted: var(--color-workbench-panel);
+  --muted-foreground: var(--color-workbench-muted);
+  --border: var(--color-workbench-line);
+  --input: var(--color-workbench-line);
+  --primary: var(--color-workbench-accent);
+  --primary-foreground: white;
+  --secondary: var(--color-workbench-selection-strong);
+  --secondary-foreground: var(--color-workbench-ink);
+  --accent: var(--color-workbench-selection);
+  --accent-foreground: var(--color-workbench-ink);
+  --ring: var(--color-workbench-accent);
 }
 
 :root {

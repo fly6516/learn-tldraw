@@ -119,7 +119,7 @@ export function SyncedPdfPreview({ url, page, onPage, regions, target, onLocate 
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex flex-wrap items-center justify-between gap-1 border-b border-slate-200 bg-white px-2 py-1">
+      <div className="flex flex-wrap items-center justify-between gap-1 border-b border-workbench-line bg-workbench-panel px-2 py-1">
         <div className="flex items-center gap-1">
           <Button size="icon-sm" variant="ghost" aria-label="Previous PDF page" disabled={page <= 1 || loading} onClick={() => changePage(page - 1)}><ArrowLeft /></Button>
           <span className="min-w-12 text-center text-xs tabular-nums text-slate-600" aria-live="polite">Page {page} of {total || '–'}</span>
@@ -131,7 +131,7 @@ export function SyncedPdfPreview({ url, page, onPage, regions, target, onLocate 
           <Button size="icon-sm" variant="ghost" aria-label="Zoom in PDF" disabled={zoom >= 2} onClick={() => setZoom(value => value + 0.25)}><Plus /></Button>
         </div>
       </div>
-      <div ref={scroll} className="relative min-h-0 flex-1 overflow-auto bg-slate-200 p-3">
+      <div ref={scroll} className="relative min-h-0 flex-1 overflow-auto bg-workbench-explorer p-3">
         {(error || loading) && <p role={error ? 'alert' : 'status'} className="p-3 text-sm text-slate-600">{error || 'Loading PDF page…'}</p>}
         <div aria-label={`Compiled PDF, page ${page}`} role="region" className="relative mx-auto bg-white shadow-sm"
           style={{ width: viewport?.width ?? 0, height: viewport?.height ?? 0, '--total-scale-factor': viewport?.scale ?? 1 } as CSSProperties}
@@ -144,7 +144,7 @@ export function SyncedPdfPreview({ url, page, onPage, regions, target, onLocate 
           }}>
           <canvas ref={canvas} className="absolute inset-0 size-full" aria-hidden />
           <div ref={text} className={`${styles.text} ${regions.length ? 'cursor-crosshair' : ''}`} />
-          {box && <div ref={highlight} aria-hidden className="pointer-events-none absolute z-10 rounded-sm border border-indigo-600 bg-indigo-400/25"
+          {box && <div ref={highlight} aria-hidden className="pointer-events-none absolute z-10 rounded-sm border border-workbench-accent bg-workbench-accent/20"
             style={{ left: Math.min(box[0], box[2]), top: Math.min(box[1], box[3]), width: Math.abs(box[2] - box[0]), height: Math.abs(box[3] - box[1]) }} />}
         </div>
       </div>

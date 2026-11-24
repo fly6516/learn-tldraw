@@ -1,5 +1,8 @@
+import type { ProjectFileSystem } from './types'
+
 export const legacyStorageKey = 'research-flow-v2'
 export const legacyProjectId = 'legacy'
+export const libraryChangesChannel = 'research-canvas-project-library'
 
 export type LibraryProjectState = 'active' | 'archived' | 'trash'
 export type LibraryView = 'canvas' | 'write'
@@ -12,6 +15,7 @@ export type LibraryProject = {
   state: LibraryProjectState
   view: LibraryView
   lastOpenedAt: string
+  templateOrigin?: ProjectFileSystem['metadata']['templateOrigin']
 }
 
 export function libraryStorageKey(id: string) {

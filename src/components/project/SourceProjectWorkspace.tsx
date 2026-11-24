@@ -90,10 +90,10 @@ function Files({ nodes, selected, main, onSelect, dirty, sourcePaths, onSetMain,
             <div className="flex min-w-0 items-center gap-0.5">
             <button type="button" title={node.path} disabled={!sourcePaths.has(node.path)} aria-current={selected === node.path ? 'true' : undefined}
               onClick={() => onSelect(node.path)} className={`flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-left disabled:opacity-45 ${
-                selected === node.path ? 'bg-indigo-100 font-semibold text-indigo-950' : 'text-slate-700 hover:bg-white'
+                selected === node.path ? 'bg-indigo-100 font-semibold text-workbench-ink' : 'text-slate-700 hover:bg-white'
               }`}>
               <FileText className="size-3.5 shrink-0" /><span className="truncate">{node.name}</span>
-              {node.path === main && <span className="ml-auto rounded border border-indigo-200 bg-white px-1 text-[10px] text-indigo-700">Main</span>}
+              {node.path === main && <span className="ml-auto rounded border border-indigo-200 bg-white px-1 text-[10px] text-workbench-accent">Main</span>}
               {Object.hasOwn(dirty, node.path) && <span aria-label="Unsaved" className="size-1.5 shrink-0 rounded-full bg-amber-500" />}
             </button>
             {(onMove || (/\.tex$/i.test(node.path) && sourcePaths.has(node.path))) && (
@@ -970,15 +970,15 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
           : 'All changes saved to project'
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#f6f8fc] text-slate-900">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-workbench-canvas text-workbench-ink">
       {actions && createPortal(<>
         <div className="mr-auto min-w-0 text-xs md:mr-0 md:text-right" title={main}>
-          <span className="block text-slate-500">Main file</span>
+          <span className="block text-workbench-muted">Main file</span>
           <span className="block truncate font-mono font-medium min-[385px]:hidden">{main.split('/').at(-1) || 'None'}</span>
           <span className="hidden max-w-56 truncate font-mono font-medium min-[385px]:block">{main || 'None'}</span>
         </div>
         <Button size="sm" variant="outline" onClick={save} disabled={!dirty || locked}><Save /> {writing ? 'Saving…' : 'Save'}</Button>
-        <Button size="sm" className="bg-indigo-700 text-white hover:bg-indigo-800" onClick={() => void compile()} disabled={!main || locked}>
+        <Button size="sm" className="bg-workbench-accent text-white hover:bg-workbench-accent-hover" onClick={() => void compile()} disabled={!main || locked}>
           <Play /> {busy ? 'Compiling…' : 'Compile PDF'}
         </Button>
         <Button size="sm" variant="ghost" aria-label="Compile settings" title="Compile settings" disabled={!main || locked}
@@ -1005,20 +1005,20 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         <Button size="sm" variant="outline" onClick={onRecoveryBackup}>Back up working drafts</Button>
         {journal.failed.size > 0 && <Button size="sm" variant="ghost" disabled={!!journal.pending} onClick={() => void journal.retryFailed()}>Retry draft save</Button>}
       </div>}
-      {returnToAi && !aiOpen && <div className="flex shrink-0 items-center border-b bg-white px-2 py-1">
+      {returnToAi && !aiOpen && <div className="flex shrink-0 items-center border-b bg-workbench-panel px-2 py-1">
         <Button type="button" size="sm" variant="outline" onClick={resumeAi}>Back to Writing AI</Button>
       </div>}
-      {resumeManuscriptReview && <div className="flex shrink-0 items-center border-b bg-white px-2 py-1">
+      {resumeManuscriptReview && <div className="flex shrink-0 items-center border-b bg-workbench-panel px-2 py-1">
         <Button type="button" size="sm" variant="outline" onClick={() => {
           setResumeManuscriptReview(undefined)
           setAiOpen(true)
           resumeManuscriptReview()
         }}>Back to manuscript review</Button>
       </div>}
-      <div className="flex shrink-0 items-center gap-2 border-b bg-white px-2 py-1.5 lg:hidden">
+      <div className="flex shrink-0 items-center gap-2 border-b bg-workbench-panel px-2 py-1.5 lg:hidden">
         <Button ref={fileToggle} size="sm" variant="outline" aria-expanded={mobileFiles} aria-controls="writing-files"
           onClick={() => { if (!aiDocked && !wideTools) setAiOpen(false); setMobileFiles(open => !open) }}><PanelLeft /> Files</Button>
-        <div className="ml-auto flex gap-1 rounded-lg bg-slate-100 p-0.5" aria-label="Writing pane" role="group">
+        <div className="ml-auto flex gap-1 rounded-lg bg-workbench-explorer p-0.5" aria-label="Writing pane" role="group">
           {(['source', 'pdf'] as const).map(pane => <Button key={pane} size="sm"
             variant={narrowView === pane ? 'outline' : 'ghost'} aria-pressed={narrowView === pane}
             onClick={() => { setNarrowView(pane); setMobileFiles(false); if (!aiDocked && !wideTools) setAiOpen(false) }}>{pane === 'source' ? 'Source' : 'PDF'}</Button>)}
@@ -1034,7 +1034,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
               ? 'max-lg:absolute max-lg:inset-y-0 max-lg:left-0 max-lg:z-20 max-lg:w-64 max-lg:max-w-[85%] max-lg:!flex-none max-lg:shadow-lg'
               : 'hidden lg:block'}>
             <aside id="writing-files" aria-label="Project navigation"
-              className={'flex h-full min-h-0 flex-col overflow-hidden bg-slate-50 text-sm ' + (desktopFiles ? '' : 'lg:hidden')}
+              className={'flex h-full min-h-0 flex-col overflow-hidden bg-workbench-explorer text-sm ' + (desktopFiles ? '' : 'lg:hidden')}
               onKeyDown={event => { if (event.key === 'Escape' && mobileFiles) closeMobileFiles(true) }}>
               <div className="flex shrink-0 flex-wrap items-center gap-1 border-b p-2">
                 {([['files', 'Files'], ['outline', 'Outline'], ['search', 'Search']] as const).map(([tab, label]) => (
@@ -1071,21 +1071,21 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
           <ResizableHandle className="hidden lg:flex" />
           <ResizablePanel id="writing-source" order={2} defaultSize={44} minSize={28}
             className={narrowView === 'source' ? '' : 'hidden lg:block'}>
-            <section aria-label="Source editor" className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-[#fffefc]">
-              <div className="flex min-w-0 shrink-0 items-center gap-2 border-b bg-white px-2 py-1.5 text-xs sm:px-3">
+            <section aria-label="Source editor" className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-white">
+              <div className="flex min-w-0 shrink-0 items-center gap-2 border-b bg-workbench-panel px-2 py-1.5 text-xs sm:px-3">
                 <Button size="icon-sm" variant="ghost" aria-label={desktopFiles ? 'Collapse file navigation' : 'Expand file navigation'}
                   aria-expanded={desktopFiles} aria-controls="writing-files" className="hidden lg:inline-flex"
                   onClick={() => desktopFiles ? navPanel.current?.collapse() : navPanel.current?.expand()}><PanelLeft /></Button>
-                <FileCode2 className="size-4 shrink-0 text-indigo-600" />
+                <FileCode2 className="size-4 shrink-0 text-workbench-accent" />
                 <span className="min-w-0 flex-1 truncate font-medium" title={selected}>{selected || 'Select a source file'}</span>
                 <Button size="sm" variant="outline" disabled={!isTex || !canSync} onClick={showInPdf}
                   title={canSync ? 'Find the editor cursor in the compiled PDF' : 'Compile the current source to enable positioning'}>
                   <LocateFixed /> Show in PDF
                 </Button>
               </div>
-              {currentFile?.type === 'generated' && <div className="flex shrink-0 flex-wrap items-center gap-x-2 border-b border-indigo-100 bg-indigo-50 px-3 py-1 text-xs text-indigo-950">
+              {currentFile?.type === 'generated' && <div className="flex shrink-0 flex-wrap items-center gap-x-2 border-b border-workbench-line bg-workbench-selection px-3 py-1 text-xs text-workbench-ink">
                 Generated from the active canvas page · Read-only
-                <Button variant="link" size="sm" className="h-7 px-1 text-indigo-700" onClick={onOpenCanvas}>Edit in Canvas</Button>
+                <Button variant="link" size="sm" className="h-7 px-1 text-workbench-accent" onClick={onOpenCanvas}>Edit in Canvas</Button>
               </div>}
               <div className="min-h-0 flex-1">
                 {!journal.ready && <p role="status" className="p-3 text-sm">Restoring local drafts…</p>}
@@ -1097,13 +1097,13 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
           <ResizableHandle withHandle className="hidden lg:flex" />
           <ResizablePanel id="writing-pdf" order={3} defaultSize={37} minSize={24}
             className={narrowView === 'pdf' ? '' : 'hidden lg:block'}>
-            <section aria-label="PDF Preview" className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-slate-100">
-              <div className="flex min-w-0 shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 border-b bg-white px-3 py-1.5 text-xs">
-                <h2 className="flex items-center gap-2 font-semibold"><FileText className="size-4 text-indigo-600" /> PDF Preview</h2>
+            <section aria-label="PDF Preview" className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-workbench-canvas">
+              <div className="flex min-w-0 shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 border-b bg-workbench-panel px-3 py-1.5 text-xs">
+                <h2 className="flex items-center gap-2 font-semibold"><FileText className="size-4 text-workbench-accent" /> PDF Preview</h2>
                 {pdfUrl && <Button size="sm" variant="outline" asChild><a href={pdfUrl} download={pdfFilename}><Download /> Download PDF</a></Button>}
               </div>
               {pdfUrl ? <>
-                <div className="shrink-0 border-b bg-white px-3 py-1.5 text-xs">
+                <div className="shrink-0 border-b bg-workbench-panel px-3 py-1.5 text-xs">
               <p className={pdfStale ? 'font-medium text-amber-800' : 'text-slate-600'}>
                 Last successful compile{pdfStale ? ' · Out of date' : ' · Up to date'}
                 {!pdfStale && dirty && !conflicts.length && ' · Includes local drafts'}{busy && ' · Compiling…'}
@@ -1117,7 +1117,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
                   target={pdfStale ? null : pdfTarget} onLocate={showInSource}
                   onPage={changePdfPage} />
               </> : <div className="m-auto max-w-64 p-4 text-center">
-                <FileText className="mx-auto mb-3 size-8 text-indigo-400" />
+                <FileText className="mx-auto mb-3 size-8 text-workbench-muted" />
                 <p role="status" className="text-sm text-slate-600">{busy ? 'Running the LaTeX engine…' : 'Compile the main file to preview your PDF.'}</p>
               </div>}
             </section>
@@ -1125,14 +1125,14 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         </ResizablePanelGroup>
         </ResizablePanel>
         <ResizableHandle withHandle disabled={!aiDocked} aria-label="Resize Writing AI"
-          className={aiDocked ? 'z-10 bg-indigo-200 hover:bg-indigo-500' : 'hidden'} />
+          className={aiDocked ? 'z-10 bg-workbench-selection-strong hover:bg-workbench-accent' : 'hidden'} />
         <ResizablePanel id="writing-ai-pane" order={2} defaultSize={0} minSize={22} maxSize={48} collapsible
           onResize={size => { if (size >= 22) aiWidth.current = size }}
           className={aiDocked ? 'min-w-0 border-l' : aiOpen ? 'absolute inset-y-0 right-0 z-30 w-[min(90%,26rem)] !flex-none border-l shadow-lg' : 'hidden'}>
         <RightToolPanel id="writing-ai" title="Writing AI" open={aiOpen} layout={aiLayout}
           onToggleLayout={() => setAiPlacement(aiLayout === 'docked' ? 'floating' : 'docked')}
           onClose={() => { setAiOpen(false); aiTrigger.current?.focus() }}
-          icon={<Sparkles className="size-4 shrink-0 text-indigo-600" />}>
+          icon={<Sparkles className="size-4 shrink-0 text-workbench-accent" />}>
           {storage && journal.key && <WritingAiWorkbench key={JSON.stringify(journal.key)} storage={storage} projectKey={journal.key}
             project={project} working={workingProject} saved={savedProject} drafts={drafts} selected={selected} main={main} active={active} sourceMoves={sourceMoves}
             disabled={locked || Boolean(conflicts.length)} compiler={aiCompiler} selection={aiSelection} onRevision={() => setRevision({})}
@@ -1152,7 +1152,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         </ResizablePanel>
       </ResizablePanelGroup>
 
-      <section aria-label="Writing tools" className="flex min-h-0 max-h-[42%] shrink-0 flex-col border-t bg-white [@media(max-height:550px)]:max-h-[32%]">
+      <section aria-label="Writing tools" className="flex min-h-0 max-h-[42%] shrink-0 flex-col border-t bg-workbench-panel [@media(max-height:550px)]:max-h-[32%]">
         <div className="flex shrink-0 flex-wrap items-center gap-0.5 px-1.5 py-1 sm:gap-1 sm:px-2">
           {([
             ['problems', 'Problems', CircleAlert], ['references', 'References', BookOpen], ['cross-references', 'Cross-references', Link2],
@@ -1182,7 +1182,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
               {problems.map((problem, index) => <li key={[problem.path, problem.line, index].join(':')}>
                 <button type="button" onClick={() => openFile(problem.path, problem.line, problem.location, true)}
                   disabled={!sourcePaths.has(problem.path)}
-                  className="flex w-full items-start gap-2 rounded-md px-2 py-2 text-left hover:bg-indigo-50 disabled:opacity-60">
+                  className="flex w-full items-start gap-2 rounded-md px-2 py-2 text-left hover:bg-workbench-selection disabled:opacity-60">
                   <CircleAlert aria-hidden className={'mt-0.5 size-4 shrink-0 ' + (problem.severity === 'error' ? 'text-red-600' : 'text-amber-600')} />
                   <span className="sr-only">{problem.severity === 'error' ? 'Compile error' : 'Warning'}</span>
                   <span className="min-w-0"><span className="block break-words text-sm">{problem.message}</span>
@@ -1209,7 +1209,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         </div>
       </section>
 
-      <footer className="flex shrink-0 flex-wrap items-center justify-between gap-x-2 border-t bg-white px-3 py-1 text-xs text-slate-600">
+      <footer className="flex shrink-0 flex-wrap items-center justify-between gap-x-2 border-t bg-workbench-explorer px-3 py-1 text-xs text-workbench-muted">
         <div className="flex items-center gap-2">
           <span role="status" className={dirty ? 'font-medium text-amber-800' : undefined}>
             {draftStatus}

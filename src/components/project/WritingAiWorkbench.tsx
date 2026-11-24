@@ -1092,7 +1092,7 @@ function Conversation(props: WorkbenchProps & {
       <Button size="sm" variant="ghost" disabled={streaming || mutating} onClick={props.onNew}>New</Button>
       <Button size="sm" variant="ghost" disabled={streaming || mutating} onClick={() => setDeleteOpen(true)}>Delete</Button>
     </div>
-    {props.project.metadata.writingSample && <section aria-label="Writing sample" className="shrink-0 space-y-1 border-b bg-indigo-50 p-2 text-xs">
+    {props.project.metadata.writingSample && <section aria-label="Writing sample" className="shrink-0 space-y-1 border-b bg-workbench-selection p-2 text-xs">
       {!manuscript ? <>
         <p>Revise two synthetic chapters, verify the PDF and archive the submission.</p>
         <div className="flex flex-wrap gap-1">
@@ -1199,7 +1199,7 @@ function Conversation(props: WorkbenchProps & {
         const original = run?.revisionOf && messages.find(item => item.role === 'assistant' && item.metadata?.run === run.revisionOf)
         const revisions = runId && messages.filter(item => item.role === 'assistant' && item.metadata && runSnapshots[item.metadata.run]?.revisionOf === runId && editProposal(item))
         return <article key={message.id} id={`writing-ai-message-${message.id}`} aria-label={message.role === 'user' ? 'You' : 'Assistant'}
-          className={message.role === 'user' ? 'rounded-md bg-indigo-50 px-2 py-1.5' : 'space-y-2'}>
+          className={message.role === 'user' ? 'rounded-md bg-workbench-selection px-2 py-1.5' : 'space-y-2'}>
           <p className="mb-1 text-xs font-semibold">{message.role === 'user' ? 'You' : 'Assistant'}</p>
           <ChatToolProgress message={message} />
           {message.role === 'assistant' && run?.context && message.metadata?.modelRecipient && <details className="rounded border px-2 py-1 text-xs">
@@ -1211,7 +1211,7 @@ function Conversation(props: WorkbenchProps & {
           {!proposal && calculations.map(calculation => <CalculationEvidence key={calculation.id}
             calculation={calculation} project={props.working} moves={props.sourceMoves ?? []} revision={run?.pathRevision}
             onLocate={props.onLocate} />)}
-          {runId && editPermission && <section aria-label="Draft permission request" className="space-y-2 rounded border border-indigo-200 p-2 text-xs">
+          {runId && editPermission && <section aria-label="Draft permission request" className="space-y-2 rounded border border-workbench-line p-2 text-xs">
             <h3 className="font-semibold">AI requests permission to edit working drafts</h3>
             <p className="break-words">{editPermission.reason}</p>
             <ul className="max-h-28 list-inside list-disc overflow-auto break-all font-mono">
@@ -1272,7 +1272,7 @@ function Conversation(props: WorkbenchProps & {
           {message.metadata?.actionError && <p role="alert" className="break-words text-xs text-amber-800">{message.metadata.actionError}</p>}
           {!setup && !message.metadata?.actionError && !streaming && revisionSetupRequest(message) && <Button size="sm" variant="ghost"
             onClick={() => void resolveRevisionSetup(message)}>Check revision details</Button>}
-          {runId && setup && <section className="space-y-1 rounded border border-indigo-200 p-2 text-xs" aria-label="Revision setup">
+          {runId && setup && <section className="space-y-1 rounded border border-workbench-line p-2 text-xs" aria-label="Revision setup">
             <h3 className="font-semibold">{setup.kind === 'round' ? setup.name : setup.roundName}</h3>
             {setup.kind === 'round' ? <p>Baseline · {setup.baseline}</p>
               : <><p className="break-all">{setup.path}</p><blockquote className="whitespace-pre-wrap break-words">{setup.text}</blockquote></>}
@@ -1280,7 +1280,7 @@ function Conversation(props: WorkbenchProps & {
               : <Button size="sm" disabled={props.disabled || mutating || streaming}
                 onClick={() => void saveRevisionSetup(runId, setup)}>{setup.kind === 'round' ? 'Confirm revision round' : 'Confirm reviewer comment'}</Button>}
           </section>}
-          {runId && reply && run?.reply && <section className="space-y-1 rounded border border-indigo-200 p-2 text-xs" aria-label="Reviewer reply proposal">
+          {runId && reply && run?.reply && <section className="space-y-1 rounded border border-workbench-line p-2 text-xs" aria-label="Reviewer reply proposal">
             <h3 className="font-semibold">{run.reply.roundName} · Reviewer reply</h3>
             <blockquote className="whitespace-pre-wrap break-words border-l-2 pl-2">{run.reply.commentText}</blockquote>
             <WritingMarkdown text={reply.draft} />
@@ -1300,10 +1300,10 @@ function Conversation(props: WorkbenchProps & {
           {!letter && message.metadata?.letter && <Button size="sm" variant="outline" disabled={mutating || streaming}
             onClick={() => void runLocalCommand('letter', message.metadata!.letter!)}>Reopen response letter</Button>}
           {runId && message.role === 'assistant' && message.metadata?.complete && !streaming && (proposal || message.metadata.evidence?.length || steps?.length) ? (
-            <section aria-label="AI task record" className="space-y-2 rounded-md border border-indigo-200 bg-white p-2">
+            <section aria-label="AI task record" className="space-y-2 rounded-md border border-workbench-line bg-white p-2">
               <h3 className="text-xs font-semibold">AI task record</h3>
-              {original && <a className="text-xs text-indigo-700 underline" href={`#writing-ai-message-${original.id}`}>Original proposal and compiler result</a>}
-              {revisions && revisions.map((item, index) => <a key={item.id} className="block text-xs text-indigo-700 underline"
+              {original && <a className="text-xs text-workbench-accent underline" href={`#writing-ai-message-${original.id}`}>Original proposal and compiler result</a>}
+              {revisions && revisions.map((item, index) => <a key={item.id} className="block text-xs text-workbench-accent underline"
                 href={`#writing-ai-message-${item.id}`}>Revised proposal {index + 1}</a>)}
               {proposal && <p className="text-xs text-slate-600">
                 Proposed {proposal.edits.length} {proposal.edits.length === 1 ? 'change' : 'changes'} across {new Set(proposal.edits.map(edit => edit.path)).size} {new Set(proposal.edits.map(edit => edit.path)).size === 1 ? 'file' : 'files'}.
@@ -1419,7 +1419,7 @@ function Conversation(props: WorkbenchProps & {
         {!manuscript && !streaming && <Button size="sm" variant="outline" type="button" disabled={!prompt.trim() || props.disabled || mutating || contextApproval.busy}
           onClick={() => submit(prompt, undefined, undefined, 'plan')}>Plan writing task</Button>}
       </div>
-      {permission && <div className="flex items-center justify-between gap-2 rounded border border-indigo-200 px-2 text-xs">
+      {permission && <div className="flex items-center justify-between gap-2 rounded border border-workbench-line px-2 text-xs">
         <span role="status" className="min-w-0 break-words">{permission === 'all' ? 'Full draft access · This project and conversation'
           : `Automatic edits · ${permission.length} approved ${permission.length === 1 ? 'file' : 'files'}`}</span>
         <Button type="button" size="sm" variant="ghost" onClick={() => {
@@ -1512,7 +1512,7 @@ function EvidenceList({ evidence, project, moves, revision, onLocate, onRefresh 
         const location = locations[index]
         return <li key={`${item.kind}:${item.path}:${item.line}`} className="break-all py-1">
           {location ? <button type="button" onClick={() => onLocate(location.path, location.line)}
-            className="block w-full text-left text-indigo-700 hover:underline">{location.path}:{location.line} · {item.text}</button>
+            className="block w-full text-left text-workbench-accent hover:underline">{location.path}:{location.line} · {item.text}</button>
             : <><p>{item.path}:{item.line} · {item.text}</p>
               <button type="button" className="text-amber-800 underline" onClick={() => onRefresh(item.path)}>
                 Location unverified. Find fresh evidence
@@ -1624,7 +1624,7 @@ function Proposal({ proposal, run, state, disabled, onAction, project, input, ve
     .map(issue => issue.key)))
   const claims = (proposal.claims ?? []).filter(claim => changes.some(edit => edit.path === claim.path
     && edit.after.includes(claim.quote) && !edit.before.includes(claim.quote))).map(claim => ({ claim, revision: run.pathRevision ?? 0 }))
-  return <section aria-label="Source change proposal" className="space-y-2 rounded-md border border-indigo-200 p-2">
+  return <section aria-label="Source change proposal" className="space-y-2 rounded-md border border-workbench-line p-2">
     <p className="font-medium">Proposed source changes</p>
     <p className="break-words text-xs">{proposal.summary}</p>
     <ClaimEvidence claims={claims} project={project} moves={sourceMoves ?? []} onLocate={onLocate} />
@@ -1684,7 +1684,7 @@ function Proposal({ proposal, run, state, disabled, onAction, project, input, ve
         <p>{issue.severity === 'error' ? 'Error' : 'Warning'} · {issue.message}</p>
         {issue.sourceLine && !stale && !pendingBaseline
           ? <button type="button" onClick={() => onLocate(issue.path, applied ? issue.line : issue.sourceLine!)}
-            className="break-all text-left text-indigo-700 underline" title="Open the corresponding line in the current source">
+            className="break-all text-left text-workbench-accent underline" title="Open the corresponding line in the current source">
             {issue.path}:{issue.line}
           </button> : <p className="break-all text-slate-600">{issue.path}:{issue.line}</p>}
       </div>)}

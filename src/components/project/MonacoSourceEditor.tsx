@@ -23,7 +23,11 @@ monaco.editor.defineTheme('research-paper', {
   rules: [{ token: 'keyword', foreground: '5A3BC0' }, { token: 'annotation', foreground: 'A13869' },
     { token: 'number', foreground: '086E61' }, { token: 'comment', foreground: '596E7C' },
     { token: 'string', foreground: '096653' }],
-  colors: { 'editor.background': '#FFFEFC', 'editorLineNumber.foreground': '#687789', 'editor.lineHighlightBackground': '#F0F4FB' },
+  colors: {
+    'editor.background': '#FFFFFF', 'editorLineNumber.foreground': '#625975',
+    'editor.lineHighlightBackground': '#FAF9FD', 'editor.selectionBackground': '#EBE2FA',
+    'editor.inactiveSelectionBackground': '#F2EDFC', 'editorCursor.foreground': '#5A3BC0',
+  },
 })
 monaco.languages.register({ id: 'research-tex' })
 monaco.languages.setMonarchTokensProvider('research-tex', {

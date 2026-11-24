@@ -514,7 +514,7 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
           </DropdownMenuContent>
         </DropdownMenu>, actions,
       )}
-      <div className="shrink-0 border-b bg-background p-2">
+      <div className="shrink-0 border-b bg-workbench-panel p-2">
         <div role="group" aria-label="Canvas tools" className="flex flex-wrap items-center gap-2">
           <div className="flex gap-0.5 rounded-lg bg-muted p-0.5">
             {canvasTools.map(([mode, label, shortcut, Icon]) => (
@@ -547,7 +547,7 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
       <div className="relative flex min-h-0 flex-1">
         <div id="research-flow" className="relative min-h-24 min-w-0 flex-1 sm:min-h-40" ref={canvasElement} tabIndex={-1}>
           <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} defaultEdgeOptions={edgeDefaults}
-            className="[color-scheme:light] [--xy-background-color:var(--muted)] [--xy-edge-stroke:var(--muted-foreground)] [--xy-edge-stroke-width:2] dark:[color-scheme:dark]"
+            className="[color-scheme:light] [--xy-background-color:var(--color-workbench-canvas)] [--xy-edge-stroke:var(--muted-foreground)] [--xy-edge-stroke-width:2] dark:[color-scheme:dark]"
             defaultMarkerColor={null}
             onInit={setFlow} onNodesChange={changeNodes} onEdgesChange={changeEdges} onConnect={connect}
             onNodeDragStart={overview ? () => { overviewDrag.current = true } : undefined}
