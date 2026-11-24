@@ -128,7 +128,9 @@ export async function POST(request: Request) {
     return Response.json({ error: 'Could not prepare the project or read the compiled PDF.' }, { status: 500 })
   } finally {
     try {
-      if (work) await rm(work, { recursive: true, force: true })
+      if (work) await rm(work, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }).catch(cause => {
+        console.warn('Could not clean the temporary LaTeX files:', (cause as NodeJS.ErrnoException).code)
+      })
     } finally {
       release()
     }
