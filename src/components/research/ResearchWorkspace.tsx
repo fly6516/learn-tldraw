@@ -41,7 +41,7 @@ import { materialKind } from '@/lib/project/canvas-card-kinds'
 import type { BibliographyEntry, ReferenceLocation } from '@/lib/project/references'
 import { anchorLatexBlock, findSourceLinkIssues, repairSourceLink, type CanvasSourceCatalog } from '@/lib/project/canvas-source-links'
 import { SourceLinksDialog } from './SourceLinksDialog'
-import { readBackupHistory, readProject, readRecoveryBaseline, recordProjectBackup, restoreProjectBackup } from '@/lib/project/storage'
+import { readBackupHistory, readProject, readProjectTemplateReleases, readRecoveryBaseline, recordProjectBackup, restoreProjectBackup } from '@/lib/project/storage'
 import type { PortableProjectHistory } from '@/lib/project/backup-history'
 import type { LibraryView } from '@/lib/project/project-library'
 import { sameDraft, type PortableWritingState } from '@/lib/project/writing-drafts'
@@ -796,6 +796,7 @@ function Workspace({ sample, initialProject, notice, projectListHref, onViewChan
         }} />
       {backupOpen && <ProjectBackupDialog canvas={canvas} project={fileSystem} writing={backupOpen.writing} recovery={backupOpen.recovery}
         readHistory={storage && storageKey ? selection => readBackupHistory(storage, [storageKey, fileSystem.metadata.createdAt], selection) : undefined}
+        readTemplateReleases={storage && storageKey ? () => readProjectTemplateReleases(storage, [storageKey, fileSystem.metadata.createdAt], fileSystem) : undefined}
         onExport={storage && storageKey ? receipt => recordProjectBackup(storage, storageKey, receipt) : undefined}
         readBaseline={storage && storageKey ? async () => {
           if (hasUnstoredProject() || !backupOpen.writing) return

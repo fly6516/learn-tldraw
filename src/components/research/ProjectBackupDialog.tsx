@@ -22,6 +22,7 @@ interface ProjectBackupDialogProps {
   writing?: PortableWritingState
   recovery?: boolean
   readHistory?: (selection: BackupHistorySelection) => Promise<PortableProjectHistory>
+  readTemplateReleases?: () => Promise<PortableProjectHistory['templateReleases']>
   readBaseline?: () => Promise<string | undefined>
   onExport?: (receipt: RecoveryReceipt) => Promise<void>
   onRestore: (project: ProjectFileSystem, writing?: PortableWritingState, history?: PortableProjectHistory) => Promise<boolean>
@@ -29,7 +30,7 @@ interface ProjectBackupDialogProps {
   onClose: () => void
 }
 
-export function ProjectBackupDialog({ canvas, project, writing, recovery = false, readHistory, readBaseline, onExport, onRestore, onImportCopy, onClose }: ProjectBackupDialogProps) {
+export function ProjectBackupDialog({ canvas, project, writing, recovery = false, readHistory, readTemplateReleases, readBaseline, onExport, onRestore, onImportCopy, onClose }: ProjectBackupDialogProps) {
   const [pending, setPending] = useState<Awaited<ReturnType<typeof decodeProjectBackup>>>()
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
@@ -62,6 +63,8 @@ export function ProjectBackupDialog({ canvas, project, writing, recovery = false
     try {
       const baseline = complete && !workingOnly ? await readBaseline?.().catch(() => undefined) : undefined
       const history = !workingOnly && Object.values(historyOptions).some(Boolean) ? await readHistory?.(historyOptions) : undefined
+      const templateReleases = complete && !workingOnly ? await readTemplateReleases?.() : undefined
+      if (templateReleases?.length && history) history.templateReleases = templateReleases
       const draftsIncluded = (workingOnly || includeDrafts) && writing
       const backup = await encodeProjectBackup(canvas, project, draftsIncluded || undefined, history)
       await decodeProjectBackup(backup)
@@ -69,7 +72,7 @@ export function ProjectBackupDialog({ canvas, project, writing, recovery = false
       setMessage('Backup validated and sent to the browser for download.')
       if (onExport) {
         const scope = ['files and Canvas', draftsIncluded && 'local drafts', history?.publication && 'submissions and revisions',
-          history?.snapshots && 'snapshots', history?.ai && 'AI history'].filter(Boolean).join(', ')
+          history?.snapshots && 'snapshots', history?.templateReleases?.length && 'bound official templates', history?.ai && 'AI history'].filter(Boolean).join(', ')
         const current = baseline && await readBaseline?.().catch(() => undefined)
         try { await onExport({ exportedAt: new Date().toISOString(), scope, baseline: current === baseline ? baseline : undefined }) }
         catch { setMessage('Backup validated and sent for download. The export could not be recorded in local storage.') }

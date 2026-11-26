@@ -1,11 +1,11 @@
-import { expect, test, type Browser, type Locator, type Page } from '@playwright/test'
+import { expect, firefox, test, type Browser, type Locator, type Page } from '@playwright/test'
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import JSZip from 'jszip'
-import { encodeProjectBackup } from '../../src/lib/project/backup'
+import { decodeProjectBackup, encodeProjectBackup } from '../../src/lib/project/backup'
 import { importSourceArchive } from '../../src/lib/project/source-archive'
 import { emptyCanvas } from '../../src/lib/project/research-graph'
 import { zjuAttachmentTemplate as id, njuptAttachmentTemplate, catalogWordAttachments } from '../../src/lib/project/word-release-attachments'
@@ -27,7 +27,7 @@ async function download(page: Page, button: Locator, path: string) {
 }
 
 async function restoreOffline(browser: Browser, market: string, packagePath: string, manifestDigest: string) {
-  const context = await browser.newContext({ baseURL: process.env.RESEARCH_TRIAL_E2E_URL })
+  const context = await browser.newContext({ baseURL: test.info().project.use.baseURL })
   try {
     const page = await context.newPage()
     await page.goto(market)
@@ -42,10 +42,122 @@ async function restoreOffline(browser: Browser, market: string, packagePath: str
   }
 }
 
+async function recordWordAcceptance(page: Page, market: string, generated: { form: Locator; path: string; sha256: string },
+  output: string, school: string, manifestSha256: string) {
+  const file = join(output, `${school}-word-final-${process.pid}.docx`)
+  await copyFile(generated.path, file)
+  const { stdout } = await exec('/usr/bin/osascript', [join(__dirname, 'fixtures/submission-docx-word.applescript'), file], { timeout: 120_000 })
+  const version = stdout.match(/Saved and reopened in Microsoft Word (\S+) with/)?.[1]
+  if (!version) throw new Error('Microsoft Word did not report a successful save and reopen.')
+  await writeFile(join(output, 'word.log'), stdout)
+  await copyFile(file, join(output, 'word-final.docx'))
+  await generated.form.getByLabel('附上 Word 保存的最终文件（选填）').setInputFiles(file)
+  await expect(generated.form.getByText(basename(file), { exact: false })).toBeVisible()
+  await generated.form.getByLabel('通过实机验收的 Microsoft Word 版本（选填）').fill(version)
+  await generated.form.getByLabel('交付归档名称').fill('新版 Word 实机定稿')
+  await generated.form.getByRole('button', { name: '归档 DOCX 交付' }).click()
+  await expect(generated.form.getByText('已归档 新版 Word 实机定稿')).toBeVisible()
+  await expect(generated.form.getByText(`已通过 Microsoft Word ${version} 实机验收`, { exact: false })).toBeVisible()
+  const finalSha256 = digest(await readFile(file))
+  const review = await page.context().newPage()
+  try {
+    await review.goto(market)
+    await review.getByText('管理官方版本', { exact: true }).click()
+    await expect(review.getByText(`Microsoft Word ${version} 实机验收通过 · 定稿 SHA-256 ${finalSha256}`)).toBeVisible()
+    const path = join(output, 'word-accepted-release.zip')
+    await download(review, review.getByRole('button', { name: '导出所选版本' }), path)
+    const archive = await JSZip.loadAsync(await readFile(path))
+    const record = JSON.parse(await archive.file('release.json')!.async('string'))
+    expect(record.wordAcceptance).toMatchObject({ software: 'Microsoft Word', version, result: 'passed', manifestSha256,
+      generatedSha256: generated.sha256, finalSha256 })
+  } finally { await review.close() }
+}
+
+async function restoreProjectInFirefox(page: Page, output: string, version: string, manifestSha256: string,
+  expected: { pdfName: string; pdf: string; source: string; docxName: string; docx: string; attachments: number },
+  reexport: (restored: Page, submission: Locator) => Promise<string>) {
+  const native = process.env.RESEARCH_DOCX_WORD_NATIVE === '1'
+  const baseURL = new URL(page.url()).origin
+  await page.getByRole('dialog', { name: 'Prepare submission' }).getByRole('button', { name: 'Close', exact: true }).click()
+  await page.getByRole('button', { name: 'Project menu' }).click()
+  await page.getByRole('menuitem', { name: 'Project Backup', exact: true }).click()
+  const backup = page.getByRole('dialog', { name: 'Project Backup' })
+  await backup.getByRole('button', { name: 'Complete recovery backup' }).click()
+  const archive = join(output, 'complete-project.research-canvas')
+  const backupSha256 = await download(page, backup.getByRole('button', { name: 'Download Backup' }), archive)
+  const portable = await JSZip.loadAsync(await readFile(archive))
+  const originalBundle = await portable.file('history/template-releases/0.zip')!.async('nodebuffer')
+  portable.file('history/template-releases/0.zip', Buffer.concat([originalBundle, Buffer.from('changed')]))
+  const damaged = await portable.generateAsync({ type: 'uint8array' })
+  await expect(decodeProjectBackup(new Blob([new Uint8Array(damaged)]))).rejects.toThrow(/checksum does not match/)
+
+  const browser = await firefox.launch()
+  try {
+    const restored = await browser.newPage({ baseURL, viewport: { width: 1440, height: 900 } })
+    const attachmentRequests: string[] = []
+    await restored.route(url => ['https:', 'http:'].includes(url.protocol) && url.origin !== baseURL,
+      route => route.abort('internetdisconnected'))
+    await restored.route('**/api/templates/source', route => {
+      attachmentRequests.push(route.request().url())
+      return route.abort('internetdisconnected')
+    })
+    await restored.goto('/research')
+    await restored.getByLabel('Choose project ZIP or backup').setInputFiles(archive)
+    const preview = restored.getByRole('dialog', { name: 'Preview project backup' })
+    await expect(preview.getByText(`· ${version} · ${expected.attachments} verified attachments`, { exact: false })).toBeVisible()
+    if (native) await expect(preview.getByText(/Microsoft Word .* verified/)).toBeVisible()
+    await expect(preview.getByText(/1 submission versions/)).toBeVisible()
+    await preview.getByRole('button', { name: 'Import as new project' }).click()
+    await restored.waitForURL(url => url.searchParams.has('project'))
+    await restored.getByRole('button', { name: 'Writing', exact: true }).click()
+    await expect(restored.getByLabel('当前编译模板')).toContainText(version)
+    await restored.getByRole('button', { name: 'Prepare submission', exact: true }).click()
+    const submission = restored.getByRole('dialog', { name: 'Prepare submission' })
+    const history = submission.getByRole('region', { name: 'Archived submissions' })
+    const archivedPdf = history.getByText(expected.pdfName, { exact: false }).locator('..')
+    await archivedPdf.locator(':scope > summary').click()
+    expect(await download(restored, archivedPdf.getByRole('button', { name: 'Download archived PDF' }), join(output, 'restored-old.pdf'))).toBe(expected.pdf)
+    expect(await download(restored, archivedPdf.getByRole('button', { name: 'Download archived ZIP' }), join(output, 'restored-old-source.zip'))).toBe(expected.source)
+    await archivedPdf.getByRole('button', { name: '复查归档版式报告' }).click()
+    await expect(archivedPdf.getByRole('region', { name: '归档版式报告' })).toContainText(expected.pdf)
+    const archivedDocx = history.getByText(expected.docxName, { exact: false }).locator('..')
+    await archivedDocx.locator(':scope > summary').click()
+    await archivedDocx.getByRole('button', { name: '复查归档 DOCX' }).click()
+    expect(await download(restored, archivedDocx.getByRole('button', { name: '下载归档生成稿' }), join(output, 'restored-old.docx'))).toBe(expected.docx)
+    if (native) {
+      const reviewed = history.getByText('新版 Word 实机定稿 ·', { exact: false }).locator('..')
+      await reviewed.locator(':scope > summary').click()
+      await reviewed.getByRole('button', { name: '复查归档 DOCX' }).click()
+      expect(await download(restored, reviewed.getByRole('button', { name: '下载归档 Word 定稿' }), join(output, 'restored-reviewed-word.docx')))
+        .toBe(digest(await readFile(join(output, 'word-final.docx'))))
+    }
+    await restored.reload()
+    await expect(restored.getByLabel('当前编译模板')).toContainText(version)
+    await restored.getByRole('button', { name: 'Prepare submission', exact: true }).click()
+    const regeneratedDocx = await reexport(restored, submission)
+    expect(attachmentRequests).toEqual([])
+    await writeFile(join(output, 'migration.json'), JSON.stringify({ browser: 'Firefox ' + browser.version(), backupSha256,
+      version, manifestSha256, regeneratedDocx, archivedPdf: expected.pdf, archivedSource: expected.source, archivedDocx: expected.docx, attachmentRequests }, null, 2))
+  } finally { await browser.close() }
+}
+
+async function verifyRegeneratedWord(path: string, initial: string, updatedRule: RegExp) {
+  const zip = await JSZip.loadAsync(await readFile(path), { checkCRC32: true })
+  const first = await JSZip.loadAsync(await readFile(initial))
+  const keys = [/官方原件 SHA-256 [a-f0-9]{64}/, /官方附件清单 SHA-256 [a-f0-9]{64}/, /稿件快照 SHA-256 [a-f0-9]{64}/]
+  const current = await zip.file('docProps/core.xml')!.async('string')
+  const old = await first.file('docProps/core.xml')!.async('string')
+  for (const rule of keys) {
+    expect(current).toMatch(rule)
+    expect(current.match(rule)![0]).toBe(old.match(rule)![0])
+  }
+  expect(await zip.file('word/document.xml')!.async('string')).toMatch(updatedRule)
+}
+
 test('ZJU publishes a changed guideline with unchanged Word and uses exact releases offline', async ({ page, browser }, info) => {
   const state = process.env.RESEARCH_ATTACHMENT_UPSTREAM_STATE
   const cache = process.env.OFFICIAL_ATTACHMENT_CACHE_DIR
-  test.skip(!state || !fixture || !cache || !process.env.RESEARCH_TRIAL_E2E_URL, 'Requires isolated upstream and attachment cache.')
+  test.skip(!state || !fixture || !cache, 'Requires isolated upstream and attachment cache.')
   test.setTimeout(480_000)
   const output = info.outputPath('zju')
   await mkdir(output, { recursive: true })
@@ -96,7 +208,7 @@ test('ZJU publishes a changed guideline with unchanged Word and uses exact relea
     return page.getByRole('dialog', { name: 'Prepare submission' })
   }
 
-  async function exportWord(dialog: Locator, target: string, name: string) {
+  async function exportWord(dialog: Locator, target: string, name: string, window = page) {
     await dialog.getByRole('button', { name: '导出 Word（DOCX）', exact: true }).click()
     const form = dialog.getByRole('form', { name: '导出 Word（DOCX）' })
     await expect(form).toContainText(target)
@@ -105,14 +217,9 @@ test('ZJU publishes a changed guideline with unchanged Word and uses exact relea
       指导教师: docxFields.advisor, 所在学院: '医学院', 专业与年级: '2022级基础医学', 提交日期: docxFields.date,
       中文摘要: docxFields.chineseAbstract, 中文关键词: docxFields.chineseKeywords, 英文关键词: docxFields.englishKeywords,
     })) await form.getByLabel(label, { exact: true }).fill(value)
-    const generate = form.getByRole('button', { name: '生成并下载 DOCX' })
-    const result = page.waitForEvent('download', { timeout: 45_000 })
-    await generate.click()
-    await expect(form.getByLabel('交付归档名称').or(form.getByRole('alert'))).toBeVisible({ timeout: 45_000 })
-    expect(await form.getByRole('alert').allTextContents()).toEqual([])
     const path = join(output, name)
-    await (await result).saveAs(path)
-    return { form, path, sha256: digest(await readFile(path)) }
+    const sha256 = await download(window, form.getByRole('button', { name: '生成并下载 DOCX' }), path)
+    return { form, path, sha256 }
   }
 
   await switchTemplate(baseline)
@@ -207,13 +314,15 @@ test('ZJU publishes a changed guideline with unchanged Word and uses exact relea
   const markup = await packageZip.file('word/document.xml')!.async('string')
   expect(markup).toMatch(/w:left="2268"/) // 40 mm chosen from the simulated guideline.
   if (process.env.RESEARCH_DOCX_WORD_NATIVE === '1') {
-    const final = join(output, `zju-word-final-${process.pid}.docx`)
-    await copyFile(candidateWord.path, final)
-    const { stdout } = await exec('/usr/bin/osascript', [join(__dirname, 'fixtures/submission-docx-word.applescript'), final], { timeout: 120_000 })
-    expect(stdout).toContain('Saved and reopened in Microsoft Word')
-    await writeFile(join(output, 'word.log'), stdout)
-    await copyFile(final, join(output, 'word-final.docx'))
+    await recordWordAcceptance(page, market, candidateWord, output, 'zju', manifestDigest)
   }
+  await restoreProjectInFirefox(page, output, version, manifestDigest, {
+    pdfName: '浙大旧版 PDF ·', pdf: oldPdf, source: oldSource, docxName: '浙大旧版 DOCX ·', docx: baselineWord.sha256, attachments: 2,
+  }, async (restored, dialog) => {
+    const word = await exportWord(dialog, version, 'restored-generated.docx', restored)
+    await verifyRegeneratedWord(word.path, candidateWord.path, /w:left="2268"/)
+    return word.sha256
+  })
   const log = await readFile(state! + '.requests', 'utf8')
   expect(log).not.toContain('offline ')
   await writeFile(join(output, 'acceptance.json'), JSON.stringify({
@@ -225,7 +334,7 @@ test('ZJU publishes a changed guideline with unchanged Word and uses exact relea
 test('NJUPT publishes a changed declaration and preserves the anonymous PDF stage', async ({ page, browser }, info) => {
   const state = process.env.RESEARCH_ATTACHMENT_UPSTREAM_STATE
   const cache = process.env.OFFICIAL_ATTACHMENT_CACHE_DIR
-  test.skip(!state || !fixture || !cache || !process.env.RESEARCH_TRIAL_E2E_URL, 'Requires isolated upstream and attachment cache.')
+  test.skip(!state || !fixture || !cache, 'Requires isolated upstream and attachment cache.')
   test.setTimeout(480_000)
   const output = info.outputPath('njupt')
   await mkdir(output, { recursive: true })
@@ -307,13 +416,13 @@ test('NJUPT publishes a changed declaration and preserves the anonymous PDF stag
     return report
   }
 
-  async function generateDocx(dialog: Locator, target: string, file: string) {
+  async function generateDocx(dialog: Locator, target: string, file: string, window = page) {
     await dialog.getByRole('button', { name: '导出 Word（DOCX）', exact: true }).click()
     const form = dialog.getByRole('form', { name: '导出 Word（DOCX）' })
     await expect(form).toContainText(target)
     await form.getByLabel('英文关键词').fill(docxFields.englishKeywords)
     const path = join(output, file)
-    const sha256 = await download(page, form.getByRole('button', { name: '生成并下载 DOCX' }), path)
+    const sha256 = await download(window, form.getByRole('button', { name: '生成并下载 DOCX' }), path)
     return { form, path, sha256 }
   }
 
@@ -421,18 +530,17 @@ test('NJUPT publishes a changed declaration and preserves the anonymous PDF stag
   expect(await result.file('word/document.xml')!.async('string')).toContain(marker)
 
   if (process.env.RESEARCH_DOCX_WORD_NATIVE === '1') {
-    const file = join(output, `njupt-word-final-${process.pid}.docx`)
-    await copyFile(generated.path, file)
-    const { stdout } = await exec('/usr/bin/osascript', [join(__dirname, 'fixtures/submission-docx-word.applescript'), file], { timeout: 120_000 })
-    expect(stdout).toContain('Saved and reopened in Microsoft Word')
-    await writeFile(join(output, 'word.log'), stdout)
-    await copyFile(file, join(output, 'word-final.docx'))
-    await generated.form.getByLabel('附上 Word 保存的最终文件（选填）').setInputFiles(file)
-    await expect(generated.form.getByText(basename(file), { exact: false })).toBeVisible()
-    await generated.form.getByLabel('交付归档名称').fill('南邮新版 Word 定稿')
-    await generated.form.getByRole('button', { name: '归档 DOCX 交付' }).click()
-    await expect(generated.form.getByText('已归档 南邮新版 Word 定稿')).toBeVisible()
+    await recordWordAcceptance(page, market, generated, output, 'njupt', manifestDigest)
   }
+  await restoreProjectInFirefox(page, output, version, manifestDigest, {
+    pdfName: '南邮旧版归档 PDF ·', pdf: baselineReport.pdfChecksum, source: baselineReport.sourceChecksum,
+    docxName: '南邮旧版归档 DOCX ·', docx: baselineWord.sha256, attachments: 3,
+  }, async (restored, dialog) => {
+    await dialog.getByRole('combobox', { name: '提交阶段' }).selectOption('njupt-deposit')
+    const word = await generateDocx(dialog, version, 'restored-generated.docx', restored)
+    await verifyRegeneratedWord(word.path, generated.path, new RegExp(marker))
+    return word.sha256
+  })
   const upstream = await readFile(state! + '.requests', 'utf8')
   expect(upstream).not.toContain('offline ')
   await writeFile(join(output, 'acceptance.json'), JSON.stringify({

@@ -9,6 +9,11 @@ export function BackupContents({ backup }: { backup: Awaited<ReturnType<typeof d
       <li>{canvas.pages.length} Canvas pages, {attachments} attachments</li>
       <li>{Object.keys(writing?.drafts ?? {}).length} local drafts</li>
       <li>{history?.publication ? `${history.publication.submissions.length} submission versions, ${history.publication.rounds.length} revision rounds` : 'Submission and revision history not included'}</li>
+      {history?.publication?.docx?.length ? <li>{history.publication.docx.length} archived DOCX deliveries</li> : null}
+      {history?.templateReleases?.map(release => <li key={`${release.id}-${release.version}-${release.manifestSha256}`}>
+        Official template {release.id} · {release.version} · {release.attachments?.length} verified attachments
+        {release.wordAcceptance && ` · Microsoft Word ${release.wordAcceptance.version} verified`}
+      </li>)}
       <li>{history?.snapshots ? `${history.snapshots.length} project snapshots` : 'Snapshots not included'}</li>
       <li>{history?.ai ? `${history.ai.history?.conversations.length ?? 0} AI conversations with task history` : 'AI history not included'}</li>
       {!!Object.keys(history?.ai?.builds ?? {}).length && <li>{Object.keys(history?.ai?.builds ?? {}).length} verified manuscript PDFs</li>}

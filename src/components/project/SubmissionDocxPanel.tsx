@@ -9,7 +9,7 @@ import { officialAttachment } from '@/lib/project/official-attachments'
 import { matchingWordRelease, usesWordAttachmentRelease } from '@/lib/project/word-release-attachments'
 import { wordReleaseFile } from '@/lib/project/word-release-client'
 import { readWordTemplate } from '@/lib/project/word-conversion-client'
-import type { OfficialTemplateRelease } from '@/lib/project/template-release'
+import { wordVersionSchema, type OfficialTemplateRelease, type WordAcceptance } from '@/lib/project/template-release'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { fetchOfficialFile } from '@/lib/project/official-template-client'
@@ -21,6 +21,7 @@ import { checkDocxSubmission, verifyWordFinal, type SubmissionDocxDelivery } fro
 import { captureManuscript, suepImportedCover } from '@/lib/project/template-export'
 import type { SubmissionStage } from '@/lib/project/submission-stages'
 import type { ProjectFileSystem } from '@/lib/project/types'
+import type { WritingKey } from '@/lib/project/writing-drafts'
 import { wordRequest } from '@/lib/project/word-conversion-client'
 
 const labels = [
@@ -33,8 +34,9 @@ const njuptLabels = [
   ['degree', '申请学位类别', 40], ['englishDegree', '学位类别英文全称', 80], ['englishAdvisor', '导师英文姓名', 80],
 ] as const
 
-export function SubmissionDocxPanel({ project, main, template, stage, database, disabled, download, onLocate, onArchive }: {
+export function SubmissionDocxPanel({ project, main, template, stage, database, storageKey, disabled, download, onLocate, onArchive }: {
   project: ProjectFileSystem; main: string; template?: string; stage?: SubmissionStage; database?: IDBDatabase; disabled: boolean; download: (blob: Blob, name: string) => void
+  storageKey?: WritingKey
   onLocate: (path: string, line: number) => void
   onArchive?: (delivery: SubmissionDocxDelivery) => Promise<void>
 }) {
@@ -52,11 +54,13 @@ export function SubmissionDocxPanel({ project, main, template, stage, database, 
   const [checked, setChecked] = useState<{ project: ProjectFileSystem; main: string; school: SubmissionDocxId; fields: SubmissionDocxFields; report: ReturnType<typeof checkDocxSubmission> }>()
   const [receipt, setReceipt] = useState<{ check: NonNullable<typeof checked>; delivery: SubmissionDocxDelivery }>()
   const [archiveName, setArchiveName] = useState('')
+  const [wordReviewVersion, setWordReviewVersion] = useState('')
   const [saved, setSaved] = useState('')
   const request = useRef<AbortController | undefined>(undefined)
   const config = submissionDocxConfig(school)
   const suep = school === suepUndergraduateId
   const projectOrigin = project.metadata.activeTemplate?.origin ?? project.metadata.templateOrigin
+  const [workspace, projectKey] = storageKey ?? []
   const scopedWord = usesWordAttachmentRelease(school)
   const [releaseState, setReleaseState] = useState<{ database: IDBDatabase; school: string; releases: OfficialTemplateRelease[] }>()
   const releases = releaseState?.database === database && releaseState?.school === school ? releaseState?.releases : undefined
@@ -64,13 +68,13 @@ export function SubmissionDocxPanel({ project, main, template, stage, database, 
   useEffect(() => {
     if (!database || !readReleases) return
     let current = true
-    void listOfficialTemplateReleases(database, school)
+    void listOfficialTemplateReleases(database, school, workspace && projectKey && projectOrigin ? { key: [workspace, projectKey], origin: projectOrigin } : undefined)
       .then(releases => { if (current) setReleaseState({ database, school, releases }) })
       .catch(() => {
         if (current) setError('无法读取本机的官方版本记录。')
       })
     return () => { current = false }
-  }, [database, readReleases, school])
+  }, [database, readReleases, school, workspace, projectKey, projectOrigin])
   const bound = projectOrigin?.id === suepUndergraduateId ? projectOrigin : undefined
   const release = bound ? releases?.find(item => item.version === bound.version && item.sha256 === bound.sha256) : releases?.[0]
   const suepPin = open && suep && (!database || releases) ? {
@@ -185,6 +189,7 @@ export function SubmissionDocxPanel({ project, main, template, stage, database, 
         check: { checkedAt: check.report.checkedAt, findings: check.report.findings },
         source: { name: 'manuscript-source.zip', bytes: zip.size, sha256: checksum }, sourceZip: zip, generated, generatedDocx: blob } })
       setArchiveName(name)
+      setWordReviewVersion('')
       download(blob, filename)
     } catch (cause) {
       setError(signal.aborted ? '导出已取消，请从当前稿件重新导出。' : cause instanceof Error ? cause.message : 'DOCX 导出失败。')
@@ -212,6 +217,7 @@ export function SubmissionDocxPanel({ project, main, template, stage, database, 
     try {
       const final = file && await verifyWordFinal(file, delivery)
       setReceipt({ ...receipt, delivery: { ...delivery, final, finalDocx: file } })
+      setWordReviewVersion('')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '无法读取 Word 定稿。')
     } finally { setBusy(undefined) }
@@ -222,7 +228,14 @@ export function SubmissionDocxPanel({ project, main, template, stage, database, 
     setError('')
     setBusy('archive')
     try {
-      await onArchive({ ...delivery, name: archiveName.trim(), createdAt: new Date().toISOString() })
+      const checkedAt = new Date().toISOString()
+      const wordAcceptance: WordAcceptance | undefined = wordReviewVersion.trim() && delivery.final && delivery.template.manifestSha256 ? {
+        protocol: 1, result: 'passed', software: 'Microsoft Word', version: wordVersionSchema.parse(wordReviewVersion), checkedAt,
+        manifestSha256: delivery.template.manifestSha256, generatedSha256: delivery.generated.sha256, finalSha256: delivery.final.sha256,
+      } : undefined
+      await onArchive({ ...delivery, wordAcceptance, name: archiveName.trim(), createdAt: checkedAt })
+      if (wordAcceptance && releaseState) setReleaseState({ ...releaseState, releases: releaseState.releases.map(item =>
+        item.version === delivery.template.version && item.manifestSha256 === wordAcceptance.manifestSha256 ? { ...item, wordAcceptance } : item) })
       setSaved(archiveName.trim())
       setReceipt(undefined)
     } catch (cause) {
@@ -243,7 +256,8 @@ export function SubmissionDocxPanel({ project, main, template, stage, database, 
           {available.map(id => <option key={id} value={id}>{submissionDocxConfig(id).name}</option>)}
         </select>
       </label>
-      <p>官方版本 {usedVersion} · {(suep || scopedWord) && usedVersion !== config.version ? '此版本待 Word 实机核对' : config.status}</p>
+      <p>官方版本 {usedVersion} · {wordRelease?.wordAcceptance ? '已通过 Microsoft Word ' + wordRelease.wordAcceptance.version + ' 实机验收'
+        : (suep || scopedWord) && usedVersion !== config.version ? '此版本待 Word 实机核对' : config.status}</p>
       <p className="break-all text-xs">原件 SHA-256 {usedSha256}</p>
       {wordVersionMissing && <p role="status">请导入项目绑定的官方版本包以恢复附件。</p>}
       {wordRelease?.manifestSha256 && <p className="break-all text-xs">附件清单 SHA-256 {wordRelease.manifestSha256}</p>}
@@ -315,7 +329,12 @@ export function SubmissionDocxPanel({ project, main, template, stage, database, 
         }} />
       </label>
       {delivery.final && <p>{delivery.final.name} <button type="button" className="underline" onClick={() => void attachFinal()}>移除</button></p>}
-      <Button type="button" variant="outline" disabled={!archiveName.trim()} onClick={() => void archiveDelivery()}>归档 DOCX 交付</Button>
+      {delivery.final && delivery.template.manifestSha256 && <label className="block">通过实机验收的 Microsoft Word 版本（选填）
+        <Input maxLength={40} placeholder="16.115.2" value={wordReviewVersion} onChange={event => setWordReviewVersion(event.target.value)} />
+        <span className="text-xs text-muted-foreground">在 Word 更新目录和引用、保存并重开核对后填写。填写后，结果随该官方附件版本保存。</span>
+      </label>}
+      <Button type="button" variant="outline" disabled={!archiveName.trim() || Boolean(wordReviewVersion.trim() && !wordVersionSchema.safeParse(wordReviewVersion).success)}
+        onClick={() => void archiveDelivery()}>归档 DOCX 交付</Button>
     </fieldset>}
     {saved && <p role="status">已归档 {saved}</p>}
     {error && <p role="alert" className="break-words text-red-800">{error}</p>}

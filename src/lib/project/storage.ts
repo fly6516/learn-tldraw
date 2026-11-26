@@ -9,7 +9,7 @@ import { updateFileContent } from './file-system'
 import type { ExternalTemplatePreview } from './external-template-build'
 import type { ProjectFileSystem } from './types'
 import type { LocalPaperTemplate } from './template-catalog'
-import { validateReleaseAttachments, type OfficialTemplateRelease, type TemplateOrigin } from './template-release'
+import { projectBoundReleaseOrigins, sameTemplateOrigin, validateReleaseAttachments, wordAcceptanceSchema, type OfficialTemplateRelease, type TemplateOrigin } from './template-release'
 import type { ProjectSnapshot, ProjectSnapshotInfo } from './snapshots'
 import { restoreSnapshotFiles } from './snapshots'
 import type { SubmissionVersion, SubmissionVersionInfo } from './submission'
@@ -21,16 +21,42 @@ import { applyWritingDrafts, draftConflicts, editableSource, sameDraft, type Por
 
 const storeName = 'projects'
 
-export async function listOfficialTemplateReleases(database: IDBDatabase, id: string) {
+function projectReleaseKey(key: WritingKey, origin: TemplateOrigin) {
+    return ['project-template-release', ...key, origin.id, origin.version, origin.sha256, origin.manifestSha256 ?? '']
+}
+
+export async function listOfficialTemplateReleases(database: IDBDatabase, id: string, binding?: { key: WritingKey; origin: TemplateOrigin }) {
     const transaction = database.transaction(storeName)
     const store = transaction.objectStore(storeName)
     const request = store.getAll(IDBKeyRange.bound(
         ['official-template-release', id], ['official-template-release', id, []], true, true))
     const current = store.get(['official-template-current', id])
+    const scoped = binding?.origin.id === id ? store.get(projectReleaseKey(binding.key, binding.origin)) : undefined
     await complete(transaction)
     const version = (current.result as TemplateOrigin | undefined)?.version
-    return (request.result as OfficialTemplateRelease[]).sort((a, b) =>
+    const published = (request.result as OfficialTemplateRelease[]).sort((a, b) =>
         Number(b.version === version) - Number(a.version === version) || b.publishedAt.localeCompare(a.publishedAt))
+    const restored = scoped?.result as OfficialTemplateRelease | undefined
+    return restored && binding && sameTemplateOrigin(restored, binding.origin)
+        ? [restored, ...published.filter(item => !sameTemplateOrigin(item, restored))] : published
+}
+
+function boundReleaseReader(store: IDBObjectStore, key: WritingKey, project: ProjectFileSystem) {
+    const requests = projectBoundReleaseOrigins(project).map(origin => ({ origin,
+        scoped: store.get(projectReleaseKey(key, origin)), published: store.get(['official-template-release', origin.id, origin.version]),
+    }))
+    return () => requests.map(({ origin, scoped, published }) => {
+        const match = [scoped.result, published.result].find(item => sameTemplateOrigin(item, origin)) as OfficialTemplateRelease | undefined
+        if (!match) throw new Error(`Import the bound official template package (${origin.id} · ${origin.version}) before creating a complete backup.`)
+        return match
+    })
+}
+
+export async function readProjectTemplateReleases(database: IDBDatabase, key: WritingKey, project: ProjectFileSystem) {
+    const transaction = database.transaction(storeName)
+    const read = boundReleaseReader(transaction.objectStore(storeName), key, project)
+    await complete(transaction)
+    return read()
 }
 
 export async function publishOfficialTemplateRelease(database: IDBDatabase, release: OfficialTemplateRelease, parent: TemplateOrigin) {
@@ -64,7 +90,7 @@ export async function saveOfficialSwitchAcceptance(database: IDBDatabase, releas
         const current = request.result as OfficialTemplateRelease | undefined
         if (current?.sha256 !== release.sha256 || current.kind !== release.kind || current.manifestSha256 !== release.manifestSha256) return
         matched = true
-        store.put(release, key)
+        store.put({ ...current, switchAcceptance: release.switchAcceptance }, key)
     }
     await complete(transaction)
     if (!matched) throw new Error('已发布版本发生变化，请重新验收。')
@@ -193,11 +219,37 @@ export async function listSubmissionDocx(database: IDBDatabase, key: WritingKey)
 
 export async function saveSubmissionDocx(database: IDBDatabase, key: WritingKey, delivery: SubmissionDocxDelivery) {
     if (!(await verifyDocxDelivery(delivery))) throw new Error('交付文件与检查记录的 SHA-256 不一致。')
+    const review = delivery.wordAcceptance && wordAcceptanceSchema.parse(delivery.wordAcceptance)
+    if (review) {
+        if (!delivery.final || !delivery.finalDocx || review.generatedSha256 !== delivery.generated.sha256 ||
+            review.finalSha256 !== delivery.final.sha256 || review.manifestSha256 !== delivery.template.manifestSha256) {
+            throw new Error('Word 实机验收与本次交付或附件清单不一致。')
+        }
+        await verifyWordFinal(new File([delivery.finalDocx], delivery.final.name), delivery)
+    }
     const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
     const store = transaction.objectStore(storeName)
     const { sourceZip, generatedDocx, finalDocx, ...info } = delivery
-    store.add({ sourceZip, generatedDocx, finalDocx }, ['submission-docx-files', ...key, info.id])
-    store.add(info, ['submission-docx-info', ...key, info.id])
+    const archive = () => {
+        store.add({ sourceZip, generatedDocx, finalDocx }, ['submission-docx-files', ...key, info.id])
+        store.add(info, ['submission-docx-info', ...key, info.id])
+    }
+    if (review) {
+        const releaseKey = ['official-template-release', delivery.template.id, delivery.template.version]
+        const request = store.get(releaseKey)
+        const scopedKey = projectReleaseKey(key, delivery.template)
+        const scoped = store.get(scopedKey)
+        scoped.onsuccess = () => {
+            const local = sameTemplateOrigin(scoped.result, delivery.template)
+            const release = (local ? scoped.result : request.result) as OfficialTemplateRelease | undefined
+            if (release?.kind !== 'word' || !sameTemplateOrigin(release, delivery.template)) {
+                transaction.abort()
+                return
+            }
+            store.put({ ...release, wordAcceptance: review }, local ? scopedKey : releaseKey)
+            archive()
+        }
+    } else archive()
     await complete(transaction)
     return info
 }
@@ -626,6 +678,7 @@ export async function readBackupHistory(database: IDBDatabase, key: WritingKey, 
 }
 
 function restoreBackupHistory(store: IDBObjectStore, key: WritingKey, history: PortableProjectHistory) {
+    for (const release of history.templateReleases ?? []) store.put(release, projectReleaseKey(key, release))
     if (history.publication) {
         for (const bucket of ['submission-files', 'submission-info', 'submission-docx-info', 'submission-docx-files', 'revision-round']) store.delete(historyRange(bucket, key))
         for (const { pdf, zip, materials, ...info } of history.publication.submissions) {
@@ -739,10 +792,11 @@ export async function readLibraryBackup(database: IDBDatabase, id: string) {
         const key: WritingKey = [workspace, project.metadata.createdAt]
         const getState = recoveryStateReader(store, workspace, project)
         const getHistory = backupHistoryReader(store, key, { publication: true, snapshots: true, ai: false })
+        const getReleases = boundReleaseReader(store, key, project)
         const view = store.get(['view', ...key])
         read = () => {
             const state = getState()
-            return { project, state, writing: { drafts: state.drafts, view: view.result }, history: getHistory() }
+            return { project, state, writing: { drafts: state.drafts, view: view.result }, history: { ...getHistory(), templateReleases: getReleases() } }
         }
     }
     await complete(transaction)

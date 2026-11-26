@@ -471,6 +471,7 @@ export function TemplateMarket({ database, storageUnavailable, openProject }: {
                 {item.version} · {item.sourceName} · {new Date(item.publishedAt).toLocaleDateString()} · 已编译 · {item.sha256}
                 {item.previewSha256 && <p>验收 PDF SHA-256 {item.previewSha256}</p>}
                 {item.switchAcceptance && <p>切换验收 PDF SHA-256 {item.switchAcceptance.pdfSha256}</p>}
+                {item.wordAcceptance && <p>Microsoft Word {item.wordAcceptance.version} 实机验收通过 · 定稿 SHA-256 {item.wordAcceptance.finalSha256}</p>}
               </li>)}
             </ul>}
             <div className="mt-2 flex flex-wrap gap-2">

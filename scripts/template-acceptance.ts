@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url'
 import sharp from 'sharp'
 import { templateCatalog } from '../src/lib/project/template-catalog'
 import { suepDocxMembers, suepUndergraduateSource } from '../src/lib/project/suep-undergraduate-source'
+import { catalogWordAttachments, njuptAttachmentTemplate, zjuAttachmentTemplate } from '../src/lib/project/word-release-attachments'
 
 const groups: Record<string, string> = {
   catalog: '(?:WORD|ZIP|STARTER|REFERENCE) [a-z0-9-]+ (?:builds|creates|exposes)|EXTERNAL Springer|imports the original SUEP|MIGRATION preserves the registered catalog',
@@ -13,14 +14,17 @@ const groups: Record<string, string> = {
   release: 'published njupt-|published agu-jgr-atmospheres|publishes a verified PRL ZIP',
   expansion: '(?:WORD|ZIP) (?:njupt-professional-masters|agu-jgr-atmospheres) (?:builds|creates)|published (?:njupt-professional-masters|agu-jgr-atmospheres)',
   manual: 'archives explicit author confirmation|published njupt-',
+  attachments: 'ZJU publishes a changed guideline|NJUPT publishes a changed declaration',
 }
 const group = process.argv[2] ?? 'all'
-if (group !== 'all' && !Object.hasOwn(groups, group)) throw new Error('Choose all, catalog, switch, release, manual or expansion.')
+if (group !== 'all' && !Object.hasOwn(groups, group)) throw new Error('Choose all, catalog, switch, release, manual, expansion or attachments.')
 const expansionIds = new Set(['njupt-professional-masters', 'agu-jgr-atmospheres'])
 const releaseIds = new Set(['njupt-academic-masters', 'njupt-humanities-masters', 'aps-prl', ...expansionIds])
 const manualIds = new Set(['njupt-academic-masters', 'njupt-humanities-masters', 'suep-masters', 'ustc-graduate-word', 'njupt-professional-masters'])
 const fullCatalog = group === 'all' || group === 'catalog'
-const needsCatalogManuscript = fullCatalog || group === 'expansion'
+const needsAttachments = ['all', 'release', 'attachments'].includes(group)
+const attachmentIds = [zjuAttachmentTemplate, njuptAttachmentTemplate]
+const needsCatalogManuscript = fullCatalog || group === 'expansion' || needsAttachments
 const fixtures = resolve(process.env.RESEARCH_TEMPLATE_ACCEPTANCE_FIXTURES ?? '.cache/template-acceptance')
 const out = resolve(process.env.RESEARCH_TEMPLATE_ACCEPTANCE_OUTPUT ?? join('test-results', 'template-acceptance', group))
 await mkdir(fixtures, { recursive: true })
@@ -149,7 +153,8 @@ async function extractCover() {
 try {
   await checkEnvironment()
   for (const { id, workflow } of templateCatalog) {
-    if (group === 'release' && !releaseIds.has(id) || group === 'manual' && !manualIds.has(id) || group === 'expansion' && !expansionIds.has(id)) continue
+    if (group === 'attachments' && !attachmentIds.includes(id) || group === 'release' && !releaseIds.has(id) && !attachmentIds.includes(id) ||
+        group === 'manual' && !manualIds.has(id) || group === 'expansion' && !expansionIds.has(id)) continue
     if (workflow.kind === 'word' || workflow.kind === 'zip') {
       const ext = workflow.kind === 'zip' ? '.zip' : workflow.original.url.endsWith('.doc') ? '.doc' : '.docx'
       await original(id + ext, workflow.original)
@@ -157,6 +162,7 @@ try {
       if (workflow.kind === 'word' && workflow.declaration) await original('njupt-declaration.doc', workflow.declaration)
     } else if (workflow.kind === 'word-import') await original(id + '.rar', workflow.original)
   }
+  if (needsAttachments) await original('njupt-blind-cover.doc', catalogWordAttachments(njuptAttachmentTemplate)!.find(item => item.role === 'blind-cover')!)
   if (fullCatalog || group === 'switch') {
     await original('declaration.doc', { ...suepDocxMembers.declaration, url: suepUndergraduateSource.officialFiles[1].url })
     await extractCover()
@@ -177,11 +183,30 @@ try {
   await rm(preparation, { force: true, recursive: true })
 }
 
-const grep = group === 'all' ? Object.values(groups).map(pattern => '(?:' + pattern + ')').join('|') : groups[group]
-const { status, error } = spawnSync('bun', ['x', 'playwright', 'test', 'unified-template-catalog.spec.ts', 'template-export.spec.ts',
-  'template-release.spec.ts', 'word-import.spec.ts', '--grep', grep, '--output', out, '--reporter', 'line'],
-{ stdio: 'inherit', env: testEnv })
-if (error) throw error
+function runBrowser(files: string[], grep: string, output: string, env: NodeJS.ProcessEnv) {
+  const { status, error } = spawnSync('bun', ['x', 'playwright', 'test', ...files, '--grep', grep, '--output', output, '--reporter', 'line'],
+    { stdio: 'inherit', env })
+  if (error) throw error
+  return status ?? 1
+}
+
+let status = 0
+if (group !== 'attachments') {
+  const grep = group === 'all' ? Object.values(groups).map(pattern => '(?:' + pattern + ')').join('|') : groups[group]
+  status = runBrowser(['unified-template-catalog.spec.ts', 'template-export.spec.ts', 'template-release.spec.ts', 'word-import.spec.ts'], grep, out, testEnv)
+}
+if (needsAttachments) {
+  const sandbox = await mkdtemp(join(fixtures, '.attachment-run-'))
+  const state = join(sandbox, 'upstream')
+  try {
+    await writeFile(state, 'baseline')
+    const env = { ...testEnv, RESEARCH_TRIAL_E2E_URL: undefined, RESEARCH_ATTACHMENT_ACCEPTANCE: '1',
+      RESEARCH_ATTACHMENT_UPSTREAM_STATE: state, OFFICIAL_ATTACHMENT_CACHE_DIR: join(sandbox, 'cache'),
+      NODE_OPTIONS: [testEnv.NODE_OPTIONS, '--require="' + resolve('tests/e2e/fixtures/word-attachment-upstream.cjs') + '"'].filter(Boolean).join(' ') }
+    const attachStatus = runBrowser(['word-attachment-release.spec.ts'], groups.attachments, group === 'attachments' ? out : join(out, 'attachments'), env)
+    status ||= attachStatus
+  } finally { await rm(sandbox, { recursive: true, force: true }) }
+}
 await mkdir(out, { recursive: true })
 await writeFile(join(out, 'registered-sha256.json'), JSON.stringify(pins, null, 2) + '\n')
-process.exitCode = status ?? 1
+process.exitCode = status

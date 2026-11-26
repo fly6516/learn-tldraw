@@ -1,7 +1,7 @@
 import JSZip, { type JSZipObject, type JSZipStreamHelper } from 'jszip'
 import { z } from 'zod'
 import { templateDigest } from './paper-templates'
-import { validateReleaseAttachments, type OfficialTemplateRelease, type TemplateOrigin } from './template-release'
+import { validateReleaseAttachments, wordAcceptanceSchema, type OfficialTemplateRelease, type TemplateOrigin } from './template-release'
 import { officialAttachmentsSchema, type AttachmentRole } from './official-attachments'
 import { importWordTemplateArchive } from './word-conversion-client'
 
@@ -17,6 +17,7 @@ const manifestSchema = z.object({
   originalSha256: digest.optional(),
   manifestSha256: digest.optional(),
   attachments: officialAttachmentsSchema.optional(),
+  wordAcceptance: wordAcceptanceSchema.optional(),
   switchAcceptance: z.object({ protocol: z.literal(1), pdfSha256: digest, anchors: z.array(z.object({
     path: z.string(), line: z.number().int().positive(), page: z.number().int().positive(),
   })).max(32) }).optional(),
@@ -35,7 +36,8 @@ export async function exportRelease(release: OfficialTemplateRelease) {
   if (originalSha256 && originalSha256 !== sha256) throw new Error('Word 原件校验失败。')
   const manifest = manifestSchema.parse({ format: 'official-template-release-v1', id, kind, version, sha256,
     previewSha256, publishedAt, sourceName, payloadSha256: await templateDigest(payload), originalSha256,
-    manifestSha256: release.manifestSha256, attachments: release.attachments, switchAcceptance: release.switchAcceptance })
+    manifestSha256: release.manifestSha256, attachments: release.attachments, switchAcceptance: release.switchAcceptance,
+    wordAcceptance: release.wordAcceptance })
   zip.file('release.json', JSON.stringify(manifest, null, 2))
   zip.file('payload.zip', payload)
   if (original) zip.file('original.docx', original)
@@ -84,7 +86,7 @@ export async function importRelease(file: File, source: { baseline: TemplateOrig
   const manifest = manifestSchema.parse(
     JSON.parse(new TextDecoder().decode(await readLimited(descriptor, 24 * 1024))))
   const { id, version, sha256, kind, payloadSha256, previewSha256, publishedAt, sourceName, originalSha256,
-    manifestSha256, attachments, switchAcceptance } = manifest
+    manifestSha256, attachments, switchAcceptance, wordAcceptance } = manifest
   const supplemental = kind === 'word' ? (attachments ?? []).filter(item => item.role !== 'original') : []
   if (Object.keys(zip.files).length !== (original ? 3 : 2) + supplemental.length) throw new Error('官方版本包包含未登记的附件。')
   if (id !== source.baseline.id || kind !== source.kind || version === source.baseline.version) {
@@ -100,7 +102,8 @@ export async function importRelease(file: File, source: { baseline: TemplateOrig
   const wordBytes = original ? await readLimited(original, 16 * 1024 * 1024) : undefined
   if (wordBytes && await templateDigest(wordBytes.buffer) !== sha256) throw new Error('版本包中的 Word 原件校验失败。')
   const base = { id, version, sha256, previewSha256, publishedAt, sourceName, sourceUrl: source.sourceUrl,
-    ...(manifestSha256 && { manifestSha256 }), ...(attachments && { attachments }), ...(switchAcceptance && { switchAcceptance }) }
+    ...(manifestSha256 && { manifestSha256 }), ...(attachments && { attachments }), ...(switchAcceptance && { switchAcceptance }),
+    ...(wordAcceptance && { wordAcceptance }) }
   const archive = new File([bytes], sourceName, { type: kind === 'word-import' ? 'application/vnd.rar' : 'application/zip' })
   if (kind !== 'word') {
     const release = { ...base, kind, archive } as OfficialTemplateRelease

@@ -7,6 +7,7 @@ import { aiReadExclusionsSchema } from './ai-read-scope'
 import { activeTemplateSchema } from './active-template'
 import { compileProfileSchema } from './compile-profile'
 import { draftConflicts, type PortableWritingState } from './writing-drafts'
+import { projectBoundReleaseOrigins, sameTemplateOrigin } from './template-release'
 
 import { backupHistorySchema, decodeBackupHistory, encodeBackupHistory, maxHistoryBytes, type PortableProjectHistory } from './backup-history'
 
@@ -82,6 +83,7 @@ const manifestSchema = z.discriminatedUnion('version', [
   savedManifest.extend({ version: z.literal(2) }),
   savedManifest.extend({ version: z.literal(3), writing: writingSchema }),
   savedManifest.extend({ version: z.literal(4), writing: writingSchema.optional(), history: backupHistorySchema }),
+  savedManifest.extend({ version: z.literal(5), writing: writingSchema.optional(), history: backupHistorySchema }),
 ])
 
 export async function encodeProjectBackup(canvas: ResearchCanvas, project: ProjectFileSystem, writing?: PortableWritingState, history?: PortableProjectHistory): Promise<Blob> {
@@ -99,7 +101,8 @@ export async function encodeProjectBackup(canvas: ResearchCanvas, project: Proje
     encodeProjectBackup(snapshot.project.canvas ?? canvas, snapshot.project))
   archive.file(manifestName, JSON.stringify({
     format,
-    ...(portableHistory ? { version: 4, writing: contents, history: portableHistory } : contents ? { version: 3, writing: contents } : { version: 2 }),
+    ...(portableHistory ? { version: portableHistory.templateReleases ? 5 : 4, writing: contents, history: portableHistory }
+      : contents ? { version: 3, writing: contents } : { version: 2 }),
     canvas,
     project: { template: project.template, metadata: project.metadata, files },
   }))
@@ -116,8 +119,8 @@ export async function decodeProjectBackup(file: Blob, options: { snapshot?: bool
   if (!manifestFile) throw new Error('This file is not a Research Canvas backup.')
   const data: unknown = JSON.parse(await manifestFile.async('text'))
   const header = z.object({ format: z.literal(format), version: z.number() }).safeParse(data)
-  if (header.success && ![2, 3, 4].includes(header.data.version)) {
-    throw new Error('The project backup uses an unsupported version. This workspace supports versions 2, 3 and 4.')
+  if (header.success && ![2, 3, 4, 5].includes(header.data.version)) {
+    throw new Error('The project backup uses an unsupported version. This workspace supports versions 2–5.')
   }
   const manifest = manifestSchema.safeParse(data)
   if (!manifest.success) throw new Error('The project backup is invalid.')
@@ -147,9 +150,16 @@ export async function decodeProjectBackup(file: Blob, options: { snapshot?: bool
 
   const restored = { ...project, files, canvas } satisfies ProjectFileSystem
   const writing = manifest.data.version === 2 ? undefined : manifest.data.writing
-  const history = manifest.data.version === 4 ? await decodeBackupHistory(archive, manifest.data.history, async (blob, hasCanvas) => {
+  const history = manifest.data.version === 4 || manifest.data.version === 5 ? await decodeBackupHistory(archive, manifest.data.history, async (blob, hasCanvas) => {
     const { project } = await decodeProjectBackup(blob, { snapshot: true })
     return hasCanvas ? project : { ...project, canvas: undefined }
   }) : undefined
+  if (manifest.data.version === 5 || history?.templateReleases) {
+    const origins = projectBoundReleaseOrigins(restored)
+    const releases = history?.templateReleases ?? []
+    if (!releases.length || releases.length !== origins.length || origins.some(origin => !releases.some(release => sameTemplateOrigin(release, origin)))) {
+      throw new Error('The official template versions in this backup do not match the project bindings.')
+    }
+  }
   return { canvas, project: restored, writing, history, conflicts: writing ? draftConflicts(restored, writing.drafts) : [] }
 }

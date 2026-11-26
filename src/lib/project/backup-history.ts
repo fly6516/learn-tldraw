@@ -8,7 +8,10 @@ import type { ProjectSnapshot } from './snapshots'
 import { isProjectPath } from './source-archive'
 import type { SubmissionVersion } from './submission'
 import { submissionDocxDeliveryInfo, submissionDocxMime, verifyDocxDelivery, type SubmissionDocxDelivery } from './submission-docx-delivery'
-import { submissionLayoutSchema } from './submission-layout'
+import { submissionLayoutSchema, templateOriginSchema } from './submission-layout'
+import { exportRelease, importRelease } from './release-transfer'
+import { sameTemplateOrigin, type OfficialTemplateRelease } from './template-release'
+import { catalogReleaseSource, templateCatalog } from './template-catalog'
 import type { SourceMove } from './writing-ai-evidence'
 import { chatWorkflowSchema, compileFeedbackSchema, revisionSetupSchema, submissionChatSchema, type ChatCheckpoint, type ChatHistory, type ChatTaskStep, type WritingChatMessage } from './writing-chat'
 import type { ChatVerification, ManuscriptBuild } from './writing-chat-validation'
@@ -17,6 +20,7 @@ import { submissionEvidenceSchema } from './submission-evidence'
 import { aiContextReceiptSchema } from './ai-read-scope'
 
 export type PortableProjectHistory = {
+  templateReleases?: OfficialTemplateRelease[]
   publication?: { submissions: SubmissionVersion[]; rounds: RevisionRound[]; docx?: SubmissionDocxDelivery[] }
   snapshots?: ProjectSnapshot[]
   ai?: { history?: ChatHistory; moves: SourceMove[]; tasks: Record<string, ChatTaskStep[]>
@@ -103,6 +107,7 @@ const ai = z.object({
     externalEngine: z.enum(['pdflatex', 'xelatex', 'lualatex']).optional(), compileProfile: compileProfileSchema.optional() })).max(12).refine(unique).optional(),
 })
 export const backupHistorySchema = z.object({
+  templateReleases: z.array(templateOriginSchema.extend({ manifestSha256: hash, archive: storedBlob })).min(1).max(2).optional(),
   publication: z.object({ submissions: z.array(submission), rounds: z.array(round), docx: z.array(docxSubmission).refine(unique).optional() }).refine(({ submissions, rounds }) => {
     const ids = new Set(submissions.map(value => value.id))
     return unique(submissions) && unique(rounds) && rounds.every(value => ids.has(value.submissionId) && unique(value.comments)
@@ -110,7 +115,7 @@ export const backupHistorySchema = z.object({
   }).optional(),
   snapshots: z.array(identity.extend({ archive: storedBlob, hasCanvas: z.boolean() })).refine(unique).optional(),
   ai: ai.optional(),
-}).refine(value => Boolean(value.publication || value.snapshots || value.ai))
+}).refine(value => Boolean(value.publication || value.snapshots || value.ai || value.templateReleases))
 
 export const maxHistoryBytes = 512 * 1024 * 1024
 
@@ -156,7 +161,13 @@ export async function encodeBackupHistory(archive: JSZip, history: PortableProje
   for (const [index, [id, { pdf, ...build }]] of Object.entries(builds ?? {}).entries()) {
     encodedBuilds.push({ id, ...build, pdf: await write(`history/manuscript-builds/${index}.pdf`, pdf) })
   }
+  const templateReleases = []
+  for (const [index, release] of (history.templateReleases ?? []).entries()) {
+    templateReleases.push({ id: release.id, version: release.version, sha256: release.sha256, manifestSha256: release.manifestSha256,
+      archive: await write(`history/template-releases/${index}.zip`, await exportRelease(release)) })
+  }
   return backupHistorySchema.parse({
+    templateReleases: templateReleases.length ? templateReleases : undefined,
     publication: history.publication && { submissions, rounds: history.publication.rounds, docx: docx.length ? docx : undefined }, snapshots: history.snapshots && snapshots,
     ai: history.ai && { ...aiHistory, builds: encodedBuilds.length ? encodedBuilds : undefined },
   })
@@ -209,7 +220,19 @@ export async function decodeBackupHistory(archive: JSZip, manifest: z.infer<type
     if (await blob.slice(0, 5).text() !== '%PDF-') throw new Error('The pending manuscript artifact is not a PDF.')
     decodedBuilds[id] = { ...build, pdf: blob }
   }
-  return { publication: manifest.publication && { submissions, rounds: manifest.publication.rounds, docx: docx.length ? docx : undefined },
+  const templateReleases: OfficialTemplateRelease[] = []
+  for (const [index, { archive: member, ...origin }] of (manifest.templateReleases ?? []).entries()) {
+    const entry = templateCatalog.find(item => item.id === origin.id)
+    const source = entry && catalogReleaseSource(entry)
+    if (!source) throw new Error('Project backup references an unknown official template: ' + origin.id)
+    const bytes = await read(`history/template-releases/${index}.zip`, member, 'application/zip')
+    const release = await importRelease(new File([bytes], 'release.zip'), source)
+    if (!sameTemplateOrigin(release, origin) || templateReleases.some(existing => sameTemplateOrigin(existing, origin))) {
+      throw new Error('Official template version in the project backup does not match its binding.')
+    }
+    templateReleases.push(release)
+  }
+  return { ...(templateReleases.length && { templateReleases }), publication: manifest.publication && { submissions, rounds: manifest.publication.rounds, docx: docx.length ? docx : undefined },
     snapshots: manifest.snapshots && snapshots,
     ai: manifest.ai && { ...manifest.ai, builds: Object.keys(decodedBuilds).length ? decodedBuilds : undefined } }
 }

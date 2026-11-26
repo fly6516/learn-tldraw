@@ -10,6 +10,7 @@ import { prepareSubmission } from './submission'
 import { captureManuscript } from './template-export'
 import { submissionDocxFieldSchema, submissionDocxIdSchema, type SubmissionDocxFields, type SubmissionDocxId } from './submission-docx-config'
 import type { ProjectFileSystem } from './types'
+import { wordAcceptanceSchema } from './template-release'
 
 export const submissionDocxMime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 const digest = z.string().regex(/^[a-f0-9]{64}$/)
@@ -29,6 +30,7 @@ export const submissionDocxDeliveryInfo = z.object({
     manifestSha256: digest.optional(),
     attachments: z.array(z.object({ name: z.string(), sha256: digest, url: z.url().optional() })).min(1).max(6).optional() }),
   snapshotSha256: digest, source: artifact, generated: artifact, final: artifact.optional(),
+  wordAcceptance: wordAcceptanceSchema.optional(),
   check: z.object({ checkedAt: date, findings: z.array(finding).refine(items => items.every(item => item.status === 'manual')) }),
 })
 export type SubmissionDocxDeliveryInfo = z.infer<typeof submissionDocxDeliveryInfo>

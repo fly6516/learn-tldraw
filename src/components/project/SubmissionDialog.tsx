@@ -264,7 +264,7 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
         </label>}
       </fieldset>}
       {(templateOriginId !== 'njupt-professional-masters' || stage === 'njupt-deposit') && <SubmissionDocxPanel
-        key={templateOriginId ?? 'generic-docx'} project={target} main={main} template={templateOriginId} stage={stage} database={database ?? undefined} disabled={busy || saving || conflicting} download={download}
+        key={templateOriginId ?? 'generic-docx'} project={target} main={main} template={templateOriginId} stage={stage} database={database ?? undefined} storageKey={storageKey} disabled={busy || saving || conflicting} download={download}
         onLocate={onEvidenceLocate} onArchive={database && storageKey ? archiveDocx : undefined} />}
       {staleStage && <p role="status" className="rounded border border-amber-200 bg-amber-50 p-2 text-sm text-amber-900">稿件已修改。请重新编译和检查后下载交付包。历史记录仍可复查。</p>}
       <p className="text-sm">Compile entry <code className="break-all">{compileEntry}</code></p>

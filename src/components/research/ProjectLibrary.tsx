@@ -227,7 +227,8 @@ export function ProjectLibrary() {
       await decodeProjectBackup(file)
       downloadFile(file, projectBackupFilename(snapshot.project.metadata.projectName))
       const receipt = { exportedAt: new Date().toISOString(), baseline: snapshot.baseline,
-        scope: 'files and Canvas, local drafts, submissions and revisions, snapshots' }
+        scope: 'files and Canvas, local drafts, submissions and revisions, snapshots' +
+          (snapshot.history.templateReleases?.length ? ', bound official templates' : '') }
       try {
         const key = libraryStorageKey(project.id)
         await recordProjectBackup(connection, key, receipt)
