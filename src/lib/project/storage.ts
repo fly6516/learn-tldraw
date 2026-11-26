@@ -356,12 +356,23 @@ export async function createRevisionRound(database: IDBDatabase, key: WritingKey
 }
 
 export async function addRevisionComment(database: IDBDatabase, key: WritingKey, roundId: string, comment: RevisionComment, chatRun?: string) {
+    return addRevisionComments(database, key, roundId, [comment], chatRun)
+}
+
+export async function addRevisionComments(database: IDBDatabase, key: WritingKey, roundId: string, comments: RevisionComment[], chatRun?: string) {
+    if (!comments.length) throw new Error('Add at least one reviewer comment.')
     return updateRevisionRound(database, key, roundId, round => {
-        if (round.comments.some(item => item.id === comment.id)) throw new Error('The reviewer comment is already in this round.')
-        if (comment.kind === 'canvas' && round.comments.some(item => item.kind === 'canvas' && item.nodeId === comment.nodeId)) {
-            throw new Error('This Canvas card is already in the round.')
+        const ids = new Set(round.comments.map(item => item.id))
+        const canvasNodes = new Set(round.comments.flatMap(item => item.kind === 'canvas' ? [item.nodeId] : []))
+        for (const comment of comments) {
+            if (ids.has(comment.id)) throw new Error('The reviewer comment is already in this round.')
+            ids.add(comment.id)
+            if (comment.kind === 'canvas') {
+                if (canvasNodes.has(comment.nodeId)) throw new Error('This Canvas card is already in the round.')
+                canvasNodes.add(comment.nodeId)
+            }
         }
-        return { ...round, comments: [...round.comments, comment] }
+        return { ...round, comments: [...round.comments, ...comments] }
     }, undefined, chatRun ? { run: chatRun, step: { kind: 'comment-added', at: Date.now() } } : undefined)
 }
 

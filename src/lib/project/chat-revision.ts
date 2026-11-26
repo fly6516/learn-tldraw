@@ -31,7 +31,7 @@ export async function prepareChatReply(database: IDBDatabase, key: WritingKey, r
   const comment = round.comments[request.comment - 1]
   if (!comment) throw new Error('No reviewer comment has that number in this round.')
   let target: string | undefined
-  if (comment.kind === 'comment') {
+  if (comment.kind === 'comment' && comment.target.type !== 'manuscript') {
     if ('path' in comment.target) target = comment.target.path
     else if ('path' in comment.target.anchor) target = comment.target.anchor.path
     else {

@@ -3,9 +3,10 @@ import type { ProjectFileSystem } from './types'
 import type { ReviewTarget } from './review-links'
 
 export type RevisionResponse = { kind: 'changed' | 'retained'; text: string; paths: string[] }
+export type RevisionCommentTarget = ReviewTarget | { type: 'file'; path: string } | { type: 'manuscript' }
 
 export type RevisionComment = { id: string; reviewer: string; text: string; response?: RevisionResponse } & (
-  | { kind: 'comment'; target: ReviewTarget | { type: 'file'; path: string } }
+  | { kind: 'comment'; target: RevisionCommentTarget }
   | { kind: 'canvas'; nodeId: string })
 
 export type RevisionRound = { id: string; name: string; submissionId: string; revisedSubmissionId?: string; createdAt: string; comments: RevisionComment[] }

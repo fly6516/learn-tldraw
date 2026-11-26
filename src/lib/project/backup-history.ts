@@ -53,6 +53,7 @@ const submission = identity.extend({
       return item?.sha256 === blob.sha256 && item.bytes === blob.bytes
     }))
 const target = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('manuscript') }),
   z.object({ type: z.literal('file'), path }),
   z.object({ type: z.literal('section'), anchor: sectionAnchorSchema }),
   z.object({ type: z.literal('formula'), anchor: figureAnchorSchema }),

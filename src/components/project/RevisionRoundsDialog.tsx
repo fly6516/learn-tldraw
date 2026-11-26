@@ -10,13 +10,14 @@ import type { CanvasSourceCatalog } from '@/lib/project/canvas-source-links'
 import type { SourceLocation } from '@/lib/project/latex-source'
 import { resolveReviewTarget, reviewTargetChoices, type ReviewItem } from '@/lib/project/review-links'
 import { compareRevisionFiles, readRevisionBaseline, type RevisionComment, type RevisionFile, type RevisionRound } from '@/lib/project/revision-rounds'
-import { addRevisionComment, createRevisionRound, linkRevisedSubmission, listRevisionRounds, listSubmissionVersions, readRevisionPackage, readSubmissionFiles, saveRevisionResponse } from '@/lib/project/storage'
+import { addRevisionComments, createRevisionRound, linkRevisedSubmission, listRevisionRounds, listSubmissionVersions, readRevisionPackage, readSubmissionFiles, saveRevisionResponse } from '@/lib/project/storage'
 import { buildRevisionPackage } from '@/lib/project/revision-package'
 import type { SubmissionVersionInfo } from '@/lib/project/submission'
 import type { ProjectFileSystem } from '@/lib/project/types'
 import type { WritingKey } from '@/lib/project/writing-drafts'
 import { RevisionFileComparison } from './RevisionFileComparison'
 import { RevisionResponses } from './RevisionResponses'
+import { ReviewLetterImport } from './ReviewLetterImport'
 import { download, submissionFilename } from './SubmissionDialog'
 
 export function RevisionRoundsDialog({ database, storageKey, initialSubmission, roundId, onSelectRound, current,
@@ -139,8 +140,8 @@ export function RevisionRoundsDialog({ database, storageKey, initialSubmission, 
           <Button size="sm" variant={tab === 'responses' ? 'default' : 'outline'} aria-pressed={tab === 'responses'} onClick={() => setTab('responses')}>Responses and letter</Button>
         </div>
         {tab === 'comments' && <RoundComments key={round.id} round={round} current={current} catalog={catalog} cards={cards} busy={busy}
-          openSource={openSource} openCanvas={openCanvas} onAdd={comment => perform(async () => {
-            updateRound(await addRevisionComment(database, storageKey, round.id, comment))
+          openSource={openSource} openCanvas={openCanvas} onAdd={comments => perform(async () => {
+            updateRound(await addRevisionComments(database, storageKey, round.id, comments))
           })} />}
         {tab === 'files' && <>
           {revisedVersion && <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={compareArchived}
@@ -171,9 +172,10 @@ export function RevisionRoundsDialog({ database, storageKey, initialSubmission, 
 
 function RoundComments({ round, current, catalog, cards, busy, openSource, openCanvas, onAdd }: {
   round: RevisionRound; current: ProjectFileSystem; catalog: CanvasSourceCatalog; cards: ReviewItem[]; busy: boolean
-  openSource: (path: string, location?: SourceLocation) => void; openCanvas: (card: ReviewItem) => void; onAdd: (comment: RevisionComment) => Promise<boolean>
+  openSource: (path: string, location?: SourceLocation) => void; openCanvas: (card: ReviewItem) => void; onAdd: (comments: RevisionComment[]) => Promise<boolean>
 }) {
-  const [mode, setMode] = useState<'comment' | 'canvas'>('comment')
+  const [mode, setMode] = useState<'comment' | 'canvas' | 'letter'>('comment')
+  const [importedCount, setImportedCount] = useState(0)
   const [reviewer, setReviewer] = useState('')
   const [text, setText] = useState('')
   const [targetId, setTargetId] = useState('')
@@ -191,28 +193,37 @@ function RoundComments({ round, current, catalog, cards, busy, openSource, openC
   const card = available.find(item => item.nodeId === targetId)
   const visible = round.comments.flatMap((comment, index) => {
     const linkedCard = comment.kind === 'canvas' ? cards.find(item => item.nodeId === comment.nodeId) : undefined
+    const wholeManuscript = comment.kind === 'comment' && comment.target.type === 'manuscript'
     const location = comment.kind === 'canvas' ? linkedCard?.source
-      : comment.target.type === 'file' ? undefined : resolveReviewTarget(catalog, comment.target)
+      : comment.target.type === 'file' || comment.target.type === 'manuscript' ? undefined : resolveReviewTarget(catalog, comment.target)
     const path = location?.path ?? (comment.kind === 'comment' && comment.target.type === 'file' && current.files.has(comment.target.path) ? comment.target.path : undefined)
     const matches = [comment.reviewer || 'Reviewer', comment.text, path].join(' ').toLowerCase().includes(search.trim().toLowerCase())
     return matches && (status === 'all' || (status === 'answered') === Boolean(comment.response))
-      ? [{ comment, index, linkedCard, location, path }] : []
+      ? [{ comment, index, linkedCard, location, path, wholeManuscript }] : []
   })
   return <section aria-label="Round reviewer comments" className="space-y-3">
-    <form className="space-y-2 rounded border p-2" onSubmit={async event => {
+    <div className="flex flex-wrap gap-2" role="group" aria-label="Comment source">
+      {([['comment', 'Enter comment'], ['canvas', 'Link Canvas card'], ['letter', 'Paste review letter']] as const).map(([value, label]) =>
+        <Button key={value} type="button" size="sm" variant={mode === value ? 'default' : 'outline'} aria-pressed={mode === value} disabled={busy}
+          onClick={() => { setMode(value); setTargetId(''); setImportedCount(0) }}>{label}</Button>)}
+    </div>
+    {mode === 'letter' ? <ReviewLetterImport busy={busy} targets={targets} onImport={async comments => {
+      if (!await onAdd(comments)) return false
+      setImportedCount(comments.length)
+      setSearch('')
+      setStatus('all')
+      setMode('comment')
+      return true
+    }} /> : <form className="space-y-2 rounded border p-2" onSubmit={async event => {
       event.preventDefault()
       if (busy) return
       const common = { id: crypto.randomUUID(), reviewer: reviewer.trim() }
       let saved: boolean
-      if (mode === 'comment' && target && text.trim()) saved = await onAdd({ ...common, kind: 'comment', text: text.trim(), target })
-      else if (mode === 'canvas' && card) saved = await onAdd({ ...common, kind: 'canvas', nodeId: card.nodeId, text: card.data.content || researchNodeTitle(card.data) })
+      if (mode === 'comment' && target && text.trim()) saved = await onAdd([{ ...common, kind: 'comment', text: text.trim(), target }])
+      else if (mode === 'canvas' && card) saved = await onAdd([{ ...common, kind: 'canvas', nodeId: card.nodeId, text: card.data.content || researchNodeTitle(card.data) }])
       else return
       if (saved) { setText(''); setTargetId('') }
     }}>
-      <div className="flex flex-wrap gap-2" role="group" aria-label="Comment source">
-        <Button type="button" size="sm" variant={mode === 'comment' ? 'default' : 'outline'} aria-pressed={mode === 'comment'} onClick={() => { setMode('comment'); setTargetId('') }}>Enter comment</Button>
-        <Button type="button" size="sm" variant={mode === 'canvas' ? 'default' : 'outline'} aria-pressed={mode === 'canvas'} onClick={() => { setMode('canvas'); setTargetId('') }}>Link Canvas card</Button>
-      </div>
       <label className="grid gap-1 text-sm font-medium">Reviewer<Input value={reviewer} onChange={event => setReviewer(event.target.value)} placeholder="Optional" maxLength={100} /></label>
       {mode === 'comment' && <label className="grid gap-1 text-sm font-medium">Reviewer comment
         <Textarea value={text} onChange={event => setText(event.target.value)} maxLength={12000} />
@@ -225,7 +236,8 @@ function RoundComments({ round, current, catalog, cards, busy, openSource, openC
         </select>
       </label>
       <Button type="submit" size="sm" disabled={busy || (mode === 'comment' ? !target || !text.trim() : !card)}>{mode === 'comment' ? 'Add reviewer comment' : 'Add Canvas card to round'}</Button>
-    </form>
+    </form>}
+    {importedCount > 0 && <p role="status" className="text-sm">Added {importedCount} {importedCount === 1 ? 'comment' : 'comments'} to the round.</p>}
     {round.comments.length ? <>
       <div className="flex flex-wrap items-end gap-2">
         <label className="grid min-w-44 flex-1 gap-1 text-sm font-medium">Filter comments
@@ -238,13 +250,14 @@ function RoundComments({ round, current, catalog, cards, busy, openSource, openC
         </label>
       </div>
       {visible.length ? <ol className="space-y-2">
-      {visible.map(({ comment, index, linkedCard, location, path }) => <li key={comment.id} className="space-y-1 rounded border p-2 text-sm">
+      {visible.map(({ comment, index, linkedCard, location, path, wholeManuscript }) => <li key={comment.id} className="space-y-1 rounded border p-2 text-sm">
           <p className="font-medium">{index + 1}. {comment.reviewer || 'Reviewer'}{comment.kind === 'canvas' && ' · Canvas review card'}</p>
           <p className="whitespace-pre-wrap break-words">{comment.text}</p>
           <p className="text-xs text-muted-foreground">{comment.response ? 'Answered' : 'Awaiting response'}</p>
           <div className="flex flex-wrap items-center gap-2">
             {path ? <Button size="sm" variant="link" className="h-auto break-all p-0" onClick={() => openSource(path, location)}>{path}{location && `:${location.line}`}</Button>
-              : <span className="text-xs text-amber-800">Source link unavailable</span>}
+              : wholeManuscript ? <span className="text-xs text-muted-foreground">Whole manuscript</span>
+                : <span className="text-xs text-amber-800">Source link unavailable</span>}
             {linkedCard && <Button size="sm" variant="ghost" onClick={() => openCanvas(linkedCard)}>Locate on Canvas</Button>}
             {comment.kind === 'canvas' && !linkedCard && <span className="text-xs text-amber-800">Canvas card unavailable</span>}
           </div>
