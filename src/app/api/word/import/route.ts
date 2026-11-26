@@ -315,10 +315,8 @@ async function exportSubmissionWord(work: string, request: Request, data: FormDa
   }
   const registered = await pinned(original, config.original.sha256, '官方原件')
   const project = await importSourceArchive(source, wordImportLimit)
-  const manuscript = captureManuscript(project.files, entry)
+  const manuscript = captureManuscript(project.files, entry, { allowLongtable: true })
   validateDocxSource(manuscript)
-  const abstractCitation = /\\(?:cite[a-z]*|nocite)\b/i.exec(manuscript.abstract)
-  if (abstractCitation) docxSourceError(manuscript, 'abstract', abstractCitation.index, '提交版摘要暂不支持文献引用。')
   const { run, office } = await wordJob(work, request.signal)
   let reference: Uint8Array = registered
   let cover: Uint8Array | undefined
@@ -349,6 +347,8 @@ async function exportSubmissionWord(work: string, request: Request, data: FormDa
     declaration = await readFile(join(work, 'declaration.docx'))
   }
   provenance += '\n稿件快照 SHA-256 ' + await projectSourceDigest(project.files, entry)
+  const deliveryId = data.get('delivery-id')
+  if (typeof deliveryId === 'string' && /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/.test(deliveryId)) provenance += '\n交付标识 ' + deliveryId
   provenance += '\n' + config.status
 
   async function runPandoc(args: string[], part: 'body' | 'abstract') {

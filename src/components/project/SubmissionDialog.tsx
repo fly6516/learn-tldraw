@@ -7,7 +7,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import { Download } from 'lucide-react'
 import type { SubmissionIssue, SubmissionVersion, SubmissionVersionInfo } from '@/lib/project/submission'
 import type { WritingKey } from '@/lib/project/writing-drafts'
-import { listSubmissionVersions, readSubmissionFiles, saveSubmissionVersion } from '@/lib/project/storage'
+import { attachArchivedWordFinal, listSubmissionDocx, listSubmissionVersions, readSubmissionDocx, readSubmissionFiles, saveSubmissionDocx, saveSubmissionVersion } from '@/lib/project/storage'
 import { ExternalCompilePanel } from './ExternalCompilePanel'
 import type { CompileCompatibility, ExternalEngine } from '@/lib/project/compile-compatibility'
 import { compilerLabels } from '@/lib/project/compile-profile'
@@ -20,6 +20,7 @@ import type { LayoutFinding } from '@/lib/project/layout-preflight'
 import { blindDeliveryBlocked, njuptBlindCover, submissionStageInfo, type SubmissionStage } from '@/lib/project/submission-stages'
 import { readSubmissionMaterials, submissionMaterialsSchema, type AttachedSubmissionMaterial, type SubmissionMaterialSlot } from '@/lib/project/submission-materials'
 import { packageSubmissionDelivery, verifyArchivedLayout, type SubmissionLayout } from '@/lib/project/submission-layout'
+import { verifyDocxDelivery, type SubmissionDocxDelivery, type SubmissionDocxDeliveryInfo } from '@/lib/project/submission-docx-delivery'
 
 export function download(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob)
@@ -81,6 +82,8 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
   layoutFindings?: LayoutFinding[]
 }) {
   const [versions, setVersions] = useState<SubmissionVersionInfo[]>([])
+  const [docxVersions, setDocxVersions] = useState<SubmissionDocxDeliveryInfo[]>([])
+  const [docxReview, setDocxReview] = useState<SubmissionDocxDelivery>()
   const [versionName, setVersionName] = useState('')
   const [saving, setSaving] = useState(false)
   const [archived, setArchived] = useState<VersionDraft>()
@@ -120,10 +123,43 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
   useEffect(() => {
     if (!database || !storageKey) return
     let active = true
-    void listSubmissionVersions(database, storageKey).then(items => { if (active) setVersions(items) })
+    void Promise.all([listSubmissionVersions(database, storageKey), listSubmissionDocx(database, storageKey)])
+      .then(([versions, docx]) => { if (active) { setVersions(versions); setDocxVersions(docx) } })
       .catch(() => { if (active) setArchiveError('Could not load archived submissions.') })
     return () => { active = false }
   }, [database, storageKey])
+
+  async function archiveDocx(delivery: SubmissionDocxDelivery) {
+    if (!database || !storageKey) throw new Error('当前项目存储不可用。')
+    setSaving(true)
+    try {
+      const info = await saveSubmissionDocx(database, storageKey, delivery)
+      setDocxVersions(items => [info, ...items])
+    } finally { setSaving(false) }
+  }
+
+  async function openArchivedDocx(id: string) {
+    if (!database || !storageKey) return
+    setArchiveError('')
+    setDocxReview(undefined)
+    try {
+      const found = await readSubmissionDocx(database, storageKey, id)
+      if (!found || !(await verifyDocxDelivery(found))) throw new Error('归档文件与 DOCX 检查报告不匹配。')
+      setDocxReview(found)
+    } catch (cause) { setArchiveError(cause instanceof Error ? cause.message : '无法读取 DOCX 归档。') }
+  }
+
+  async function attachFinalToArchive(record: SubmissionDocxDelivery, file: File) {
+    if (!database || !storageKey || saving) return
+    setSaving(true)
+    setArchiveError('')
+    try {
+      const updated = await attachArchivedWordFinal(database, storageKey, record, file)
+      setDocxVersions(items => items.map(info => info.id === updated.id ? { ...info, final: updated.final } : info))
+      setDocxReview(review => review?.id === updated.id ? updated : review)
+    } catch (cause) { setArchiveError(cause instanceof Error ? cause.message : '无法保存 Word 定稿。') }
+    finally { setSaving(false) }
+  }
 
   async function updateMaterials(slot: SubmissionMaterialSlot, files: File[]) {
     const report = currentLayoutReport
@@ -227,7 +263,8 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
           <a href={njuptBlindCover.page} target="_blank" rel="noreferrer" className="underline">封面发布页</a>
         </label>}
       </fieldset>}
-      <SubmissionDocxPanel project={target} main={main} template={templateOriginId} disabled={busy || saving || conflicting} download={download} />
+      <SubmissionDocxPanel project={target} main={main} template={templateOriginId} disabled={busy || saving || conflicting} download={download}
+        onLocate={onEvidenceLocate} onArchive={database && storageKey ? archiveDocx : undefined} />
       {staleStage && <p role="status" className="rounded border border-amber-200 bg-amber-50 p-2 text-sm text-amber-900">稿件已修改。请重新编译和检查后下载交付包。历史记录仍可复查。</p>}
       <p className="text-sm">Compile entry <code className="break-all">{compileEntry}</code></p>
       {drafts.length > 0 && <fieldset disabled={busy || saving} className="space-y-1 text-sm">
@@ -345,8 +382,38 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
           Save submission version
         </Button>
       </form>}
-      {!!versions.length && <section aria-label="Archived submissions" className="space-y-2 border-t pt-2 text-sm">
+      {(!!versions.length || !!docxVersions.length) && <section aria-label="Archived submissions" className="space-y-2 border-t pt-2 text-sm">
         <h2 className="font-medium">Archived submissions</h2>
+        {docxVersions.map(version => <details key={version.id} className="rounded border p-2">
+          <summary className="cursor-pointer break-all font-medium">{version.name} · DOCX · {new Date(version.createdAt).toLocaleString()}</summary>
+          <p>{version.template.name} · {version.template.version} · {version.final ? '已附作者保存的最终文件' : '生成稿'}</p>
+          <Button type="button" size="sm" variant="outline" onClick={() => void openArchivedDocx(version.id)}>复查归档 DOCX</Button>
+          {docxReview?.id === version.id && <section aria-label="DOCX 归档检查报告" className="mt-2 space-y-2 rounded border p-2">
+            <p>归档文件 SHA-256 校验通过 · {new Date(version.check.checkedAt).toLocaleString()}</p>
+            <p className="break-all">稿件快照 SHA-256 <code>{version.snapshotSha256}</code></p>
+            <p className="break-all">原件 SHA-256 <code>{version.template.sha256}</code></p>
+            <ul className="space-y-2">{[
+              { metadata: version.source, blob: docxReview.sourceZip, label: '下载归档稿件源包' },
+              { metadata: version.generated, blob: docxReview.generatedDocx, label: '下载归档生成稿' },
+              { metadata: version.final, blob: docxReview.finalDocx, label: '下载归档 Word 定稿' },
+            ].map(({ metadata, blob, label }) => metadata && blob && <li key={label} className="break-all">
+              <button type="button" className="underline" onClick={() => download(blob, metadata.name)}>{label}</button>
+              <p className="text-xs">SHA-256 <code>{metadata.sha256}</code></p>
+            </li>)}</ul>
+            <ul className="list-disc pl-5">{version.check.findings.map(item => <li key={item.message}>{item.message}</li>)}</ul>
+            {!version.final && <label className="block">
+              补附 Word 保存的最终文件
+              <Input type="file" accept=".docx" disabled={saving} onChange={event => {
+                const file = event.target.files?.[0]
+                event.target.value = ''
+                if (file) void attachFinalToArchive(docxReview, file)
+              }} />
+            </label>}
+            <Button type="button" size="sm" variant="outline" onClick={() => download(
+              new Blob([JSON.stringify(version, null, 2)], { type: 'application/json' }), submissionFilename(version.name) + '-docx-report.json'
+            )}>下载 DOCX 检查报告</Button>
+          </section>}
+        </details>)}
         {versions.map(version => <details key={version.id} className="rounded border p-2">
           <summary className="cursor-pointer break-all font-medium">{version.name} · {new Date(version.createdAt).toLocaleString()}</summary>
           <p className="mt-1 break-all">{version.main} · {version.paths.length} files · {version.drafts.length} local drafts</p>

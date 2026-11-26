@@ -7,6 +7,7 @@ import type { RevisionRound } from './revision-rounds'
 import type { ProjectSnapshot } from './snapshots'
 import { isProjectPath } from './source-archive'
 import type { SubmissionVersion } from './submission'
+import { submissionDocxDeliveryInfo, submissionDocxMime, verifyDocxDelivery, type SubmissionDocxDelivery } from './submission-docx-delivery'
 import { submissionLayoutSchema } from './submission-layout'
 import type { SourceMove } from './writing-ai-evidence'
 import { chatWorkflowSchema, compileFeedbackSchema, revisionSetupSchema, submissionChatSchema, type ChatCheckpoint, type ChatHistory, type ChatTaskStep, type WritingChatMessage } from './writing-chat'
@@ -16,7 +17,7 @@ import { submissionEvidenceSchema } from './submission-evidence'
 import { aiContextReceiptSchema } from './ai-read-scope'
 
 export type PortableProjectHistory = {
-  publication?: { submissions: SubmissionVersion[]; rounds: RevisionRound[] }
+  publication?: { submissions: SubmissionVersion[]; rounds: RevisionRound[]; docx?: SubmissionDocxDelivery[] }
   snapshots?: ProjectSnapshot[]
   ai?: { history?: ChatHistory; moves: SourceMove[]; tasks: Record<string, ChatTaskStep[]>
     checkpoints: Record<string, ChatCheckpoint>; verifications: Record<string, ChatVerification>; builds?: Record<string, ManuscriptBuild> }
@@ -34,6 +35,7 @@ const selection = z.array(z.number().int().min(0).max(19)).max(20)
 const location = z.object({ path, line: positive, start: z.number().int().nonnegative(), end: z.number().int().nonnegative() })
 const issue = z.object({ severity: z.enum(['error', 'warning']), message: text, location: location.optional() })
 const storedBlob = z.object({ sha256: hash, bytes: z.number().int().positive() })
+const docxSubmission = submissionDocxDeliveryInfo
 const submission = identity.extend({
   main: path, paths: z.array(path), excluded: z.array(path), drafts: z.array(path), issues: z.array(issue),
   warnings: z.boolean(), diagnostics: z.array(issue), externalEngine: z.enum(['pdflatex', 'xelatex', 'lualatex']).optional(),
@@ -101,7 +103,7 @@ const ai = z.object({
     externalEngine: z.enum(['pdflatex', 'xelatex', 'lualatex']).optional(), compileProfile: compileProfileSchema.optional() })).max(12).refine(unique).optional(),
 })
 export const backupHistorySchema = z.object({
-  publication: z.object({ submissions: z.array(submission), rounds: z.array(round) }).refine(({ submissions, rounds }) => {
+  publication: z.object({ submissions: z.array(submission), rounds: z.array(round), docx: z.array(docxSubmission).refine(unique).optional() }).refine(({ submissions, rounds }) => {
     const ids = new Set(submissions.map(value => value.id))
     return unique(submissions) && unique(rounds) && rounds.every(value => ids.has(value.submissionId) && unique(value.comments)
       && (!value.revisedSubmissionId || value.revisedSubmissionId !== value.submissionId && ids.has(value.revisedSubmissionId)))
@@ -133,6 +135,16 @@ export async function encodeBackupHistory(archive: JSZip, history: PortableProje
       zip: await write(`history/submissions/${index}.zip`, zip),
       materials: materials && await Promise.all(materials.map((blob, number) => write(`history/submissions/${index}/${number}`, blob))) })
   }
+  const docx = []
+  for (const [index, delivery] of (history.publication?.docx ?? []).entries()) {
+    if (!(await verifyDocxDelivery(delivery))) throw new Error('Archived DOCX delivery checksums do not match.')
+    const { sourceZip, generatedDocx, finalDocx, ...info } = delivery
+    const folder = `history/docx/${index}/`
+    await write(folder + 'source.zip', sourceZip)
+    await write(folder + 'generated.docx', generatedDocx)
+    if (finalDocx) await write(folder + 'final.docx', finalDocx)
+    docx.push(info)
+  }
   const snapshots = []
   for (const [index, snapshot] of (history.snapshots ?? []).entries()) {
     const { project, ...info } = snapshot
@@ -145,7 +157,7 @@ export async function encodeBackupHistory(archive: JSZip, history: PortableProje
     encodedBuilds.push({ id, ...build, pdf: await write(`history/manuscript-builds/${index}.pdf`, pdf) })
   }
   return backupHistorySchema.parse({
-    publication: history.publication && { submissions, rounds: history.publication.rounds }, snapshots: history.snapshots && snapshots,
+    publication: history.publication && { submissions, rounds: history.publication.rounds, docx: docx.length ? docx : undefined }, snapshots: history.snapshots && snapshots,
     ai: history.ai && { ...aiHistory, builds: encodedBuilds.length ? encodedBuilds : undefined },
   })
 }
@@ -173,6 +185,13 @@ export async function decodeBackupHistory(archive: JSZip, manifest: z.infer<type
       materials: materials && await Promise.all(materials.map((blob, number) =>
         read(`history/submissions/${index}/${number}`, blob, info.layoutReport?.materials?.[number]?.mime ?? ''))) })
   }
+  const docx = []
+  for (const [index, delivery] of (manifest.publication?.docx ?? []).entries()) {
+    const folder = `history/docx/${index}/`
+    docx.push({ ...delivery, sourceZip: await read(folder + 'source.zip', delivery.source, 'application/zip'),
+      generatedDocx: await read(folder + 'generated.docx', delivery.generated, submissionDocxMime),
+      finalDocx: delivery.final && await read(folder + 'final.docx', delivery.final, submissionDocxMime) })
+  }
   const snapshots = []
   for (const [index, snapshot] of (manifest.snapshots ?? []).entries()) {
     const { archive: entry, hasCanvas, ...info } = snapshot
@@ -190,7 +209,7 @@ export async function decodeBackupHistory(archive: JSZip, manifest: z.infer<type
     if (await blob.slice(0, 5).text() !== '%PDF-') throw new Error('The pending manuscript artifact is not a PDF.')
     decodedBuilds[id] = { ...build, pdf: blob }
   }
-  return { publication: manifest.publication && { submissions, rounds: manifest.publication.rounds },
+  return { publication: manifest.publication && { submissions, rounds: manifest.publication.rounds, docx: docx.length ? docx : undefined },
     snapshots: manifest.snapshots && snapshots,
     ai: manifest.ai && { ...manifest.ai, builds: Object.keys(decodedBuilds).length ? decodedBuilds : undefined } }
 }

@@ -5,8 +5,10 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { fetchOfficialFile } from '@/lib/project/official-template-client'
 import { templateDigest } from '@/lib/project/paper-templates'
-import { exportSourceArchive } from '@/lib/project/source-archive'
-import { submissionDocxConfig, submissionDocxFields, submissionDocxIds, type SubmissionDocxFields, type SubmissionDocxId } from '@/lib/project/submission-docx-config'
+import { projectSourceDigest } from '@/lib/project/external-template-build'
+import { exportExternalBuild } from '@/lib/project/submission'
+import { submissionDocxConfig, submissionDocxIds, type SubmissionDocxFields, type SubmissionDocxId } from '@/lib/project/submission-docx-config'
+import { checkDocxSubmission, verifyWordFinal, type SubmissionDocxDelivery } from '@/lib/project/submission-docx-delivery'
 import { captureManuscript } from '@/lib/project/template-export'
 import type { ProjectFileSystem } from '@/lib/project/types'
 import { wordRequest } from '@/lib/project/word-conversion-client'
@@ -17,8 +19,10 @@ const labels = [
   ['chineseKeywords', '中文关键词', 250], ['englishKeywords', '英文关键词', 250],
 ] as const
 
-export function SubmissionDocxPanel({ project, main, template, disabled, download }: {
+export function SubmissionDocxPanel({ project, main, template, disabled, download, onLocate, onArchive }: {
   project: ProjectFileSystem; main: string; template?: string; disabled: boolean; download: (blob: Blob, name: string) => void
+  onLocate: (path: string, line: number) => void
+  onArchive?: (delivery: SubmissionDocxDelivery) => Promise<void>
 }) {
   const [open, setOpen] = useState(false)
   const [school, setSchool] = useState<SubmissionDocxId>(() => submissionDocxIds.find(id => id === template) ?? submissionDocxIds[0])
@@ -28,15 +32,21 @@ export function SubmissionDocxPanel({ project, main, template, disabled, downloa
   })
   const [uploads, setUploads] = useState<{ original?: File; guideline?: File }>({})
   const [error, setError] = useState('')
-  const [busy, setBusy] = useState(false)
+  const [busy, setBusy] = useState<'export' | 'attach' | 'archive'>()
+  const [checked, setChecked] = useState<{ project: ProjectFileSystem; main: string; school: SubmissionDocxId; fields: SubmissionDocxFields; report: ReturnType<typeof checkDocxSubmission> }>()
+  const [receipt, setReceipt] = useState<{ check: NonNullable<typeof checked>; delivery: SubmissionDocxDelivery }>()
+  const [archiveName, setArchiveName] = useState('')
+  const [saved, setSaved] = useState('')
   const request = useRef<AbortController | undefined>(undefined)
   const config = submissionDocxConfig(school)
+  const fresh = checked?.project === project && checked.main === main && checked.school === school && checked.fields === fields ? checked : undefined
+  const delivery = receipt?.check === fresh ? receipt?.delivery : undefined
   useEffect(() => () => request.current?.abort(), [project, main])
 
   function openForm() {
     setOpen(true)
     try {
-      const snapshot = captureManuscript(project.files, main)
+      const snapshot = captureManuscript(project.files, main, { allowLongtable: true })
       setFields(current => ({ ...current, author: current.author || snapshot.authors.join('、'),
         englishKeywords: current.englishKeywords || (/^[^\\\$\{\}]*$/.test(snapshot.keywords) ? snapshot.keywords : '') }))
     } catch (cause) {
@@ -47,15 +57,12 @@ export function SubmissionDocxPanel({ project, main, template, disabled, downloa
   async function exportDocx() {
     if (busy || disabled) return
     setError('')
-    const checked = submissionDocxFields.safeParse(fields)
-    if (!checked.success) {
-      const name = checked.error.issues[0]?.path[0]
-      setError('请核对“' + (labels.find(([key]) => key === name)?.[1] ?? '中文摘要') + '”。')
-      return
-    }
+    const check = runCheck()
+    const normalized = check.report.fields
+    if (!normalized || check.report.findings.some(item => item.status === 'blocking')) return
     const controller = new AbortController()
     request.current = controller
-    setBusy(true)
+    setBusy('export')
     const { signal } = controller
     async function original(pin: string, local?: File, asset?: 'guideline' | 'docx-bundle') {
       if (!local) return fetchOfficialFile(school, pin, asset, signal)
@@ -65,7 +72,6 @@ export function SubmissionDocxPanel({ project, main, template, disabled, downloa
       return local
     }
     try {
-      captureManuscript(project.files, main)
       let word: File
       let guide: File | undefined
       try {
@@ -81,30 +87,74 @@ export function SubmissionDocxPanel({ project, main, template, disabled, downloa
       data.set('intent', 'export-submission-docx')
       data.set('school', school)
       data.set('main', main)
-      data.set('fields', JSON.stringify(checked.data))
+      data.set('fields', JSON.stringify(normalized))
+      const id = crypto.randomUUID()
+      data.set('delivery-id', id)
       data.set('original', word)
       if (guide) data.set('guideline', guide)
-      const zip = await exportSourceArchive(project)
+      const [{ zip, checksum }, snapshotSha256] = await Promise.all([exportExternalBuild(project), projectSourceDigest(project.files, main)])
       if (word.size + (guide?.size ?? 0) + zip.size > 16 * 1024 * 1024) throw new Error('官方原件和项目源包共计不得超过 16 MB。')
       data.set('source', zip, 'manuscript.zip')
       const blob = await (await wordRequest(data, signal)).blob()
       signal.throwIfAborted()
-      const name = checked.data.title.replace(/[<>:"/\\|?*\p{Cc}]/gu, '-').replace(/[. ]+$/, '') || 'submission'
-      download(blob, name + '-' + config.version + '.docx')
+      const name = normalized.title.replace(/[<>:"/\\|?*\p{Cc}]/gu, '-').replace(/[. ]+$/, '') || 'submission'
+      const filename = name + '-' + config.version + '.docx'
+      const template = { id: school, name: config.name, sourceUrl: config.sourceUrl, version: config.version, sha256: config.original.sha256 }
+      const generated = await verifyWordFinal(new File([blob], filename), { id, template, snapshotSha256 })
+      signal.throwIfAborted()
+      setReceipt({ check, delivery: { id, name, createdAt: new Date().toISOString(), template, main, snapshotSha256,
+        check: { checkedAt: check.report.checkedAt, findings: check.report.findings },
+        source: { name: 'manuscript-source.zip', bytes: zip.size, sha256: checksum }, sourceZip: zip, generated, generatedDocx: blob } })
+      setArchiveName(name)
+      download(blob, filename)
     } catch (cause) {
       setError(signal.aborted ? '导出已取消，请从当前稿件重新导出。' : cause instanceof Error ? cause.message : 'DOCX 导出失败。')
     } finally {
       if (request.current === controller) {
         request.current = undefined
-        setBusy(false)
+        setBusy(undefined)
       }
     }
   }
 
+  function runCheck() {
+    setError('')
+    setSaved('')
+    if (fresh) return fresh
+    const value = { project, main, school, fields, report: checkDocxSubmission(project, main, fields) }
+    setChecked(value)
+    return value
+  }
+
+  async function attachFinal(file?: File) {
+    if (!receipt || !delivery || busy) return
+    setError('')
+    setBusy('attach')
+    try {
+      const final = file && await verifyWordFinal(file, delivery)
+      setReceipt({ ...receipt, delivery: { ...delivery, final, finalDocx: file } })
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法读取 Word 定稿。')
+    } finally { setBusy(undefined) }
+  }
+
+  async function archiveDelivery() {
+    if (!delivery || !onArchive || busy || disabled || !archiveName.trim()) return
+    setError('')
+    setBusy('archive')
+    try {
+      await onArchive({ ...delivery, name: archiveName.trim(), createdAt: new Date().toISOString() })
+      setSaved(archiveName.trim())
+      setReceipt(undefined)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法归档提交版 DOCX。')
+    } finally { setBusy(undefined) }
+  }
+
   if (!open) return <Button type="button" variant="outline" disabled={disabled || !main} onClick={openForm}>导出 Word（DOCX）</Button>
-  return <form aria-label="导出 Word（DOCX）" className="space-y-3 rounded-md border p-3 text-sm" onSubmit={event => { event.preventDefault(); void exportDocx() }}>
+  return <form aria-label="导出 Word（DOCX）" noValidate className="space-y-3 rounded-md border p-3 text-sm" onSubmit={event => { event.preventDefault(); void exportDocx() }}>
     <h2 className="font-medium">导出 Word（DOCX）</h2>
-    <fieldset disabled={busy || disabled} className="space-y-2">
+    <fieldset disabled={Boolean(busy) || disabled} className="space-y-2">
       <label className="block">目标学校
         <select className="mt-1 block w-full rounded border bg-background p-2" value={school} onChange={event => {
           setSchool(event.target.value as SubmissionDocxId)
@@ -148,13 +198,40 @@ export function SubmissionDocxPanel({ project, main, template, disabled, downloa
       </details>
       <p>英文摘要与正文取自上方所选稿件。在 Word 中更新整份目录和引用字段后，目录才会显示页码。签名由作者和导师填写。</p>
     </fieldset>
+    {checked && !fresh && <p role="status">稿件或导出信息已变更。请重新检查并生成当前交付文件。</p>}
+    {fresh && <section aria-label="DOCX 导出前检查" role={fresh.report.findings.some(item => item.status === 'blocking') ? 'alert' : 'status'}>
+      <p>{fresh.report.findings.some(item => item.status === 'blocking') ? '请先修正以下问题' : '导出前检查通过'}</p>
+      <ul className="list-disc space-y-1 pl-5">{fresh.report.findings.map((item, index) => <li key={index}>
+        {item.field && <strong>{labels.find(([key]) => key === item.field)?.[1] ?? ({
+          chineseAbstract: '中文摘要', acknowledgment: '致谢', confidentiality: '论文公开状态',
+        } as Record<string, string>)[item.field] ?? item.field} · </strong>}
+        {item.location && <button type="button" className="underline" onClick={() => onLocate(item.location!.path, item.location!.line)}>
+          {item.location.path}:{item.location.line}
+        </button>}{item.location && ' · '}{item.message}
+      </li>)}</ul>
+    </section>}
+    {delivery && onArchive && <fieldset disabled={Boolean(busy) || disabled} className="space-y-2 rounded border p-2">
+      <p className="break-all">稿件快照 SHA-256 <code>{delivery.snapshotSha256}</code></p>
+      <label className="block">交付归档名称<Input maxLength={100} value={archiveName} onChange={event => setArchiveName(event.target.value)} /></label>
+      <label className="block">附上 Word 保存的最终文件（选填）
+        <Input type="file" accept=".docx" onChange={event => {
+          const file = event.target.files?.[0]
+          event.target.value = ''
+          if (file) void attachFinal(file)
+        }} />
+      </label>
+      {delivery.final && <p>{delivery.final.name} <button type="button" className="underline" onClick={() => void attachFinal()}>移除</button></p>}
+      <Button type="button" variant="outline" disabled={!archiveName.trim()} onClick={() => void archiveDelivery()}>归档 DOCX 交付</Button>
+    </fieldset>}
+    {saved && <p role="status">已归档 {saved}</p>}
     {error && <p role="alert" className="break-words text-red-800">{error}</p>}
     <div className="flex flex-wrap gap-2">
-      <Button type="submit" disabled={busy || disabled}>{busy ? '正在生成 DOCX…' : '生成并下载 DOCX'}</Button>
-      <Button type="button" variant="outline" onClick={() => {
-        if (busy) request.current?.abort()
+      <Button type="button" variant="outline" disabled={Boolean(busy) || disabled} onClick={runCheck}>检查 DOCX 导出</Button>
+      <Button type="submit" disabled={Boolean(busy) || disabled}>{busy === 'export' ? '正在生成 DOCX…' : '生成并下载 DOCX'}</Button>
+      <Button type="button" variant="outline" disabled={Boolean(busy && busy !== 'export')} onClick={() => {
+        if (busy === 'export') request.current?.abort()
         else setOpen(false)
-      }}>{busy ? '取消生成' : '收起'}</Button>
+      }}>{busy === 'export' ? '取消生成' : '收起'}</Button>
     </div>
   </form>
 }

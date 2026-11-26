@@ -13,6 +13,7 @@ import type { OfficialTemplateRelease, TemplateOrigin } from './template-release
 import type { ProjectSnapshot, ProjectSnapshotInfo } from './snapshots'
 import { restoreSnapshotFiles } from './snapshots'
 import type { SubmissionVersion, SubmissionVersionInfo } from './submission'
+import { verifyDocxDelivery, verifyWordFinal, type SubmissionDocxDelivery, type SubmissionDocxDeliveryInfo } from './submission-docx-delivery'
 import { submissionEvidenceLedger } from './submission-evidence'
 import type { RevisionComment, RevisionResponse, RevisionRound } from './revision-rounds'
 import type { RevisionPackageInput } from './revision-package'
@@ -180,6 +181,56 @@ export async function readSubmissionFiles(database: IDBDatabase, key: WritingKey
     const request = transaction.objectStore(storeName).get(['submission-files', ...key, id])
     await complete(transaction)
     return request.result as Pick<SubmissionVersion, 'pdf' | 'zip' | 'materials'> | undefined
+}
+
+export async function listSubmissionDocx(database: IDBDatabase, key: WritingKey) {
+    const transaction = database.transaction(storeName)
+    const request = transaction.objectStore(storeName).getAll(historyRange('submission-docx-info', key))
+    await complete(transaction)
+    return (request.result as SubmissionDocxDeliveryInfo[]).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+}
+
+export async function saveSubmissionDocx(database: IDBDatabase, key: WritingKey, delivery: SubmissionDocxDelivery) {
+    if (!(await verifyDocxDelivery(delivery))) throw new Error('交付文件与检查记录的 SHA-256 不一致。')
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    const store = transaction.objectStore(storeName)
+    const { sourceZip, generatedDocx, finalDocx, ...info } = delivery
+    store.add({ sourceZip, generatedDocx, finalDocx }, ['submission-docx-files', ...key, info.id])
+    store.add(info, ['submission-docx-info', ...key, info.id])
+    await complete(transaction)
+    return info
+}
+
+export async function readSubmissionDocx(database: IDBDatabase, key: WritingKey, id: string): Promise<SubmissionDocxDelivery | undefined> {
+    const transaction = database.transaction(storeName)
+    const store = transaction.objectStore(storeName)
+    const info = store.get(['submission-docx-info', ...key, id])
+    const files = store.get(['submission-docx-files', ...key, id])
+    await complete(transaction)
+    if (info.result && files.result) return { ...info.result, ...files.result }
+}
+
+export async function attachArchivedWordFinal(database: IDBDatabase, key: WritingKey, record: SubmissionDocxDelivery, file: File) {
+    const final = await verifyWordFinal(file, record)
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    const store = transaction.objectStore(storeName)
+    const infoKey = ['submission-docx-info', ...key, record.id]
+    const filesKey = ['submission-docx-files', ...key, record.id]
+    const info = store.get(infoKey)
+    const files = store.get(filesKey)
+    let saved: SubmissionDocxDelivery | undefined
+    files.onsuccess = () => {
+        const existing = info.result as SubmissionDocxDeliveryInfo | undefined
+        if (!existing || existing.final || !files.result || existing.generated.sha256 !== record.generated.sha256) return
+        const updated = { ...existing, final }
+        const attachments = { ...files.result, finalDocx: file }
+        store.put(updated, infoKey)
+        store.put(attachments, filesKey)
+        saved = { ...updated, ...attachments }
+    }
+    await complete(transaction)
+    if (!saved) throw new Error('这条归档已变更或已有 Word 定稿。请重新打开归档。')
+    return saved
 }
 
 export async function readRevisionPackage(database: IDBDatabase, key: WritingKey, reviewed: RevisionRound): Promise<RevisionPackageInput> {
@@ -520,6 +571,8 @@ function backupHistoryReader(store: IDBObjectStore, key: WritingKey, selection: 
     const publication = selection.publication ? {
         submissions: store.getAll(historyRange('submission-info', key)),
         files: readRecord<Pick<SubmissionVersion, 'pdf' | 'zip' | 'materials'>>('submission-files'),
+        docx: store.getAll(historyRange('submission-docx-info', key)),
+        docxFiles: readRecord<Pick<SubmissionDocxDelivery, 'sourceZip' | 'generatedDocx' | 'finalDocx'>>('submission-docx-files'),
         rounds: store.getAll(historyRange('revision-round', key)),
     } : undefined
     const snapshots = selection.snapshots ? { list: store.get(snapshotList(key)), projects: readRecord<ProjectFileSystem>('snapshot') } : undefined
@@ -537,7 +590,12 @@ function backupHistoryReader(store: IDBObjectStore, key: WritingKey, selection: 
                 if (!(pair?.pdf instanceof Blob) || !(pair?.zip instanceof Blob)) throw new Error(`Archived PDF or ZIP is unavailable for ${info.name}.`)
                 return { ...info, ...pair }
             })
-            backup.publication = { submissions, rounds: publication.rounds.result as RevisionRound[] }
+            const docxFiles = publication.docxFiles()
+            const docx = (publication.docx.result as SubmissionDocxDeliveryInfo[]).map(info => {
+                if (!docxFiles[info.id]) throw new Error(`Archived DOCX files are unavailable for ${info.name}.`)
+                return { ...info, ...docxFiles[info.id] }
+            })
+            backup.publication = { submissions, rounds: publication.rounds.result as RevisionRound[], docx: docx.length ? docx : undefined }
         }
         if (snapshots) {
             const projects = snapshots.projects()
@@ -568,12 +626,16 @@ export async function readBackupHistory(database: IDBDatabase, key: WritingKey, 
 
 function restoreBackupHistory(store: IDBObjectStore, key: WritingKey, history: PortableProjectHistory) {
     if (history.publication) {
-        for (const bucket of ['submission-files', 'submission-info', 'revision-round']) store.delete(historyRange(bucket, key))
+        for (const bucket of ['submission-files', 'submission-info', 'submission-docx-info', 'submission-docx-files', 'revision-round']) store.delete(historyRange(bucket, key))
         for (const { pdf, zip, materials, ...info } of history.publication.submissions) {
             store.put({ pdf, zip, materials }, ['submission-files', ...key, info.id])
             store.put(info, ['submission-info', ...key, info.id])
         }
         for (const round of history.publication.rounds) store.put(round, ['revision-round', ...key, round.id])
+        for (const { sourceZip, generatedDocx, finalDocx, ...info } of history.publication.docx ?? []) {
+            store.put({ sourceZip, generatedDocx, finalDocx }, ['submission-docx-files', ...key, info.id])
+            store.put(info, ['submission-docx-info', ...key, info.id])
+        }
     }
     if (history.snapshots) {
         store.delete(historyRange('snapshot', key))
@@ -628,13 +690,14 @@ function recoveryStateReader(store: IDBObjectStore, workspace: string, project: 
     const key: WritingKey = [workspace, project.metadata.createdAt]
     const drafts = readDraftRecords(store, key)
     const submissions = store.getAll(historyRange('submission-info', key))
+    const docx = store.getAll(historyRange('submission-docx-info', key))
     const rounds = store.getAll(historyRange('revision-round', key))
     const snapshots = store.get(snapshotList(key))
     return () => ({
         version: project.storageRevision ?? project.metadata.updatedAt,
         drafts: Object.fromEntries(drafts.keys.result.map((entry, index) =>
             [(entry as [string, ...WritingKey, string])[3], drafts.values.result[index]])),
-        history: [submissions.result, rounds.result, snapshots.result],
+        history: [submissions.result, rounds.result, snapshots.result, ...(docx.result.length ? [docx.result] : [])],
     })
 }
 

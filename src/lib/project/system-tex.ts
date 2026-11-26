@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
-import { basename, delimiter, dirname, join, posix } from 'node:path'
+import { basename, delimiter, dirname, isAbsolute, join, posix } from 'node:path'
 import { promisify } from 'node:util'
 import type { CompileProfile } from './compile-profile'
 import { isProjectPath } from './source-archive'
@@ -39,7 +39,14 @@ export async function runSystemTex(profile: Exclude<CompileProfile, { engine: 't
   const limits = { openin_any: 'p', openout_any: 'p', shell_escape: 'f' }
   const inherited = Object.fromEntries(Object.entries(process.env)
     .filter(([name]) => /^(PATH|PATHEXT|SYSTEMROOT|WINDIR|TEMP|TMP|HOME|USERPROFILE|LOCALAPPDATA|APPDATA|LANG|LC_[A-Z_]+)$/i.test(name)))
-  const env = { ...inherited, ...limits, NODE_ENV: process.env.NODE_ENV, BSTINPUTS: `.${delimiter}.//${delimiter}`, BIBINPUTS: `.${delimiter}.//${delimiter}` }
+  // Only the local operator can configure the search directory. Do not inherit
+  // TeX paths from the process environment or from project data.
+  const fontDirectory = process.env.LATEX_LOCAL_CJK_FONT_DIR
+  if (fontDirectory && (!isAbsolute(fontDirectory) || fontDirectory.includes(delimiter) || /[\r\n\0{}$!]/.test(fontDirectory))) {
+    throw new Error('LATEX_LOCAL_CJK_FONT_DIR must be one absolute local font directory.')
+  }
+  const env = { ...inherited, ...limits, NODE_ENV: process.env.NODE_ENV, BSTINPUTS: `.${delimiter}.//${delimiter}`,
+    BIBINPUTS: `.${delimiter}.//${delimiter}`, ...(fontDirectory && profile.engine === 'xelatex' ? { TTFONTS: fontDirectory + delimiter } : {}) }
   const wslSourceRoot = distribution && (await exec('wsl.exe', ['-d', distribution, '--exec', 'wslpath', '-a',
     project.sourceRoot.replace(/\\/g, '/')], options)).stdout.trim()
   const wslCwd = wslSourceRoot && posix.dirname(posix.join(wslSourceRoot, project.main))

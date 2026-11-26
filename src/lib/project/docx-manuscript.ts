@@ -9,12 +9,13 @@ type Attribute = [id: string, classes: string[], pairs: [string, string][]]
 type Caption = [Value, Node[]]
 
 export type WordToken =
-  | { kind: 'heading'; tocBookmark: string; referenceBookmark?: string }
-  | { kind: 'caption'; bookmark?: string; chapter: number; sequence: number; object: 'Figure' | 'Table' }
-  | { kind: 'reference'; bookmark: string; cached: string; mode: 'text' | 'page' | 'number' | 'chapter-number'; prefix?: string }
+  | { kind: 'heading'; tocBookmark: string; referenceBookmark?: string; appendix?: { number: string; firstLevel: boolean } }
+  | { kind: 'caption'; bookmark?: string; chapter: string; sequence: number; object: 'Figure' | 'Table' }
+  | { kind: 'equation'; bookmark?: string; chapter: string; sequence: number }
+  | { kind: 'reference'; bookmark: string; cached: string; mode: 'text' | 'page' | 'number' | 'chapter-number'; prefix?: string; suffix?: string }
   | { kind: 'bibliography'; bookmark: string; number: string }
 
-export type WordHeading = { level: number; number: string; title: string; bookmark: string }
+export type WordHeading = { level: number; number: string; title: string; bookmark: string; appendix?: boolean }
 
 export function chineseChapterNumber(number: string) {
   if (Number(number) > 9999) return number
@@ -47,44 +48,80 @@ function nodeText(value: Value | undefined) {
 }
 
 export function docxSourceError(snapshot: ManuscriptSnapshot, part: 'body' | 'abstract', offset: number, message: string): never {
-  const line = lineNumber(snapshot[part], offset)
-  const location = snapshot.lineSources[part].get(line) ?? [...snapshot.lineSources[part].values()][0]
+  const location = sourceLocation(snapshot, part, offset)
   throw new Error(location ? `${location.path}:${location.line} · ${message}` : message)
 }
 
+function sourceLocation(snapshot: ManuscriptSnapshot, part: 'body' | 'abstract', offset: number) {
+  const lines = snapshot.lineSources[part]
+  return lines.get(lineNumber(snapshot[part], offset)) ?? lines.values().next().value
+}
+
 export function docxLatexForPandoc(source: string) {
-  // Pandoc's LaTeX reader drops pageref. Pass it through as a marked
-  // internal link and recover the native Word field after citation processing.
+  // Preserve commands Pandoc's LaTeX reader otherwise discards.
   const masked = maskLatexCode(source, true)
   let text = ''
   let offset = 0
-  for (const match of masked.matchAll(/\\(?:\\|pageref\s*\{([^{}\s]+)\})/g)) {
-    if (!match[1]) continue
-    text += source.slice(offset, match.index) + '\\href{#' + match[1] + '}{WbxPageReferenceX}' + match[0].replace(/[^\r\n]/g, '')
+  for (const match of masked.matchAll(/\\(?:\\|appendix\b|pageref\s*\{([^{}\s]+)\})/g)) {
+    if (match[0] === '\\\\') continue
+    const replacement = match[1] ? '\\href{#' + match[1] + '}{WbxPageReferenceX}' : '\\par\\texttt{WbxBeginAppendicesX}\\par'
+    text += source.slice(offset, match.index) + replacement + match[0].replace(/[^\r\n]/g, '')
     offset = match.index + match[0].length
   }
   return text + source.slice(offset)
 }
 
 export function validateDocxSource(snapshot: ManuscriptSnapshot) {
+  const issue = docxSourceFindings(snapshot)[0]
+  if (issue) throw new Error(issue.location ? `${issue.location.path}:${issue.location.line} · ${issue.message}` : issue.message)
+}
+
+const unsupportedCommands = /\\(?:begin\s*\{(?:align\*?|gather\*?|itemize|enumerate|description|verbatim\*?)\}|(?:footnote(?:mark|text)?|paragraph|tag)\b)/g
+const equationEnvironment = /^\s*\\begin\s*\{equation\}([\s\S]*?)\\end\s*\{equation\}\s*$/
+const equationLabel = /\\label\s*\{([^{}\s]+)\}/g
+
+export function unsupportedDocxStructures(source: string) {
+  return Array.from(maskLatexCode(source, true).matchAll(unsupportedCommands), match => ({
+    offset: match.index, message: `${match[0]} 暂无法可靠导出为 Word。请改为支持的段落或单行公式。`,
+  }))
+}
+
+export function docxSourceFindings(snapshot: ManuscriptSnapshot) {
+  const findings: { location?: { path: string; line: number }; message: string }[] = []
   for (const part of ['body', 'abstract'] as const) {
     const text = maskLatexCode(snapshot[part], true)
-    const unsupported = /\\(?:begin\s*\{(?:align\*?|gather\*?|equation|itemize|enumerate|description|verbatim\*?)\}|(?:footnote(?:mark|text)?|appendix|paragraph|tag|eqref)\b)/.exec(text)
-    if (unsupported) docxSourceError(snapshot, part, unsupported.index, `${unsupported[0]} 暂无法可靠导出为 Word。请改为支持的段落或单行公式。`)
+    const add = (offset: number, message: string) => findings.push({ location: sourceLocation(snapshot, part, offset), message })
+    for (const { offset, message } of unsupportedDocxStructures(snapshot[part])) add(offset, message)
+    const appendices = [...text.matchAll(/\\(?:\\|(appendix)\b)/g)].filter(match => match[1])
+    const start = appendices[0]
+    if (start && (part === 'abstract' || !/\\section\*?\s*(?:\[[^\]]*\]\s*)?\{/.test(text.slice(start.index + start[0].length)))) {
+      add(start.index, '附录须位于正文末尾，并至少包含一个一级标题。')
+    }
+    if (appendices[1]) add(appendices[1].index, '正文只支持一个附录起点。')
+    for (const match of text.matchAll(/\\begin\s*\{equation\}([\s\S]*?)\\end\s*\{equation\}/g)) {
+      if (part === 'abstract' || /\\(?:begin|nonumber|notag|tag)\b|\\\\/.test(match[1]) || [...match[1].matchAll(equationLabel)].length > 1) {
+        add(match.index, '编号公式须位于正文，使用单个 equation 表达式，最多指定一个标签。')
+      }
+    }
+    if (part === 'abstract') {
+      const citation = /\\(?:cite[a-z]*|nocite)\b/i.exec(text)
+      if (citation) add(citation.index, '提交版摘要暂不支持文献引用。')
+    }
     const pdf = /\\includegraphics(?:\s*\[[^\]]*\])?\s*\{([^}]+)\}/g
     for (const match of text.matchAll(pdf)) {
       const asset = snapshot.assets.find(file => file.path === match[1] || !/\.[a-z]+$/i.test(match[1]) && file.path.replace(/\.[a-z]+$/i, '') === match[1])
       if (!asset || !/\.(?:png|jpe?g)$/i.test(asset.path)) {
-        docxSourceError(snapshot, part, match.index, 'Word 图片需要项目内可读取的 PNG 或 JPEG；请先转换此素材。')
+        add(match.index, 'Word 图片需要项目内可读取的 PNG 或 JPEG；请先转换此素材。')
       }
     }
   }
+  return findings
 }
 
 export function prepareDocxAst(body: PandocDocument, abstract: PandocDocument, snapshot: ManuscriptSnapshot, school: SubmissionDocxId) {
   const tokens = new Map<string, WordToken>()
   const headings: WordHeading[] = []
-  const references = new Map<string, { name: string; value: string; kind: 'heading' | 'figure' | 'table' | 'bibliography'; chineseChapter?: boolean }>()
+  const references = new Map<string, { name: string; value: string; kind: 'heading' | 'appendix' | 'figure' | 'table' | 'equation' | 'bibliography'; chineseChapter?: boolean }>()
   const marker = (data: WordToken): Node => {
     const key = 'WbxExport' + (tokens.size + 1) + 'X'
     tokens.set(key, data)
@@ -93,12 +130,50 @@ export function prepareDocxAst(body: PandocDocument, abstract: PandocDocument, s
   const bookmark = () => 'WbxTarget' + (tokens.size + 1)
   const separator = school === 'suep-undergraduate' ? '-' : '.'
   const levels = [0, 0, 0]
-  const counts = { Figure: 0, Table: 0 }
+  let appendixMode = false
+  const appendixStart = para([{ t: 'Code', c: [['', [], []], 'WbxStartAppendicesX'] }])
+  const chapter = () => {
+    if (!appendixMode) return String(levels[0])
+    let name = ''
+    for (let index = levels[0]; index; index = Math.floor((index - 1) / 26)) {
+      name = String.fromCharCode(65 + (index - 1) % 26) + name
+    }
+    return name
+  }
+  const counts = { Figure: 0, Table: 0, Equation: 0 }
+  const numberedEquations = [...maskLatexCode(snapshot.body, true).matchAll(/\\begin\s*\{equation\}/g)]
+  let equations = 0
   let floats = 0
   const bibliography: Node[] = []
   abstract.blocks = abstract.blocks.map(block => ({ t: 'Div', c: [['', [], [['custom-style', 'WbxAbstract']]], [block]] }))
 
   const blocks = (entries: Node[], inherited?: string): Node[] => entries.flatMap(entry => {
+    const inlines = entry.t === 'Para' ? nodes(entry.c) : undefined
+    if (inlines?.length === 1 && inlines[0].t === 'Code' && (inlines[0].c as Value[])[1] === 'WbxBeginAppendicesX') {
+      appendixMode = true
+      levels.fill(0)
+      return [appendixStart]
+    }
+    if (inlines?.length === 1 && inlines[0].t === 'Math') {
+      const value = inlines[0].c as [Node, string]
+      const equation = equationEnvironment.exec(value[1])
+      if (equation) {
+        const offset = numberedEquations[equations++]?.index ?? 0
+        if (!levels[0]) docxSourceError(snapshot, 'body', offset, '编号公式须位于章或附录标题之后。')
+        const label = [...equation[1].matchAll(equationLabel)][0]?.[1]
+        const name = label ? bookmark() : undefined
+        const sequence = ++counts.Equation
+        const number = chapter() + separator + sequence
+        if (name && label) references.set(label, { name, value: number, kind: 'equation' })
+        const formula = equation[1].replace(equationLabel, '').trim()
+        if (!formula) docxSourceError(snapshot, 'body', offset, '编号公式为空。')
+        // Inline OMML permits a centered formula and a right-aligned field in the same Word paragraph.
+        value[0] = { t: 'InlineMath' }
+        value[1] = formula
+        inlines.push(marker({ kind: 'equation', bookmark: name, chapter: chapter(), sequence }))
+        return [{ t: 'Div', c: [['', [], [['custom-style', 'WbxEquation']]], [entry]] }]
+      }
+    }
     if (entry.t === 'Header') {
       const [level, attributes, inlines] = entry.c as [number, Attribute, Node[]]
       const source = snapshot.sections[headings.length]
@@ -107,20 +182,23 @@ export function prepareDocxAst(body: PandocDocument, abstract: PandocDocument, s
       }
       levels[level - 1]++
       levels.fill(0, level)
-      if (level === 1) counts.Figure = counts.Table = 0
+      if (level === 1) counts.Figure = counts.Table = counts.Equation = 0
       const name = bookmark()
       const tocBookmark = 'WbxToc' + (headings.length + 1)
-      const number = levels.slice(0, level).join('.')
+      const number = [chapter(), ...levels.slice(1, level)].join('.')
       const title = nodeText(inlines)
-      headings.push({ level, title, number, bookmark: tocBookmark })
+      const appendix = appendixMode ? { number, firstLevel: level === 1 } : undefined
+      const tocTitle = appendix ? (appendix.firstLevel ? '附录 ' : '') + number + ' ' + title : title
+      headings.push({ level, title: tocTitle, number: appendix ? '' : number, bookmark: tocBookmark, appendix: appendixMode })
       const referenceBookmark = attributes[0] ? name : undefined
       if (referenceBookmark) {
-        const chineseChapter = school === 'suep-undergraduate' && level === 1
-        references.set(attributes[0], { name, value: chineseChapter ? chineseChapterNumber(number) : number, kind: 'heading', chineseChapter })
+        const chineseChapter = !appendix && school === 'suep-undergraduate' && level === 1
+        references.set(attributes[0], { name, value: chineseChapter ? chineseChapterNumber(number) : number,
+          kind: appendix ? 'appendix' : 'heading', chineseChapter })
       }
       // Disable Pandoc's bookmark emission for the same heading.
       attributes[0] = ''
-      inlines.unshift(marker({ kind: 'heading', tocBookmark, referenceBookmark }))
+      inlines.unshift(marker({ kind: 'heading', tocBookmark, referenceBookmark, appendix }))
       return [entry]
     }
     if (entry.t === 'Div') {
@@ -154,15 +232,22 @@ export function prepareDocxAst(body: PandocDocument, abstract: PandocDocument, s
     }
     const sequence = ++counts[object]
     const name = key ? bookmark() : undefined
-    if (name && key) references.set(key, { name, value: levels[0] + separator + sequence, kind: object === 'Figure' ? 'figure' : 'table' })
+    if (name && key) references.set(key, { name, value: chapter() + separator + sequence, kind: object === 'Figure' ? 'figure' : 'table' })
     attr(parts[0])[0] = ''
     parts[1] = [null, []]
     const first = caption[0]
     if (caption.length !== 1 || !['Plain', 'Para'].includes(first.t)) {
       throw new Error(`${position?.path ?? 'main.tex'}:${position?.line ?? 1} · 题注须为一个段落。`)
     }
-    const cap: Node = { t: 'Div', c: [['', [], [['custom-style', object === 'Table' ? 'WbxTableCaption' : 'WbxCaption']]],
-      [para([marker({ kind: 'caption', chapter: levels[0], sequence, object, bookmark: name }), ...nodes(first.c)])]] }
+    const isLongTable = object === 'Table' && position?.longTable
+    if (isLongTable) {
+      const tableHead = parts[3] as Value[]
+      if (!(tableHead?.[1] as Value[])?.length) {
+        throw new Error(`${position.path}:${position.line} · longtable 缺少可重复表头。请在首行后使用 \\midrule 或 \\endhead。`)
+      }
+    }
+    const cap: Node = { t: 'Div', c: [['', [], [['custom-style', isLongTable ? 'WbxLongTableCaption' : object === 'Table' ? 'WbxTableCaption' : 'WbxCaption']]],
+      [para([marker({ kind: 'caption', chapter: chapter(), sequence, object, bookmark: name }), ...nodes(first.c)])]] }
     if (object === 'Table') return [cap, entry]
     return [...nodes(parts[2]), cap]
   })
@@ -171,6 +256,10 @@ export function prepareDocxAst(body: PandocDocument, abstract: PandocDocument, s
     throw new Error('正文标题或图表的解析数量与原稿不一致，请检查源文件结构。')
   }
   if (!headings.length) throw new Error('请至少添加一个一级标题再导出。')
+  if (equations !== numberedEquations.length) {
+    const offset = numberedEquations[equations]?.index ?? 0
+    docxSourceError(snapshot, 'body', offset, '请将编号 equation 单独成段，避免紧邻正文或其他公式。')
+  }
 
   const assets = snapshot.assets.map((asset, index) => ({
     ...asset, name: 'asset-' + (index + 1) + '.' + asset.path.split('.').at(-1)!.toLowerCase(),
@@ -204,10 +293,16 @@ export function prepareDocxAst(body: PandocDocument, abstract: PandocDocument, s
       if (!/^(?:https?:|mailto:)/i.test(href)) throw new Error('Word 导出仅支持 HTTP(S) 或电子邮件链接。')
       return
     }
-    const prefix = mode === 'autoref' || mode === 'ref+label' ? ({ heading: '第 ', figure: '图 ', table: '表 ', bibliography: '' }[target.kind]) : undefined
+    if (mode === 'eqref' && target.kind !== 'equation') {
+      const location = snapshot.references.find(item => item.key === key && item.kind === 'eqref')
+      throw new Error((location ? `${location.path}:${location.line} · ` : '') + '\\eqref 必须引用编号公式。')
+    }
+    const prefix = mode === 'eqref' ? '（' : mode === 'autoref' || mode === 'ref+label' ?
+      ({ heading: '第 ', appendix: '附录 ', figure: '图 ', table: '表 ', equation: '式 ', bibliography: '' }[target.kind]) : undefined
     Object.assign(node, marker({ kind: 'reference', bookmark: target.name,
       cached: mode === 'pageref' ? '—' : target.kind === 'bibliography' ? nodeText(inlines) || target.value : target.value,
-      mode: mode === 'pageref' ? 'page' : target.chineseChapter ? 'chapter-number' : target.kind === 'heading' ? 'number' : 'text', prefix }))
+      mode: mode === 'pageref' ? 'page' : target.chineseChapter ? 'chapter-number' : target.kind === 'heading' ? 'number' : 'text',
+      prefix, suffix: mode === 'eqref' ? '）' : undefined }))
   }
   walk(body.blocks, transform)
   walk(abstract.blocks, transform)
@@ -215,8 +310,11 @@ export function prepareDocxAst(body: PandocDocument, abstract: PandocDocument, s
 
   // Use sentinel paragraphs to split the Pandoc output without serializing a second OOXML package.
   const sentinel = (title: string) => para([{ t: 'Code', c: [['', [], []], title] }])
+  const appendixIndex = body.blocks.indexOf(appendixStart)
+  const mainBlocks = appendixIndex < 0 ? body.blocks : body.blocks.slice(0, appendixIndex)
+  const appendixBlocks = appendixIndex < 0 ? [appendixStart] : body.blocks.slice(appendixIndex)
   body.meta = {}
-  body.blocks = [...abstract.blocks, sentinel('WbxStartBodyX'), ...body.blocks,
-    sentinel('WbxStartBibliographyX'), ...bibliography]
+  body.blocks = [...abstract.blocks, sentinel('WbxStartBodyX'), ...mainBlocks,
+    sentinel('WbxStartBibliographyX'), ...bibliography, ...appendixBlocks]
   return { body, tokens, headings, assets, math, images, tables: snapshot.floats.filter(item => item.kind === 'table').length }
 }

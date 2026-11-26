@@ -89,3 +89,51 @@ export async function docxFixture(manuscript = docxManuscript) {
   )).png().toBuffer())
   return zip.generateAsync({ type: 'nodebuffer' })
 }
+
+export const docxAppendixManuscript = docxManuscript
+  .replace('本研究通过统一流程采集数据。', '本研究通过统一流程采集数据。复验材料见附录~\\ref{app:measurements}。')
+  .replace('\\end{document}', `\\appendix
+\\section{原始测量记录}\\label{app:measurements}
+附录核验句：保留所有原始通道记录。
+
+\\subsection{记录说明}
+同一通道的数据按日期核查。
+
+\\section{独立复核清单}\\label{app:checklist}
+第二附录核验句：逐项复核记录。
+\\end{document}`)
+
+export const docxEquationManuscript = docxAppendixManuscript
+  .replace('本研究通过统一流程采集数据。', '本研究通过统一流程采集数据。计算见式~\\eqref{eq:calibration} 和式~\\eqref{eq:repeat}。')
+  .replace(`\\[
+y=\\sqrt{x^2+1}
+\\]`, `
+\\begin{equation}
+y=\\sqrt{x^2+1}\\label{eq:calibration}
+\\end{equation}
+`)
+  .replace('\\section{测量方案}', `\\section{测量方案}
+
+\\begin{equation}
+z=x+y\\label{eq:repeat}
+\\end{equation}
+`)
+
+const longTableRows = Array.from({ length: 110 }, (_, index) => `通道记录${index + 1} & ${index + 12} \\\\`).join('\n')
+export const docxLongTableManuscript = docxEquationManuscript
+  .replace('amsmath,natbib,hyperref', 'amsmath,natbib,hyperref,longtable')
+  .replace('复验材料见附录~\\ref{app:measurements}。', '复验材料见附录~\\ref{app:measurements}，原始数据见表~\\ref{tab:long-channels}。')
+  .replace('同一通道的数据按日期核查。', `同一通道的数据按日期核查。
+
+\\begin{longtable}{lr}
+\\caption{跨页通道原始数据}\\label{tab:long-channels}\\\\
+\\toprule
+通道记录号 & 测量计数 \\\\
+\\midrule
+\\endhead
+${longTableRows}
+\\bottomrule
+\\end{longtable}
+
+长表之后的独立核验句。
+`)

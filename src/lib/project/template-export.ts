@@ -18,7 +18,7 @@ export type ManuscriptSnapshot = Readonly<{
   body: string
   lineSources: Readonly<Record<'abstract' | 'keywords' | 'body', LineSources>>
   sections: readonly Section[]
-  floats: readonly Located<{ kind: 'figure' | 'table' }>[]
+  floats: readonly Located<{ kind: 'figure' | 'table'; longTable?: true }>[]
   references: readonly Reference[]
   assets: readonly Asset[]
   bibliography: readonly Readonly<{ path: string; content: string }>[]
@@ -107,7 +107,8 @@ function mappedExcerpt(source: string, chunks: Chunk[], ranges: Range[]): Mapped
 }
 
 /** Captures the supported LaTeX interchange subset from the current working files. */
-export function captureManuscript(files: ReadonlyMap<string, ProjectFile | ProjectDirectory>, main: string): ManuscriptSnapshot {
+export function captureManuscript(files: ReadonlyMap<string, ProjectFile | ProjectDirectory>, main: string,
+  options?: { allowLongtable?: boolean }): ManuscriptSnapshot {
   const root = main.slice(0, main.lastIndexOf('/') + 1)
   const chunks: Chunk[] = []
   let source = ''
@@ -196,7 +197,7 @@ export function captureManuscript(files: ReadonlyMap<string, ProjectFile | Proje
         if (name === 'begin' && !document) { document = true; bodyStart = cursor }
         else if (name === 'end' && document && !environments.length) { ended = true; bodyEnd = index }
         else problem(at, '文档结构不完整。')
-      } else if (!document || !supportedEnvironments.has(environment)) {
+      } else if (!document || !supportedEnvironments.has(environment) && !(options?.allowLongtable && environment === 'longtable')) {
         problem(at, `环境 ${environment} 暂无法转换。`)
       } else if (name === 'begin') {
         environments.push({ ...at, name: environment })
@@ -212,6 +213,10 @@ export function captureManuscript(files: ReadonlyMap<string, ProjectFile | Proje
         }
         const float = environment.replace(/\*$/, '')
         if (float === 'figure' || float === 'table') floats.push({ ...at, kind: float })
+        if (environment === 'longtable') {
+          if (environments.slice(0, -1).some(item => /^(?:table\*?|longtable)$/.test(item.name))) problem(at, 'longtable 必须独立使用，不能嵌在 table 或另一个 longtable 内。')
+          floats.push({ ...at, kind: 'table', longTable: true })
+        }
       } else {
         if (environments.pop()?.name !== environment) problem(at, `环境 ${environment} 没有配对。`)
         if (environment === 'abstract' || environment === 'keywords') {
@@ -233,11 +238,13 @@ export function captureManuscript(files: ReadonlyMap<string, ProjectFile | Proje
       optional()
       required()
     } else if (name === 'usepackage' && !document) {
-      const options = optional()
+      const packageOptions = optional()
       const packages = required().split(',').map(value => value.trim())
       for (const item of packages) {
-        if (!supportedPackages.has(item)) problem(at, `源项目依赖宏包 ${item}，当前目标无法保证等价转换。`)
-        if (options && !['geometry', 'natbib', 'hyperref', 'inputenc', 'fontenc', 'ctex'].includes(item)) {
+        if (!supportedPackages.has(item) && !(options?.allowLongtable && item === 'longtable')) {
+          problem(at, `源项目依赖宏包 ${item}，当前目标无法保证等价转换。`)
+        }
+        if (packageOptions && !['geometry', 'natbib', 'hyperref', 'inputenc', 'fontenc', 'ctex'].includes(item)) {
           problem(at, `宏包 ${item} 的选项暂无法转换。`)
         }
       }
@@ -286,6 +293,10 @@ export function captureManuscript(files: ReadonlyMap<string, ProjectFile | Proje
         if (labels.has(key)) problem(at, `标签 ${key} 重复。`)
         labels.add(key)
       } else references.push({ ...at, kind: name, key })
+    } else if (document && options?.allowLongtable && /^(?:endfirsthead|endhead|endfoot|endlastfoot)$/.test(name)) {
+      if (name !== 'endhead' || environments.at(-1)?.name !== 'longtable') {
+        problem(at, 'Word 跨页表格使用同一组重复表头。请将独立续页表头或页脚改为表外说明。')
+      }
     } else if (document && headings.includes(name)) {
       if (masked[cursor] === '*') cursor++
       optional()

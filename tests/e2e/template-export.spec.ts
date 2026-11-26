@@ -1411,6 +1411,7 @@ for (const pilot of ['njupt', 'agu'] as const) {
       expect(fonts?.page).toBeGreaterThan(1)
       expect(fonts?.observed).toMatch(/TimesNewRoman/)
       expect(fonts?.status).toMatch(/pass|issue/)
+      if (process.env.RESEARCH_NJUPT_REQUIRE_DEPOSIT_FONTS === '1') expect(fonts?.status, fonts?.detail).toBe('pass')
       if (fonts?.status === 'issue') await expect(formal).toContainText('材料待核对')
       await expect(formal.getByRole('button', { name: '下载稿件 PDF' })).toBeVisible()
       await formal.getByLabel('正式归档 Word').setInputFiles(join(fixtures!, 'independent.docx'))

@@ -287,11 +287,15 @@ export function customWordTex(settings: LayoutValues, title: string) {
     const section = ['section', 'subsection', 'subsubsection'][i]
     return `${section}={format=\\heiti\\fontsize{${size}bp}{${size * 1.25}bp}\\selectfont}`
   })
+  const songFont = (name: string) => `\\setCJKmainfont[Scale=1]{${name}}\\setCJKfamilyfont{zhsong}[Scale=1]{${name}}`
+  const heitiFont = (name: string) => `\\setCJKfamilyfont{zhhei}[Scale=1]{${name}}`
+  const songFallback = (settings.cjkFont === 'song' ? warning('SimSun unavailable; substituting.') : '') +
+    `\\IfFontExistsTF{Songti SC}{${songFont('Songti SC')}}{}`
   return [
     '\\usepackage{fancyhdr,caption}',
     '\\ifdefined\\ul\\IfFileExists{xeCJKfntef.sty}{\\usepackage{xeCJKfntef}\\let\\ul\\CJKunderline}{\\let\\ul\\underline}\\fi',
-    `\\IfFontExistsTF{SimSun}{\\setCJKmainfont[Scale=1]{SimSun}\\setCJKfamilyfont{zhsong}[Scale=1]{SimSun}}{${settings.cjkFont === 'song' ? warning('SimSun unavailable; substituting.') : ''}\\IfFontExistsTF{Songti SC}{\\setCJKmainfont[Scale=1]{Songti SC}\\setCJKfamilyfont{zhsong}[Scale=1]{Songti SC}}{}}`,
-    '\\IfFontExistsTF{SimHei}{\\setCJKfamilyfont{zhhei}[Scale=1]{SimHei}}{\\IfFontExistsTF{Heiti SC}{\\setCJKfamilyfont{zhhei}[Scale=1]{Heiti SC}}{}}',
+    `\\IfFontExistsTF{SimSun}{${songFont('SimSun')}}{\\IfFontExistsTF{Simsun.ttc}{${songFont('Simsun.ttc')}}{${songFallback}}}`,
+    `\\IfFontExistsTF{SimHei}{${heitiFont('SimHei')}}{\\IfFontExistsTF{SimHei.ttf}{${heitiFont('SimHei.ttf')}}{\\IfFontExistsTF{Heiti SC}{${heitiFont('Heiti SC')}}{}}}`,
     western, `\\ctexset{${headings.join(',')}}`,
     `\\setcounter{tocdepth}{${settings.tocDepth}}`,
     '\\captionsetup{labelformat=empty,justification=centering,position=auto}',
