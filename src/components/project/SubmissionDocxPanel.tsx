@@ -1,6 +1,11 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import { SuepOfficialAttachments, useSuepAttachments } from './SuepOfficialAttachments'
+import { bindSuepBundle } from '@/lib/project/suep-bundle-client'
+import { suepDocxMembers, suepMemberRoles, suepUndergraduateId, suepUndergraduateOrigin } from '@/lib/project/suep-undergraduate-source'
+import { listOfficialTemplateReleases } from '@/lib/project/storage'
+import type { OfficialTemplateRelease } from '@/lib/project/template-release'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { fetchOfficialFile } from '@/lib/project/official-template-client'
@@ -9,7 +14,7 @@ import { projectSourceDigest } from '@/lib/project/external-template-build'
 import { exportExternalBuild } from '@/lib/project/submission'
 import { submissionDocxConfig, submissionDocxIds, type SubmissionDocxFields, type SubmissionDocxId } from '@/lib/project/submission-docx-config'
 import { checkDocxSubmission, verifyWordFinal, type SubmissionDocxDelivery } from '@/lib/project/submission-docx-delivery'
-import { captureManuscript } from '@/lib/project/template-export'
+import { captureManuscript, suepImportedCover } from '@/lib/project/template-export'
 import type { SubmissionStage } from '@/lib/project/submission-stages'
 import type { ProjectFileSystem } from '@/lib/project/types'
 import { wordRequest } from '@/lib/project/word-conversion-client'
@@ -24,8 +29,8 @@ const njuptLabels = [
   ['degree', '申请学位类别', 40], ['englishDegree', '学位类别英文全称', 80], ['englishAdvisor', '导师英文姓名', 80],
 ] as const
 
-export function SubmissionDocxPanel({ project, main, template, stage, disabled, download, onLocate, onArchive }: {
-  project: ProjectFileSystem; main: string; template?: string; stage?: SubmissionStage; disabled: boolean; download: (blob: Blob, name: string) => void
+export function SubmissionDocxPanel({ project, main, template, stage, database, disabled, download, onLocate, onArchive }: {
+  project: ProjectFileSystem; main: string; template?: string; stage?: SubmissionStage; database?: IDBDatabase; disabled: boolean; download: (blob: Blob, name: string) => void
   onLocate: (path: string, line: number) => void
   onArchive?: (delivery: SubmissionDocxDelivery) => Promise<void>
 }) {
@@ -46,6 +51,29 @@ export function SubmissionDocxPanel({ project, main, template, stage, disabled, 
   const [saved, setSaved] = useState('')
   const request = useRef<AbortController | undefined>(undefined)
   const config = submissionDocxConfig(school)
+  const suep = school === suepUndergraduateId
+  const projectOrigin = project.metadata.activeTemplate?.origin ?? project.metadata.templateOrigin
+  const [releaseState, setReleaseState] = useState<{ database: IDBDatabase; releases: OfficialTemplateRelease[] }>()
+  const releases = releaseState?.database === database ? releaseState?.releases : undefined
+  const readReleases = !!database && open && suep
+  useEffect(() => {
+    if (!database || !readReleases) return
+    let current = true
+    void listOfficialTemplateReleases(database, suepUndergraduateId)
+      .then(releases => { if (current) setReleaseState({ database, releases }) })
+      .catch(() => {
+        if (current) setError('无法读取本机的上电官方版本记录。')
+      })
+    return () => { current = false }
+  }, [database, readReleases])
+  const bound = projectOrigin?.id === suepUndergraduateId ? projectOrigin : undefined
+  const release = bound ? releases?.find(item => item.version === bound.version && item.sha256 === bound.sha256) : releases?.[0]
+  const suepPin = open && suep && (!database || releases) ? {
+    ...(bound ?? release ?? suepUndergraduateOrigin), id: suepUndergraduateId,
+  } as const : undefined
+  const attachments = useSuepAttachments(suepPin, release?.kind === 'word-import' ? release.archive : undefined)
+  const usedVersion = suepPin?.version ?? config.version
+  const usedSha256 = suepPin?.sha256 ?? config.original.sha256
   const fieldLabels = njupt ? [...labels.filter(([key]) => key !== 'affiliation').map(row =>
     row[0] === 'program' ? ['program', '专业（领域）', row[2]] as const : row), ...njuptLabels] : labels
   const fresh = checked?.project === project && checked.main === main && checked.school === school && checked.fields === fields ? checked : undefined
@@ -57,11 +85,16 @@ export function SubmissionDocxPanel({ project, main, template, stage, disabled, 
     try {
       const snapshot = captureManuscript(project.files, main, { allowLongtable: true })
       const active = project.metadata.activeTemplate
-      const cover = njupt && active?.kind === 'njupt-masters' ? active.fields : undefined
-      setFields(current => ({ ...current, ...(cover && !current.title ? {
+      const importedCover = suep ? suepImportedCover(project.files) : undefined
+      const njuptCover = njupt && active?.kind === 'njupt-masters' ? active.fields : undefined
+      const cover = njuptCover ?? (suep && active?.kind === 'suep-undergraduate' ? active.fields : undefined)
+      const imported = importedCover && { ...importedCover, chineseAbstract: snapshot.importedChineseAbstract ?? '',
+        chineseKeywords: snapshot.importedChineseKeywords ?? '' }
+      setFields(current => ({ ...current, ...(!current.title ? imported : undefined), ...(cover && !current.title ? {
         title: cover.chineseTitle, advisor: cover.advisor, studentNumber: cover.studentNumber, program: cover.program,
         chineseAbstract: cover.chineseAbstract, chineseKeywords: cover.chineseKeywords, date: cover.date,
-        englishAdvisor: cover.englishAdvisor, degree: cover.degree, englishDegree: cover.englishDegree, studyMode: cover.studyMode,
+        ...(njuptCover && { englishAdvisor: njuptCover.englishAdvisor, degree: njuptCover.degree,
+          englishDegree: njuptCover.englishDegree, studyMode: njuptCover.studyMode }),
       } : {}), author: current.author || snapshot.authors.join('、'),
         englishKeywords: current.englishKeywords || (/^[^\\\$\{\}]*$/.test(snapshot.keywords) ? snapshot.keywords : '') }))
     } catch (cause) {
@@ -70,7 +103,7 @@ export function SubmissionDocxPanel({ project, main, template, stage, disabled, 
   }
 
   async function exportDocx() {
-    if (busy || disabled) return
+    if (busy || disabled || suep && !attachments.receipt) return
     setError('')
     const check = runCheck()
     const normalized = check.report.fields
@@ -79,7 +112,7 @@ export function SubmissionDocxPanel({ project, main, template, stage, disabled, 
     request.current = controller
     setBusy('export')
     const { signal } = controller
-    async function original(pin: string, local?: File, asset?: 'guideline' | 'declaration' | 'docx-bundle') {
+    async function original(pin: string, local?: File, asset?: 'guideline' | 'declaration') {
       if (!local) return fetchOfficialFile(school, pin, asset, signal)
       if (local.size > 16 * 1024 * 1024 || await templateDigest(await local.arrayBuffer()) !== pin) {
         throw new Error((asset === 'guideline' ? '本地规范' : '本地原件') + '的 SHA-256 与所选登记版不一致。')
@@ -87,12 +120,12 @@ export function SubmissionDocxPanel({ project, main, template, stage, disabled, 
       return local
     }
     try {
-      let word: File
+      let word: File | undefined
       let guide: File | undefined
       let declaration: File | undefined
       try {
         [word, guide, declaration] = await Promise.all([
-          original(config.original.sha256, uploads.original, school === 'suep-undergraduate' ? 'docx-bundle' : undefined),
+          suep ? undefined : original(config.original.sha256, uploads.original),
           config.guideline ? original(config.guideline.sha256, uploads.guideline, 'guideline') : undefined,
           config.declaration ? original(config.declaration.sha256, uploads.declaration, 'declaration') : undefined,
         ])
@@ -108,18 +141,22 @@ export function SubmissionDocxPanel({ project, main, template, stage, disabled, 
       data.set('fields', JSON.stringify(normalized))
       const id = crypto.randomUUID()
       data.set('delivery-id', id)
-      data.set('original', word)
+      if (word) data.set('original', word)
+      if (suepPin) bindSuepBundle(data, suepPin)
       if (guide) data.set('guideline', guide)
       if (declaration) data.set('declaration', declaration)
       const [{ zip, checksum }, snapshotSha256] = await Promise.all([exportExternalBuild(project), projectSourceDigest(project.files, main)])
-      if (word.size + (guide?.size ?? 0) + (declaration?.size ?? 0) + zip.size > 16 * 1024 * 1024) throw new Error('官方原件和项目源包共计不得超过 16 MB。')
+      if ((word?.size ?? 0) + (guide?.size ?? 0) + (declaration?.size ?? 0) + zip.size > 16 * 1024 * 1024) throw new Error('官方原件和项目源包共计不得超过 16 MB。')
       data.set('source', zip, 'manuscript.zip')
       const blob = await (await wordRequest(data, signal)).blob()
       signal.throwIfAborted()
       const name = normalized.title.replace(/[<>:"/\\|?*\p{Cc}]/gu, '-').replace(/[. ]+$/, '') || 'submission'
-      const filename = name + '-' + config.version + '.docx'
-      const template = { id: school, name: config.name, sourceUrl: config.sourceUrl, version: config.version, sha256: config.original.sha256,
-        declarationSha256: config.declaration?.sha256, declarationUrl: config.declaration?.url }
+      const filename = name + '-' + usedVersion + '.docx'
+      const template = { id: school, name: config.name, sourceUrl: config.sourceUrl, version: usedVersion, sha256: usedSha256,
+        declarationSha256: config.declaration?.sha256, declarationUrl: config.declaration?.url,
+        attachments: attachments.receipt && suepMemberRoles.map(role => ({
+          name: suepDocxMembers[role].name, sha256: attachments.receipt!.manifest.members[role].sha256,
+        })) }
       const generated = await verifyWordFinal(new File([blob], filename), { id, template, snapshotSha256 })
       signal.throwIfAborted()
       setReceipt({ check, delivery: { id, name, createdAt: new Date().toISOString(), template, main, snapshotSha256,
@@ -184,8 +221,8 @@ export function SubmissionDocxPanel({ project, main, template, stage, disabled, 
           {available.map(id => <option key={id} value={id}>{submissionDocxConfig(id).name}</option>)}
         </select>
       </label>
-      <p>官方登记版 {config.version} · {config.status}</p>
-      <p className="break-all text-xs">原件 SHA-256 {config.original.sha256}</p>
+      <p>官方版本 {usedVersion} · {suep && usedVersion !== config.version ? '此版本待 Word 实机核对' : config.status}</p>
+      <p className="break-all text-xs">原件 SHA-256 {usedSha256}</p>
       {config.declaration && <p className="break-all text-xs">声明 SHA-256 {config.declaration.sha256}</p>}
       {config.requirementsUrl && <a className="mr-3 underline" href={config.requirementsUrl} target="_blank" rel="noreferrer">学校撰写标准</a>}
       <a className="underline" href={config.sourceUrl} target="_blank" rel="noreferrer">原件发布来源</a>
@@ -215,10 +252,11 @@ export function SubmissionDocxPanel({ project, main, template, stage, disabled, 
         <textarea className="block w-full rounded-md border bg-background p-2" maxLength={5000} value={fields.acknowledgment ?? ''}
           onChange={event => setFields({ ...fields, acknowledgment: event.target.value })} />
       </label>
-      <details className="space-y-2">
+      {suep ? suepPin ? <SuepOfficialAttachments state={attachments} disabled={Boolean(busy) || disabled} />
+        : <p role="status">正在读取上电官方版本记录</p> : <details className="space-y-2">
         <summary className="cursor-pointer">手动上传官方原件</summary>
-        <label className="block">{config.guideline || njupt ? '官方 Word' : '官方附件包 RAR'}
-          <Input key={school} type="file" accept={njupt ? '.doc,.docx' : config.guideline ? '.docx' : '.rar'} onChange={event => setUploads({ ...uploads, original: event.target.files?.[0] })} />
+        <label className="block">官方 Word
+          <Input key={school} type="file" accept={njupt ? '.doc,.docx' : '.docx'} onChange={event => setUploads({ ...uploads, original: event.target.files?.[0] })} />
         </label>
         {config.declaration && <label className="block">官方声明 Word
           <Input type="file" accept=".doc,.docx" onChange={event => setUploads({ ...uploads, declaration: event.target.files?.[0] })} />
@@ -226,7 +264,7 @@ export function SubmissionDocxPanel({ project, main, template, stage, disabled, 
         {config.guideline && <label className="block">官方规范 PDF
           <Input type="file" accept=".pdf" onChange={event => setUploads({ ...uploads, guideline: event.target.files?.[0] })} />
         </label>}
-      </details>
+      </details>}
       <p>英文摘要与正文取自上方所选稿件。在 Word 中更新整份目录和引用字段后，目录才会显示页码。签名由作者和导师填写。</p>
     </fieldset>
     {checked && !fresh && <p role="status">稿件或导出信息已变更。请重新检查并生成当前交付文件。</p>}
@@ -258,7 +296,7 @@ export function SubmissionDocxPanel({ project, main, template, stage, disabled, 
     {error && <p role="alert" className="break-words text-red-800">{error}</p>}
     <div className="flex flex-wrap gap-2">
       <Button type="button" variant="outline" disabled={Boolean(busy) || disabled} onClick={runCheck}>检查 DOCX 导出</Button>
-      <Button type="submit" disabled={Boolean(busy) || disabled}>{busy === 'export' ? '正在生成 DOCX…' : '生成并下载 DOCX'}</Button>
+      <Button type="submit" disabled={Boolean(busy) || disabled || suep && !attachments.receipt}>{busy === 'export' ? '正在生成 DOCX…' : '生成并下载 DOCX'}</Button>
       <Button type="button" variant="outline" disabled={Boolean(busy && busy !== 'export')} onClick={() => {
         if (busy === 'export') request.current?.abort()
         else setOpen(false)

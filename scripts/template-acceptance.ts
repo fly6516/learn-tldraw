@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import sharp from 'sharp'
 import { templateCatalog } from '../src/lib/project/template-catalog'
-import { suepUndergraduateSource } from '../src/lib/project/suep-undergraduate-source'
+import { suepDocxMembers, suepUndergraduateSource } from '../src/lib/project/suep-undergraduate-source'
 
 const groups: Record<string, string> = {
   catalog: '(?:WORD|ZIP|STARTER|REFERENCE) [a-z0-9-]+ (?:builds|creates|exposes)|EXTERNAL Springer|imports the original SUEP|MIGRATION preserves the registered catalog',
@@ -127,7 +127,7 @@ async function reuse(name: string, from: string) {
 }
 
 async function extractCover() {
-  const { sha256: expected } = suepUndergraduateSource.switchAssets.cover
+  const { sha256: expected } = suepDocxMembers.cover
   const path = join(fixtures, 'current-cover.doc')
   let current = await readFile(path).catch(error => { if (error.code !== 'ENOENT') throw error })
   if (!current) {
@@ -158,7 +158,7 @@ try {
     } else if (workflow.kind === 'word-import') await original(id + '.rar', workflow.original)
   }
   if (fullCatalog || group === 'switch') {
-    await original('declaration.doc', { ...suepUndergraduateSource.switchAssets.declaration, url: suepUndergraduateSource.officialFiles[1].url })
+    await original('declaration.doc', { ...suepDocxMembers.declaration, url: suepUndergraduateSource.officialFiles[1].url })
     await extractCover()
   }
   if (group === 'all' || group === 'release') await reuse('revtex.zip', 'aps-prl.zip')

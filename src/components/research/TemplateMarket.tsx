@@ -27,6 +27,7 @@ import { importWordTemplateArchive, packWordTemplate, readWordTemplate } from '@
 import { WordLayoutReview } from './WordLayoutReview'
 import type { WordLayoutBundle } from '@/lib/project/word-layout'
 import type { WordProfile } from '@/lib/project/word-import'
+import { OfficialSuepCandidate } from './OfficialSuepCandidate'
 import { OfficialZipCandidate } from './OfficialZipCandidate'
 import { validateReleaseCandidate, type OfficialTemplateRelease, type TemplateOrigin } from '@/lib/project/template-release'
 import { exportRelease, importRelease } from '@/lib/project/release-transfer'
@@ -88,7 +89,7 @@ export function TemplateMarket({ database, storageUnavailable, openProject }: {
   const [sourceProject, setSourceProject] = useState<ProjectFileSystem>()
   const [publisherFile, setPublisherFile] = useState<File>()
   const [busy, setBusy] = useState(false)
-  const [wordImport, setWordImport] = useState<{ profile: WordProfile; origin: TemplateOrigin }>()
+  const [wordImport, setWordImport] = useState<{ profile: WordProfile; origin: TemplateOrigin; archive?: Blob; manual?: boolean }>()
   const [layoutBuilder, setLayoutBuilder] = useState(false)
   const [layoutEditor, setLayoutEditor] = useState<{ name: string; version: string; bundle: WordLayoutBundle; origin?: TemplateOrigin }>()
   const [layoutReview, setLayoutReview] = useState<{ name: string; version: string; bundle: WordLayoutBundle }>()
@@ -251,7 +252,8 @@ export function TemplateMarket({ database, storageUnavailable, openProject }: {
     if (workflow.kind === 'reference') return
     const origin = { id: item.id, version: workflow.version, sha256: workflow.original.sha256 }
     if (workflow.kind === 'word-import') {
-      setWordImport({ profile: workflow.profile, origin })
+      setWordImport({ profile: workflow.profile, origin: release?.kind === 'word-import' ? { id: release.id, version: release.version, sha256: release.sha256 } : origin,
+        archive: release?.kind === 'word-import' ? release.archive : undefined, manual })
       return
     }
     if (workflow.kind === 'zip') {
@@ -530,6 +532,9 @@ export function TemplateMarket({ database, storageUnavailable, openProject }: {
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
       </DialogContent>
     </Dialog>}
+    {releaseCandidate && candidateSource?.kind === 'word-import' && <OfficialSuepCandidate
+      parent={releaseCandidate.parent} officialFile={releaseCandidate.file} sourceUrl={candidateSource.sourceUrl}
+      publish={publish} close={() => setReleaseCandidate(undefined)} />}
     {releaseCandidate?.entry.delivery === 'archive' && <OfficialZipCandidate entry={releaseCandidate.entry}
       parent={releaseCandidate.parent} officialFile={releaseCandidate.file} publish={publish} close={() => setReleaseCandidate(undefined)} />}
     {pendingPublication && releaseCandidate && <AlertDialog open onOpenChange={open => { if (!open && !busy) setPendingPublication(undefined) }}>
@@ -595,7 +600,7 @@ export function TemplateMarket({ database, storageUnavailable, openProject }: {
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
-    {wordImport && <WordImportDialog initialProfile={wordImport.profile} templateOrigin={wordImport.origin} close={() => setWordImport(undefined)}
+    {wordImport && <WordImportDialog initialProfile={wordImport.profile} templateOrigin={wordImport.origin} officialArchive={wordImport.archive} manual={wordImport.manual} close={() => setWordImport(undefined)}
       openProject={openProject} />}
     {savedLayout && <WordImportDialog initialProfile="article" savedLayout={savedLayout}
       close={() => setSavedLayout(undefined)} openProject={openProject} />}

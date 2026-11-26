@@ -594,7 +594,7 @@ test('switches a single independent project across official school and publisher
     await open.click()
     await dialog.getByRole('combobox', { name: '目标模板' }).selectOption(id)
     if (id === 'suep-undergraduate') {
-      await expect(dialog.getByLabel('官方本科封面 DOC')).toBeVisible()
+      await expect(dialog.getByRole('region', { name: '上电官方附件' })).toBeVisible()
       await dialog.getByLabel('中文题目').fill('三组测量通道的可复现校准')
       await dialog.getByLabel('学号').fill('20260001')
       await dialog.getByLabel('指导教师').fill('李老师')
@@ -603,8 +603,10 @@ test('switches a single independent project across official school and publisher
       await dialog.getByLabel('提交日期').fill('2026年11月26日')
       await dialog.getByLabel('中文摘要').fill('本研究采用统一校准流程比较三组测量通道。')
       await dialog.getByLabel('中文关键词').fill('校准；测量；重复性')
-      await dialog.getByLabel('官方本科封面 DOC').setInputFiles(join(word!, 'current-cover.doc'))
-      await dialog.getByLabel('官方声明 DOC').setInputFiles(join(word!, 'declaration.doc'))
+      const originalsPanel = dialog.getByRole('region', { name: '上电官方附件' })
+      await originalsPanel.getByText('手动上传官方原件').click()
+      await originalsPanel.getByLabel('官方附件包 RAR').setInputFiles(join(originals!, 'suep-undergraduate.rar'))
+      await expect(originalsPanel).toContainText('撰写规范均已校验')
     } else if (id === 'sjtu-graduate-word') {
       await expect(dialog.getByLabel('导师英文姓名')).toBeVisible()
       await fillZju(dialog)

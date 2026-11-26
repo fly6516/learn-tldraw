@@ -1,5 +1,5 @@
 import { builtInPaperTemplates, openTemplateArchive, springerTemplate, templateDigest, type PaperTemplate } from './paper-templates'
-import { suepUndergraduateSource } from './suep-undergraduate-source'
+import { suepUndergraduateOrigin, suepUndergraduateSource } from './suep-undergraduate-source'
 import type { TemplateOrigin } from './template-release'
 import { wordLayoutCompile, type CompileProfile } from './compile-profile'
 import type { WordProfile } from './word-import'
@@ -126,8 +126,8 @@ export const templateCatalog: readonly CatalogTemplate[] = [
   {
     id: 'suep-undergraduate', name: '上海电力大学 · 本科毕业设计', category: 'school', language: '简体中文', layout: 'thesis',
     keywords: suepKeywords, delivery: 'official', exportProfile: 'suep-undergraduate', sourceUrl: suepUndergraduateSource.page,
-    workflow: { kind: 'word-import', profile: 'suep-undergraduate', compile: wordLayoutCompile, version: '2026-10-13',
-      original: { url: suepUndergraduateSource.officialFiles[0].url, sha256: '3329bf614ad384bd8eeaf2e5e7ad52ea22122a90ca20c4ac203c522032880b18' },
+    workflow: { kind: 'word-import', profile: 'suep-undergraduate', compile: wordLayoutCompile, version: suepUndergraduateOrigin.version,
+      original: { url: suepUndergraduateSource.officialFiles[0].url, sha256: suepUndergraduateOrigin.sha256 },
       checks: { kind: 'suep' } },
     summary: '使用学校发布的 Word 原件。官方附件包内的第 7 项是带红色校徽的本科封面，最后保存于 2026-10-13。',
     sourceVersion: '本科封面 2026-10-13 版',
@@ -443,8 +443,10 @@ export const templateCatalog: readonly CatalogTemplate[] = [
 
 export function catalogReleaseSource(entry: CatalogTemplate) {
   const { workflow, sourceUrl } = entry
-  if (!sourceUrl || (workflow.kind !== 'word' && workflow.kind !== 'zip')) return
+  if (!sourceUrl || (workflow.kind !== 'word' && workflow.kind !== 'zip' && workflow.kind !== 'word-import')) return
   const baseline = { id: entry.id, version: workflow.version, sha256: workflow.original.sha256 }
+  if (workflow.kind === 'word-import') return { kind: workflow.kind, baseline, url: workflow.original.url,
+    sourceUrl, updateLink: suepUndergraduateSource.updateLink, guideline: undefined, declaration: undefined, blindCover: undefined }
   if (workflow.kind === 'word') return { kind: workflow.kind, baseline, url: workflow.original.url,
     sourceUrl, guideline: workflow.guideline, declaration: workflow.declaration, blindCover: workflow.blindCover, updateLink: workflow.updateLink }
   return { kind: workflow.kind, baseline, url: workflow.upstream?.url ?? workflow.original.url,

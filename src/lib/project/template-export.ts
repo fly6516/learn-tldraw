@@ -3,6 +3,16 @@ import { findCitations, parseBibliography } from './references'
 import type { LineSources, ManuscriptLine, MappedTex } from './template-source-map'
 import type { ProjectFile, ProjectDirectory } from './types'
 
+export function suepImportedCover(files: ReadonlyMap<string, ProjectFile | ProjectDirectory>) {
+  const file = files.get('word-original/cover-fields.json')
+  if (!file || file.type === 'directory' || typeof file.content !== 'string') return
+  try {
+    const fields = JSON.parse(file.content)
+    const keys = ['title', 'author', 'studentNumber', 'affiliation', 'program', 'advisor', 'date'] as const
+    if (fields && keys.every(key => typeof fields[key] === 'string')) return fields as Record<typeof keys[number], string>
+  } catch { /* malformed import metadata is reported by the snapshot reader */ }
+}
+
 type Location = ManuscriptLine
 type Range = { start: number; end: number }
 type Located<T> = Readonly<T & Location>
@@ -15,6 +25,8 @@ export type ManuscriptSnapshot = Readonly<{
   authors: readonly string[]
   abstract: string
   keywords: string
+  importedChineseAbstract?: string
+  importedChineseKeywords?: string
   body: string
   lineSources: Readonly<Record<'abstract' | 'keywords' | 'body', LineSources>>
   sections: readonly Section[]
@@ -106,9 +118,70 @@ function mappedExcerpt(source: string, chunks: Chunk[], ranges: Range[]): Mapped
   return { text, lines }
 }
 
+function suepImportSources(files: ReadonlyMap<string, ProjectFile | ProjectDirectory>, main: string) {
+  function content(path: string) {
+    const entry = files.get(path)
+    return entry?.type !== 'directory' ? entry?.content : undefined
+  }
+  const original = content(main)
+  const manuscript = content('manuscript.tex')
+  const fieldsJson = content('word-original/cover-fields.json')
+  if (main !== 'main.tex' || !content('word-original/official-attachments.json') ||
+    !original?.includes('\\input{suep-layout}') || !manuscript || !fieldsJson) return
+
+  const fields = suepImportedCover(files)
+  if (!fields) {
+    throw new Error('word-original/cover-fields.json:1 · 缺少 Word 导入时填写的题目或作者。')
+  }
+  const preserveLines = (before: string, after: string) => after + '\n'.repeat(Math.max(0,
+    [...before.matchAll(/\n/g)].length - [...after.matchAll(/\n/g)].length))
+  function latexArguments(text: string, command: RegExp, count: number, rewrite: (values: string[]) => string) {
+    // Scan from the end so replacements may unwrap nested Pandoc formatting.
+    for (const match of [...text.matchAll(command)].reverse()) {
+      let cursor = match.index + match[0].length
+      const values: string[] = []
+      for (let i = 0; i < count; i++) {
+        const group = readArgument(text, cursor, '{', '}')
+        if (!group) break
+        values.push(text.slice(group.start, group.end))
+        cursor = group.next
+      }
+      if (values.length === count) {
+        text = text.slice(0, match.index) + preserveLines(text.slice(match.index, cursor), rewrite(values)) + text.slice(cursor)
+      }
+    }
+    return text
+  }
+  let text = latexArguments(manuscript, /\\foreignlanguage\b/g, 2, ([, content]) => content)
+  text = latexArguments(text, /\\pandocbounded\b/g, 1, ([content]) => content)
+  text = latexArguments(text, /\\texorpdfstring\b/g, 2, ([content]) => content)
+  text = text.replace(/(\\(?:section|subsection|subsubsection)\*?\{)(?:第\s*[一二三四五六七八九十百\d]+\s*章|\d+\.\d+(?:\.\d+)?)\s*(?:\\quad\s*)?/g, '$1')
+  let chineseAbstract: string | undefined
+  let chineseKeywords: string | undefined
+  text = text.replace(/\\begin\{SuepChineseAbstract\}([\s\S]*?)\\end\{SuepChineseAbstract\}/g, (block, body: string) => {
+    chineseAbstract = latexArguments(body, /\\SuepKeywords\b/g, 2, ([, value]) => { chineseKeywords = value; return '' }).trim()
+    return preserveLines(block, '')
+  })
+  let englishTitle: string | undefined
+  let keywords = ''
+  text = latexArguments(text, /\\SuepEnglishTitle\b/g, 1, ([title]) => { englishTitle = title; return '' })
+  text = latexArguments(text, /\\SuepKeywords\b/g, 2, ([, value]) => { keywords = value; return '' })
+  text = text.replace(/\\begin\{SuepEnglishAbstract\}/g, '\\begin{abstract}')
+    .replace(/\\end\{SuepEnglishAbstract\}/g, () => '\\end{abstract}' + (keywords ? '\\begin{keywords}' + keywords + '\\end{keywords}' : ''))
+    .replace(/\\(?:SuepStartBody|clearpage|tightlist)\b/g, '')
+  const escape = (value: string) => value.replace(/[&%#$_]/g, char => '\\' + char)
+  const bodyStart = original.indexOf('\\begin{document}')
+  if (bodyStart < 0) return
+  const wrapper = preserveLines(original.slice(0, bodyStart), '') + '\\documentclass{article}' +
+    '\\title{' + (englishTitle ?? escape(fields.title)) + '}\\author{' + escape(fields.author) + '}' +
+    original.slice(bodyStart).replace(/^\\(?:includepdf\[pages=(?:\{1\}|-),pagecommand=\{\\thispagestyle\{empty\}\}\]\{front\/(?:cover|declaration)\.pdf\}|SuepSetup)$/gm, '')
+  return { wrapper, text, chineseAbstract, chineseKeywords }
+}
+
 /** Captures the supported LaTeX interchange subset from the current working files. */
 export function captureManuscript(files: ReadonlyMap<string, ProjectFile | ProjectDirectory>, main: string,
   options?: { allowLongtable?: boolean }): ManuscriptSnapshot {
+  const imported = suepImportSources(files, main)
   const root = main.slice(0, main.lastIndexOf('/') + 1)
   const chunks: Chunk[] = []
   let source = ''
@@ -122,7 +195,7 @@ export function captureManuscript(files: ReadonlyMap<string, ProjectFile | Proje
     if (stack.length > 32 || source.length > 2_000_000) problem(parent, '稿件嵌套或展开后的长度超出导出范围。')
     const entry = files.get(path)
     if (!entry || entry.type === 'directory' || typeof entry.content !== 'string') problem(parent, `找不到源文件 ${path}。`)
-    const text = entry.content
+    const text = path === main && imported ? imported.wrapper : path === 'manuscript.tex' && imported ? imported.text : entry.content
     const code = maskLatexCode(text)
     let offset = 0
     for (const match of code.matchAll(/\\(?:\\|(?:input|include)(?![A-Za-z@]))/g)) {
@@ -354,7 +427,8 @@ export function captureManuscript(files: ReadonlyMap<string, ProjectFile | Proje
     }
   }
   return {
-    title, authors, abstract, keywords, body: mappedBody.text, lineSources, sections, floats, references,
+    title, authors, abstract, keywords, importedChineseAbstract: imported?.chineseAbstract,
+    importedChineseKeywords: imported?.chineseKeywords, body: mappedBody.text, lineSources, sections, floats, references,
     assets: Array.from(assets, ([path, blob]) => ({ path, blob })),
     bibliography: Array.from(bibliography, ([path, content]) => ({ path, content })),
     unicodeLocation,

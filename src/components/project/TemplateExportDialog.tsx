@@ -1,10 +1,12 @@
 'use client'
 
 import dynamic from 'next/dynamic'
+import { SuepOfficialAttachments, useSuepAttachments } from './SuepOfficialAttachments'
+import { suepUndergraduateId } from '@/lib/project/suep-undergraduate-source'
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
-import { captureManuscript } from '@/lib/project/template-export'
+import { captureManuscript, suepImportedCover } from '@/lib/project/template-export'
 import { exportTargets, exportWithTemplate, prepareExternalTemplate, supportsSwitchRelease, switchTargetForRelease, type ExportFields } from '@/lib/project/template-export-client'
 import { attachExternalTemplate, type ExternalTemplatePreview } from '@/lib/project/external-template-build'
 import type { TemplatePreview } from '@/lib/project/template-source-map'
@@ -35,9 +37,16 @@ export function TemplateExportDialog({ files, main, active, database, originalNa
     try { return { manuscript: captureManuscript(files, main) } }
     catch (cause) { return { error: cause instanceof Error ? cause.message : '无法读取稿件快照。' } }
   })
-  const [selection, setSelection] = useState(active?.origin.id ?? exportTargets.find(item => item.entry.exportProfile === 'zju-undergraduate')?.entry.id ?? exportTargets[0].entry.id)
+  const importedCover = suepImportedCover(files)
+  const [selection, setSelection] = useState(active?.origin.id ?? (importedCover ? originalOrigin?.id : undefined) ?? exportTargets.find(item => item.entry.exportProfile === 'zju-undergraduate')?.entry.id ?? exportTargets[0].entry.id)
   const [version, setVersion] = useState<string>()
-  const [fields, setFields] = useState<ExportFields>(() => ({ ...initialFields, ...active?.fields }))
+  const [fields, setFields] = useState<ExportFields>(() => ({
+    ...initialFields, ...(importedCover && {
+      chineseTitle: importedCover.title, program: importedCover.program, studentNumber: importedCover.studentNumber,
+      affiliation: importedCover.affiliation, advisor: importedCover.advisor, date: importedCover.date,
+      chineseAbstract: input.manuscript?.importedChineseAbstract ?? '', chineseKeywords: input.manuscript?.importedChineseKeywords ?? '',
+    }), ...active?.fields,
+  }))
   const [releases, setReleases] = useState<Awaited<ReturnType<typeof listOfficialTemplateReleases>>>()
   const [releaseError, setReleaseError] = useState('')
   const [saving, setSaving] = useState(false)
@@ -56,10 +65,13 @@ export function TemplateExportDialog({ files, main, active, database, originalNa
     const target = release.id === selection && release.switchAcceptance?.protocol === 1 && switchTargetForRelease(release)
     return target ? [target] : []
   }), base]
-  const target = versions.find(item => item.version === (version ?? (active?.origin.id === selection ? active.origin.version : undefined)))
+  const target = versions.find(item => item.version === (version ?? (active?.origin.id === selection ? active.origin.version : importedCover && originalOrigin?.id === selection ? originalOrigin.version : undefined)))
     ?? versions[0]
   const zju = target.entry.exportProfile === 'zju-undergraduate'
   const suep = target.entry.exportProfile === 'suep-undergraduate'
+  const suepOriginal = useSuepAttachments(suep
+    ? { id: suepUndergraduateId, version: target.version, sha256: target.sha256 } : undefined,
+    target.release?.kind === 'word-import' ? target.release.archive : undefined)
   const sjtu = target.entry.exportProfile === 'sjtu-graduate-word'
   const njupt = target.entry.exportProfile === 'njupt-masters'
   const njuptProfessional = njupt && target.entry.workflow.kind === 'word' && target.entry.workflow.njuptTrack === 'professional'
@@ -114,7 +126,7 @@ export function TemplateExportDialog({ files, main, active, database, originalNa
 
   async function compile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!input.manuscript || loadingReleases) return
+    if (!input.manuscript || loadingReleases || suep && !suepOriginal.receipt) return
     cancel()
     clearOutput()
     setError('')
@@ -132,7 +144,7 @@ export function TemplateExportDialog({ files, main, active, database, originalNa
         setExternalBuild({ ...prepared, url })
         return
       }
-      const build = await exportWithTemplate(input.manuscript, target, fields, controller.signal)
+      const build = await exportWithTemplate(input.manuscript, target, suep ? { ...fields, original: suepOriginal.upload } : fields, controller.signal)
       if (task.current === controller) setResult(build)
     } catch (cause) {
       if (task.current === controller) setError(cause instanceof Error ? cause.message : '导出失败。')
@@ -329,15 +341,7 @@ export function TemplateExportDialog({ files, main, active, database, originalNa
                   <input type="checkbox" checked={fields.declarations} onChange={event => updateField('declarations', event.target.checked)} />
                   附上未签署的官方声明与授权书
                 </label>}
-                {suep && <>
-                  <label className="grid gap-1 text-xs">官方本科封面 DOC
-                    <input className={inputStyle} type="file" accept=".doc" required onChange={event => updateField('cover', event.target.files?.[0])} />
-                  </label>
-                  <label className="grid gap-1 text-xs">官方声明 DOC
-                    <input className={inputStyle} type="file" accept=".doc" required onChange={event => updateField('declaration', event.target.files?.[0])} />
-                  </label>
-                  <p className="text-xs">封面使用本次填写的字段，声明签名栏留空。</p>
-                </>}
+                {suep && <p className="text-xs">封面使用本次填写的字段，声明签名栏留空。</p>}
               </> : !starter && <>
                 {field('affiliation', '作者单位')}
                 {field('email', agu ? '通讯邮箱' : '通讯邮箱（选填）', { optional: !agu })}
@@ -351,6 +355,7 @@ export function TemplateExportDialog({ files, main, active, database, originalNa
               </>}
             </div>
             {target.entry.id === 'plos-one' && <p className="text-xs">项目预览保留插图。初投稿按 PLOS ONE 要求单独上传图片，稿件 PDF 保留图注。</p>}
+            {suep && <SuepOfficialAttachments state={suepOriginal} disabled={busy || saving} />}
             {!suep && !starter && !target.release && <details key={selection + target.version} className="space-y-2 text-xs">
               <summary className="cursor-pointer font-medium">手动上传官方原件</summary>
               <label className="grid gap-1">
@@ -369,7 +374,7 @@ export function TemplateExportDialog({ files, main, active, database, originalNa
                 onChange={event => updateField('declaration', event.target.files?.[0])} />
             </label>}
             <div className="flex flex-wrap gap-2">
-              <Button type="submit" disabled={busy || loadingReleases} className="bg-workbench-accent text-white">{mit ? "准备外部编译源包" : "编译预览"}</Button>
+              <Button type="submit" disabled={busy || loadingReleases || suep && !suepOriginal.receipt} className="bg-workbench-accent text-white">{mit ? "准备外部编译源包" : "编译预览"}</Button>
               {busy && <Button type="button" variant="outline" onClick={cancel}>取消导出</Button>}
             </div>
           </fieldset>

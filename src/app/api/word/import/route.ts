@@ -14,11 +14,12 @@ import { templateCatalog } from '@/lib/project/template-catalog'
 import { zjuCaptionSetup, zjuLayout } from '@/lib/project/zju-layout'
 import { sjtuLayout, sjtuWordPreamble } from '@/lib/project/sjtu-export-front'
 import { fillSuepCover, suepCoverFields } from '@/lib/project/suep-cover'
-import { suepUndergraduateSource } from '@/lib/project/suep-undergraduate-source'
+import { suepDocxMembers, suepMemberRoles, suepUndergraduateOrigin } from '@/lib/project/suep-undergraduate-source'
+import { loadSuepBundle, suepPin } from '@/lib/project/suep-bundle-server'
 import { draftWordLayout } from '@/lib/project/word-layout-extraction'
 import { hasLayoutConflict, layoutKeys, layoutValues, wordLayoutSchema, type WordLayout } from '@/lib/project/word-layout'
 import { customWordGeometry, customWordTex, formatCustomWord } from '@/lib/project/custom-word-tex'
-import { submissionDocxConfig, submissionDocxFieldSchema, submissionDocxIdSchema, suepDocxMembers } from '@/lib/project/submission-docx-config'
+import { submissionDocxConfig, submissionDocxFieldSchema, submissionDocxIdSchema } from '@/lib/project/submission-docx-config'
 import { captureManuscript } from '@/lib/project/template-export'
 import { importSourceArchive } from '@/lib/project/source-archive'
 import { docxLatexForPandoc, docxSourceError, prepareDocxAst, validateDocxSource, type PandocDocument } from '@/lib/project/docx-manuscript'
@@ -149,22 +150,57 @@ async function inspectWord(work: string, request: Request, data: FormData) {
   return draft
 }
 
+function requestedSuepPin(data: FormData) {
+  if (!data.has('suep-version') && !data.has('suep-sha256')) return
+  return suepPin(data.get('suep-version'), data.get('suep-sha256'))
+}
+
+function readSuepCoverFields(value: FormDataEntryValue | null) {
+  let parsed: unknown
+  try { parsed = JSON.parse(typeof value === 'string' ? value : '') }
+  catch { throw new ImportError('请填写上电本科封面字段。') }
+  const fields = suepCoverFields.safeParse(parsed)
+  if (!fields.success) throw new ImportError('请核对上电封面字段长度和格式。')
+  return fields.data
+}
+
 async function importWord(work: string, request: Request, data: FormData, school: boolean, layout?: WordLayout) {
   const archive = new JSZip()
   const { run, office } = await wordJob(work, request.signal)
   const settings = layout && layoutValues(layout)
   const inputs: Partial<Record<WordRole, string>> = {}
+  const pin = school ? requestedSuepPin(data) : undefined
+  const official = pin && await loadSuepBundle(pin, { signal: request.signal })
   let example = false
   for (const role of wordRoles) {
+    if (official && role !== 'body') continue
     const file = data.get(role)
     if (!(file instanceof File) || !file.size) continue
     const { bytes, extension } = await documentBytes(file, role)
-    if (school && role === 'body') example = createHash('sha256').update(bytes).digest('hex') === suepExampleHash
+    if (school && role === 'body') {
+      const digest = createHash('sha256').update(bytes).digest('hex')
+      example = digest === suepExampleHash
+      if (official && (example || digest === official.manifest.members.body.sha256)) {
+        throw new ImportError('请选择自己的 Word 稿件。官方正文示范只用于排版参考。')
+      }
+    }
     const filename = role + extension
     await writeFile(join(work, filename), bytes)
     inputs[role] = filename
   }
   if (!inputs.body) throw new ImportError('Choose a Word manuscript to import.')
+  if (official) {
+    const fields = readSuepCoverFields(data.get('suep-cover-fields'))
+    await writeFile(join(work, 'cover.doc'), official.members.cover)
+    await writeFile(join(work, 'declaration.doc'), official.members.declaration)
+    await office('docx:Office Open XML Text', ['cover.doc'])
+    const path = join(work, 'cover.docx')
+    await writeFile(path, await fillSuepCover(await readFile(path), fields))
+    inputs.cover = 'cover.docx'
+    inputs.declaration = 'declaration.doc'
+    archive.file('word-original/official-attachments.json', JSON.stringify(official.manifest, null, 2))
+    archive.file('word-original/cover-fields.json', JSON.stringify(fields, null, 2))
+  }
   await office('html:HTML (StarWriter)', [inputs.body])
   const media = await convertBodyHtml(work, archive, example, !!settings)
   const front = [inputs.cover, inputs.declaration].filter((value): value is string => Boolean(value))
@@ -298,6 +334,8 @@ async function exportSubmissionWord(work: string, request: Request, data: FormDa
   const target = submissionDocxIdSchema.safeParse(data.get('school'))
   if (!target.success) throw new ImportError('请选择支持的官方 Word 版本。')
   const config = submissionDocxConfig(target.data)
+  const suep = target.data === suepUndergraduateOrigin.id
+  const pin = suep ? requestedSuepPin(data) ?? suepUndergraduateOrigin : undefined
   const stage = data.get('stage')
   const njuptStage = stage === 'njupt-deposit' || stage === 'njupt-blind'
   if ((config.stage || njuptStage) && stage !== config.stage) {
@@ -312,21 +350,23 @@ async function exportSubmissionWord(work: string, request: Request, data: FormDa
   const source = data.get('source')
   const original = data.get('original')
   const entry = String(data.get('main') ?? '')
-  if (!(source instanceof File) || !(original instanceof File) || !source.size || !original.size) throw new ImportError('缺少当前稿件源包或官方原件。')
+  if (!(source instanceof File) || !source.size || !suep && (!(original instanceof File) || !original.size)) {
+    throw new ImportError('缺少当前稿件源包或官方原件。')
+  }
   const pinned = async (file: Blob, sha256: string, label: string) => {
     const bytes = Buffer.from(await file.arrayBuffer())
     if (createHash('sha256').update(bytes).digest('hex') !== sha256) throw new ImportError(label + '的 SHA-256 与登记版不一致。')
     return bytes
   }
-  const registered = await pinned(original, config.original.sha256, '官方原件')
+  const registered = !suep && original instanceof File ? await pinned(original, config.original.sha256, '官方原件') : undefined
   const project = await importSourceArchive(source, wordImportLimit)
   const manuscript = captureManuscript(project.files, entry, { allowLongtable: true })
   validateDocxSource(manuscript)
   const { run, office } = await wordJob(work, request.signal)
-  let reference: Uint8Array = registered
+  let reference: Uint8Array | undefined = registered
   let cover: Uint8Array | undefined
   let declaration: Uint8Array | undefined
-  let provenance = config.name + ' · ' + config.version + '\n' + config.sourceUrl + '\n官方原件 SHA-256 ' + config.original.sha256
+  let provenance = config.name + ' · ' + (pin?.version ?? config.version) + '\n' + config.sourceUrl + '\n官方原件 SHA-256 ' + (pin?.sha256 ?? config.original.sha256)
   if (config.guideline) {
     const guide = data.get('guideline')
     if (!(guide instanceof File)) throw new ImportError('缺少浙大官方规范 PDF。')
@@ -338,29 +378,23 @@ async function exportSubmissionWord(work: string, request: Request, data: FormDa
     declaration = await pinned(uploaded, config.declaration.sha256, '官方声明')
     provenance += '\n官方声明 ' + config.declaration.url + '\n官方声明 SHA-256 ' + config.declaration.sha256
       + '\n正式归档阶段 ' + config.stage + '\n撰写标准 ' + config.requirementsUrl
-  } else {
-    await writeFile(join(work, 'official.rar'), registered)
-    const contents = {} as Record<keyof typeof suepDocxMembers, Buffer>
-    for (const [key, member] of Object.entries(suepDocxMembers)) {
-      const { stdout } = await exec(process.env.BSDTAR_BIN || 'bsdtar', ['-xOf', 'official.rar',
-        '附件：毕业设计、论文相关20261013/' + member.name],
-      { cwd: work, encoding: 'buffer', timeout: 15_000, maxBuffer: wordImportLimit, signal: request.signal })
-      if (createHash('sha256').update(stdout).digest('hex') !== member.sha256) throw new ImportError(member.name + ' 的 SHA-256 与登记版不一致。')
-      contents[key as keyof typeof suepDocxMembers] = stdout
-      provenance += '\n' + member.name + ' · SHA-256 ' + member.sha256
-    }
-    for (const key of ['cover', 'declaration', 'body'] as const) {
-      await writeFile(join(work, key + '.doc'), contents[key])
-    }
+  } else if (pin) {
+    const { manifest, members } = await loadSuepBundle(pin, {
+      signal: request.signal, upload: original instanceof File ? original : undefined,
+    })
+    provenance += '\n附件来源 ' + manifest.sourceUrl
+    for (const role of suepMemberRoles) provenance += '\n' + suepDocxMembers[role].name + ' · SHA-256 ' + manifest.members[role].sha256
+    for (const role of ['cover', 'declaration', 'body'] as const) await writeFile(join(work, role + '.doc'), members[role])
     await office('docx:Office Open XML Text', ['cover.doc', 'declaration.doc', 'body.doc'])
     reference = await readFile(join(work, 'body.docx'))
     cover = await fillSuepCover(await readFile(join(work, 'cover.docx')), suepCoverFields.parse(fields))
     declaration = await readFile(join(work, 'declaration.docx'))
   }
+  if (!reference) throw new ImportError('缺少登记的 Word 底稿。')
   provenance += '\n稿件快照 SHA-256 ' + await projectSourceDigest(project.files, entry)
   const deliveryId = data.get('delivery-id')
   if (typeof deliveryId === 'string' && /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/.test(deliveryId)) provenance += '\n交付标识 ' + deliveryId
-  provenance += '\n' + config.status
+  provenance += '\n' + (pin && pin.version !== config.version ? '此版本待 Word 实机核对' : config.status)
 
   async function runPandoc(args: string[], part: 'body' | 'abstract') {
     try { await run(process.env.PANDOC_BIN || 'pandoc', args) }
@@ -457,24 +491,28 @@ export async function POST(request: Request) {
       return new Response(new Uint8Array(normalized), { headers: { 'Cache-Control': 'no-store' } })
     }
     if (data.get('intent') === 'render-front') {
+      const pin = requestedSuepPin(data)
+      const role = data.get('suep-role')
       const cover = data.get('cover')
-      if (!(cover instanceof File) || !cover.size) throw new ImportError('缺少 Word 封面。')
-      const { extension, bytes } = await documentBytes(cover, 'cover')
+      if (pin && role !== 'cover' && role !== 'declaration') throw new ImportError('请选择上电封面或声明。')
+      const official = pin && await loadSuepBundle(pin, { signal: request.signal })
+      if (!official && (!(cover instanceof File) || !cover.size)) throw new ImportError('缺少 Word 封面。')
+      const { extension, bytes } = official ? { extension: '.doc', bytes: official.members[role as 'cover' | 'declaration'] }
+        : await documentBytes(cover as File, 'cover')
       const name = 'front' + extension
       await writeFile(join(work, name), bytes)
       const { office } = await wordJob(work, request.signal)
       let renderName = name
       const fields = data.get('suep-cover-fields')
       if (typeof fields === 'string') {
-        if (extension !== '.doc' || createHash('sha256').update(bytes).digest('hex') !== suepUndergraduateSource.switchAssets.cover.sha256) {
+        if (extension !== '.doc' || (official ? role !== 'cover' : createHash('sha256').update(bytes).digest('hex') !== suepDocxMembers.cover.sha256)) {
           throw new ImportError('上电封面必须使用已登记的官方 DOC 原件。')
         }
-        const parsed = suepCoverFields.safeParse(JSON.parse(fields))
-        if (!parsed.success) throw new ImportError('请核对上电封面字段长度和格式。')
+        const parsed = readSuepCoverFields(fields)
         await office('docx:Office Open XML Text', [name])
         renderName = 'front.docx'
         const wordFile = join(work, renderName)
-        try { await writeFile(wordFile, await fillSuepCover(await readFile(wordFile), parsed.data)) }
+        try { await writeFile(wordFile, await fillSuepCover(await readFile(wordFile), parsed)) }
         catch (cause) { throw new ImportError(cause instanceof Error ? cause.message : '无法填写上电封面。') }
       }
       await office('pdf:writer_pdf_Export', [renderName])

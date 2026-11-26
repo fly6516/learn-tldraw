@@ -27,13 +27,6 @@ export function submissionDocxFieldSchema(id?: SubmissionDocxId) {
   })
 }
 
-export const suepDocxMembers = {
-  guide: { name: '6.上海电力大学本科生毕业设计（论文）撰写规范.docx', sha256: '349dd0189406227e776fac8197c479dba80bc1b0679a9002821dae014d3804a4' },
-  cover: { name: '7.上海电力大学毕业设计（论文）封面.doc', sha256: 'f06b20bacfc3181be5f7c443e37e940f604e1433b6bfeca79f63051c538ba42b' },
-  body: { name: '14.上海电力大学本科生毕业设计（论文）格式示范文本.doc', sha256: '682978def76fb275f269355ea178fbbc06bd8ba1275d49d286bd93f5e45904ff' },
-  declaration: { name: '17.上海电力大学毕业设计（论文）原创性及使用授权声明.doc', sha256: 'df4c2d2b90d0b3effb2d704a3c920a4fef2f5e8117850b411a7566302877beb8' },
-} as const
-
 export function submissionDocxConfig(id: SubmissionDocxId) {
   const entry = templateCatalog.find(entry => entry.id === id)!
   const workflow = entry.workflow

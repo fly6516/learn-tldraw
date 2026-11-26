@@ -25,7 +25,8 @@ export type DocxFinding = z.infer<typeof finding>
 export const submissionDocxDeliveryInfo = z.object({
   id: z.uuid(), createdAt: date, name: z.string().min(1).max(100), main: path,
   template: z.object({ id: submissionDocxIdSchema, name: z.string(), version: z.string(), sha256: digest, sourceUrl: z.url(),
-    declarationSha256: digest.optional(), declarationUrl: z.url().optional() }),
+    declarationSha256: digest.optional(), declarationUrl: z.url().optional(),
+    attachments: z.array(z.object({ name: z.string(), sha256: digest })).length(4).optional() }),
   snapshotSha256: digest, source: artifact, generated: artifact, final: artifact.optional(),
   check: z.object({ checkedAt: date, findings: z.array(finding).refine(items => items.every(item => item.status === 'manual')) }),
 })
@@ -116,6 +117,7 @@ export async function verifyWordFinal(file: File, delivery: Pick<SubmissionDocxD
   const properties = new DOMParser().parseFromString(await readDocxPart(zip, 'docProps/core.xml'), 'application/xml')
   const provenance = properties.getElementsByTagNameNS('http://purl.org/dc/elements/1.1/', 'description')[0]?.textContent?.split(/\r?\n/) ?? []
   if (![template.name + ' · ' + template.version, '官方原件 SHA-256 ' + template.sha256, '稿件快照 SHA-256 ' + snapshotSha256, '交付标识 ' + id,
+    ...(template.attachments?.map(item => item.name + ' · SHA-256 ' + item.sha256) ?? []),
     ...(template.declarationSha256 ? ['官方声明 SHA-256 ' + template.declarationSha256, '正式归档阶段 njupt-deposit'] : [])]
     .every(value => provenance.includes(value))) throw new Error('这份文件的交付标识、模板或稿件快照与本次导出不匹配。请使用从本次导出文件另存的 DOCX。')
   const metadata = await docxDeliveryArtifact(file, file.name.normalize('NFC'))

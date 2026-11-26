@@ -14,7 +14,8 @@ import { hasLayoutConflict, layoutKeys, layoutValues, wordLayoutSchema, type Wor
 import { joinMappedTex, manuscriptRegions, type LineSources, type MappedTex } from './template-source-map'
 import { numericPublisherBibliography, publisherArticle, publisherArticleIds, type PublisherArticleId } from './publisher-article'
 import { suepGeometry, suepTexLayout } from './suep-word-layout'
-import { suepUndergraduateSource } from './suep-undergraduate-source'
+import { suepUndergraduateId } from './suep-undergraduate-source'
+import { bindSuepBundle, prepareSuepBundle, restoreSuepBundle } from './suep-bundle-client'
 import { sjtuExportFront, sjtuLayout, sjtuWordPreamble } from './sjtu-export-front'
 import { zjuCaptionSetup, zjuLayout } from './zju-layout'
 import { zjuExportCover } from './zju-export-cover'
@@ -34,14 +35,14 @@ export function catalogSwitchStatus(entry: CatalogTemplate) {
   if (entry.workflow.kind === 'reference') return 'reference'
   if (entry.exportProfile === 'mit-thesis') return 'external-switch'
   if (!entry.exportProfile) return 'external'
-  return entry.workflow.kind === 'word' || entry.workflow.kind === 'zip' ? 'versioned' : 'pinned'
+  return entry.workflow.kind === 'word' || entry.workflow.kind === 'zip' || entry.workflow.kind === 'word-import' ? 'versioned' : 'pinned'
 }
 export const supportsSwitchRelease = (id: string) => exportTargets.some(({ entry }) =>
   entry.id === id && catalogSwitchStatus(entry) === 'versioned')
 
 export function switchTargetForRelease(release: OfficialTemplateRelease): ExportTarget | undefined {
   const base = exportTargets.find(({ entry }) => entry.id === release.id && entry.workflow.kind === release.kind)
-  return base && supportsSwitchRelease(release.id) && (release.kind === 'zip' || release.original)
+  return base && supportsSwitchRelease(release.id) && (release.kind !== 'word' || release.original)
     ? { entry: base.entry, version: release.version, sha256: release.sha256, release } : undefined
 }
 export type ExportFields = Readonly<TemplateFields & { original?: File; guideline?: File; cover?: File; declaration?: File }>
@@ -55,7 +56,7 @@ async function officialFile(target: ExportTarget, signal: AbortSignal, upload?: 
   const sha = guideline ?? target.sha256
   if (target.release && !guideline) {
     const { release } = target
-    const original = release.kind === 'zip' ? release.archive : release.original
+    const original = release.kind !== 'word' ? release.archive : release.original
     if (!original || await templateDigest(await original.arrayBuffer()) !== sha) throw new Error('已发布版本的原件校验失败。')
     signal.throwIfAborted()
     return new File([original], release.sourceName)
@@ -423,15 +424,14 @@ async function prepareSuep(target: ExportTarget, fields: ExportFields, signal: A
   const { workflow } = target.entry
   if (workflow.kind !== 'word-import' || workflow.profile !== 'suep-undergraduate') throw new Error('缺少上电本科 Word 配置。')
   if (!requireFields([fields.chineseTitle, fields.chineseAbstract, fields.chineseKeywords])) throw new Error('请填写中文题目、摘要与关键词。')
-  async function render(file: File | undefined, role: 'cover' | 'declaration') {
-    const expected = suepUndergraduateSource.switchAssets[role].sha256
-    const label = role === 'cover' ? '本科封面' : '原创性及使用授权声明'
-    if (!file?.size || await templateDigest(await file.arrayBuffer()) !== expected) {
-      throw new Error(`请上传与登记版本一致的官方${label} DOC 原件。`)
-    }
+  const pin = { id: suepUndergraduateId, version: target.version, sha256: target.sha256 } as const
+  const { manifest } = await (fields.original ? prepareSuepBundle(pin, signal, fields.original)
+    : restoreSuepBundle(pin, signal, target.release?.kind === 'word-import' ? target.release.archive : undefined))
+  async function render(role: 'cover' | 'declaration') {
     const form = new FormData()
     form.set('intent', 'render-front')
-    form.set('cover', new File([file], role + '.doc'))
+    bindSuepBundle(form, pin)
+    form.set('suep-role', role)
     if (role === 'cover') form.set('suep-cover-fields', JSON.stringify({
       title: fields.chineseTitle, affiliation: fields.affiliation, program: fields.program,
       author: manuscript.authors.map(plainTitle).join('、'), studentNumber: fields.studentNumber,
@@ -439,12 +439,12 @@ async function prepareSuep(target: ExportTarget, fields: ExportFields, signal: A
     }))
     return encodeDocument(await (await wordRequest(form, signal)).blob())
   }
-  const cover = await render(fields.cover, 'cover')
-  const declaration = await render(fields.declaration, 'declaration')
+  const cover = await render('cover')
+  const declaration = await render('declaration')
   const { chineseTitle, chineseAbstract, chineseKeywords, affiliation, program, studentNumber, advisor, date } = fields
   return { kind: 'suep-undergraduate' as const, main: workflow.compile.mainFile,
     cover, declaration, fields: { chineseTitle, chineseAbstract, chineseKeywords, affiliation, program, studentNumber, advisor, date },
-    coverSha256: suepUndergraduateSource.switchAssets.cover.sha256, declarationSha256: suepUndergraduateSource.switchAssets.declaration.sha256 }
+    coverSha256: manifest.members.cover.sha256, declarationSha256: manifest.members.declaration.sha256 }
 }
 
 function suepBuild(template: Extract<ActiveTemplate, { kind: 'suep-undergraduate' }>, manuscript: ManuscriptSnapshot): Build {
@@ -744,8 +744,13 @@ function roundTripRegion(regions: SyncRegion[], region: SyncRegion) {
 
 /** Verify the switch renderer with an independent manuscript before recording acceptance. */
 export async function acceptTemplateSwitchRelease(release: OfficialTemplateRelease, signal: AbortSignal): Promise<OfficialTemplateRelease> {
+  if (!switchTargetForRelease(release)) return release
+  return (await previewTemplateSwitchRelease(release, signal)).release
+}
+
+export async function previewTemplateSwitchRelease(release: OfficialTemplateRelease, signal: AbortSignal) {
   const target = switchTargetForRelease(release)
-  if (!target) return release
+  if (!target) throw new Error('此候选版本缺少可编译的原件。')
   const sections = [
     { path: 'sections/method.tex', text: 'The method uses three independent observations.', heading: 'Study design' },
     { path: 'sections/results.tex', text: 'Independent results confirm the calibration.', heading: 'Results' },
@@ -782,7 +787,8 @@ export async function acceptTemplateSwitchRelease(release: OfficialTemplateRelea
     }
     return { path, line, page: region.page }
   })
-  return { ...release, switchAcceptance: { protocol: 1, anchors, pdfSha256: await preview.pdf.arrayBuffer().then(templateDigest) } }
+  const pdfSha256 = await preview.pdf.arrayBuffer().then(templateDigest)
+  return { release: { ...release, switchAcceptance: { protocol: 1 as const, anchors, pdfSha256 } }, pdf: preview.pdf }
 }
 
 async function compileTemplateTarget(manuscript: ManuscriptSnapshot, target: ExportTarget, fields: ExportFields, signal: AbortSignal) {

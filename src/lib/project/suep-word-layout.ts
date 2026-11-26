@@ -1,7 +1,8 @@
+import { suepDocxMembers } from './suep-undergraduate-source'
 type Node = { t: string; c?: unknown }
 type PandocDocument = { blocks: Node[] }
 
-export const suepExampleHash = '682978def76fb275f269355ea178fbbc06bd8ba1275d49d286bd93f5e45904ff'
+export const suepExampleHash = suepDocxMembers.body.sha256
 export const suepMargins = { top: 25.4, bottom: 25.4, left: 31.7, right: 25, binding: 0 }
 export const suepGeometry = [...Object.entries(suepMargins).filter(([key]) => key !== 'binding').map(([key, value]) => `${key}=${value}mm`),
   'headheight=13pt', 'headsep=6mm', 'footskip=7.9mm']

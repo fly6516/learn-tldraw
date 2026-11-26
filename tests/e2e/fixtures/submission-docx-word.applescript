@@ -4,6 +4,7 @@ on run argv
   set expectedName to do shell script "/usr/bin/basename " & quoted form of inputPath
   set expectedHeading to "实验设计"
   if (count of argv) > 1 then set expectedHeading to item 2 of argv
+  set expectsReferences to (count of argv) < 3
   with timeout of 75 seconds
     tell application id "com.microsoft.Word"
       open manuscript add to recent files false repair false
@@ -32,7 +33,8 @@ on run argv
       set submission to document expectedName
       set contentsTable to first table of contents of submission
       set tocText to content of text object of contentsTable
-      if tocText contains "—" or tocText does not contain expectedHeading or tocText does not contain "参考文献" or tocText contains "Error!" or tocText contains "错误!" then error "Saved TOC incomplete."
+      if tocText contains "—" or tocText does not contain expectedHeading or tocText contains "Error!" or tocText contains "错误!" then error "Saved TOC incomplete."
+      if expectsReferences and tocText does not contain "参考文献" then error "Missing references in the saved TOC."
       if (upper heading level of contentsTable is not 1) or (lower heading level of contentsTable is not 3) then error "Invalid TOC depth."
       set tableProof to ""
       repeat with tableIndex from 1 to (count of tables of submission)

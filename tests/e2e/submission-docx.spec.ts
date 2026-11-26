@@ -109,15 +109,15 @@ test('exports both official submission DOCX files from one unchanged project', a
   const archive = await encodeProjectBackup(emptyCanvas, project, undefined, { publication: { submissions: [saved], rounds: [] } })
   await page.route(url => url.pathname === '/api/templates/source', async route => {
     const params = new URL(route.request().url()).searchParams
-    if (params.get('asset') === 'docx-bundle') {
-      await route.fulfill({ status: 502, json: { error: '测试：官方下载暂不可用' } })
-      return
-    }
     const guide = params.get('asset') === 'guideline'
     const name = guide ? 'zju-basic-medicine-undergraduate-guidelines.pdf' : 'zju-basic-medicine-undergraduate.docx'
     const data = await readFile(join(fixtures!, name))
     expect(digest(data)).toBe(params.get('sha256'))
     await route.fulfill({ body: data, headers: { 'Content-Disposition': 'attachment; filename="' + name + '"' } })
+  })
+  await page.route('**/api/templates/suep?*', route => {
+    if (route.request().postDataBuffer()?.length) return route.continue()
+    return route.fulfill({ status: 502, json: { error: '测试：官方下载暂不可用' } })
   })
   await page.goto('/research')
   await page.getByLabel('Choose project ZIP or backup').setInputFiles({
@@ -151,13 +151,11 @@ test('exports both official submission DOCX files from one unchanged project', a
     if (id === 'suep-undergraduate') {
       await form.getByLabel('所在学院').fill('电气工程学院')
       await form.getByLabel('专业与年级').fill('2022级电气工程及其自动化')
-      await generate.click()
-      await expect(form.getByRole('alert')).toContainText('手动上传官方原件')
-      await form.getByText('手动上传官方原件', { exact: true }).click()
+      await expect(form.getByRole('alert')).toContainText('手动上传')
       await form.getByLabel('官方附件包 RAR').setInputFiles({ name: 'wrong.rar', mimeType: 'application/octet-stream', buffer: Buffer.from('wrong') })
-      await generate.click()
       await expect(form.getByRole('alert')).toContainText('SHA-256')
       await form.getByLabel('官方附件包 RAR').setInputFiles(join(fixtures!, id + '.rar'))
+      await expect(generate).toBeEnabled()
     }
     const event = page.waitForEvent('download', { timeout: 70_000 })
     await generate.click()

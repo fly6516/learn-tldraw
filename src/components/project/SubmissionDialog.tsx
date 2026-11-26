@@ -264,7 +264,7 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
         </label>}
       </fieldset>}
       {(templateOriginId !== 'njupt-professional-masters' || stage === 'njupt-deposit') && <SubmissionDocxPanel
-        key={templateOriginId ?? 'generic-docx'} project={target} main={main} template={templateOriginId} stage={stage} disabled={busy || saving || conflicting} download={download}
+        key={templateOriginId ?? 'generic-docx'} project={target} main={main} template={templateOriginId} stage={stage} database={database ?? undefined} disabled={busy || saving || conflicting} download={download}
         onLocate={onEvidenceLocate} onArchive={database && storageKey ? archiveDocx : undefined} />}
       {staleStage && <p role="status" className="rounded border border-amber-200 bg-amber-50 p-2 text-sm text-amber-900">稿件已修改。请重新编译和检查后下载交付包。历史记录仍可复查。</p>}
       <p className="text-sm">Compile entry <code className="break-all">{compileEntry}</code></p>
@@ -394,6 +394,7 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
             <p className="break-all">稿件快照 SHA-256 <code>{version.snapshotSha256}</code></p>
             <p className="break-all">原件 SHA-256 <code>{version.template.sha256}</code></p>
             {version.template.declarationSha256 && <p className="break-all">声明 SHA-256 <code>{version.template.declarationSha256}</code></p>}
+            {version.template.attachments?.map(item => <p key={item.name} className="break-all text-xs">{item.name} · SHA-256 <code>{item.sha256}</code></p>)}
             <ul className="space-y-2">{[
               { metadata: version.source, blob: docxReview.sourceZip, label: '下载归档稿件源包' },
               { metadata: version.generated, blob: docxReview.generatedDocx, label: '下载归档生成稿' },

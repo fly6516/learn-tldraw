@@ -11,6 +11,7 @@ type ReleaseBase = TemplateOrigin & { sourceName: string; publishedAt: string; s
 export type OfficialTemplateRelease =
   | (ReleaseBase & { kind: 'word'; layout: LocalPaperTemplate; original?: Blob })
   | (ReleaseBase & { kind: 'zip'; archive: Blob })
+  | (ReleaseBase & { kind: 'word-import'; archive: Blob })
 
 export function validateReleaseCandidate(current: TemplateOrigin, version: string, sha256: string) {
   if (!/^[a-z\d][a-z\d.\-]{0,47}$/i.test(version.trim())) throw new Error('请输入可识别的发布版本。')
