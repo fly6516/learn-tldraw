@@ -11,6 +11,8 @@ import { Input } from '@/components/ui/input'
 import type { LocalPaperTemplate } from '@/lib/project/template-catalog'
 import { addLocalTemplate } from '@/lib/project/storage'
 import { templateDigest } from '@/lib/project/paper-templates'
+import { catalogWordAttachments, readWordAttachmentCandidate, usesWordAttachmentRelease, type WordReleaseAssets } from '@/lib/project/word-release-attachments'
+import { officialAttachment, verifyAttachment, type AttachmentRole, type OfficialAttachment } from '@/lib/project/official-attachments'
 import { readCandidateOrigin, type TemplateOrigin } from '@/lib/project/template-release'
 import { applyWordBundle, importWordAsProject, packWordTemplate, previewWordLayout, previewWordProject, wordRequest } from '@/lib/project/word-conversion-client'
 import type { LayoutFinding } from '@/lib/project/layout-preflight'
@@ -47,11 +49,16 @@ export function WordTemplateBuilder({ database, close, onSave, previous, officia
   close: () => void
   onSave: (template: LocalPaperTemplate) => void
   previous?: { name: string; version: string; bundle: WordLayoutBundle; origin?: TemplateOrigin }
-  official?: { origin: TemplateOrigin; file?: File; standard?: File;
-    publish?: (template: LocalPaperTemplate, original: File, previewSha256: string) => Promise<void> }
+  official?: { origin: TemplateOrigin; file?: File; standard?: File; extraFiles?: Partial<Record<AttachmentRole, File>>; parentAttachments?: OfficialAttachment[]; candidateSources?: OfficialAttachment[];
+    publish?: (template: LocalPaperTemplate, original: File, previewSha256: string, assets?: WordReleaseAssets) => Promise<void> }
 }) {
   const [layout, setLayout] = useState<WordLayout | undefined>(previous?.bundle.layout)
   const [sample, setSample] = useState<File>()
+  const [releaseAssets, setReleaseAssets] = useState<WordReleaseAssets>()
+  const scopedAttachments = official && usesWordAttachmentRelease(official.origin.id)
+  const registered = official && catalogWordAttachments(official.origin.id)
+  const supplemental = registered?.filter(item => item.role === 'declaration' || item.role === 'blind-cover') ?? []
+  const expectsGuideline = officialAttachment(registered, 'guideline') !== undefined
   const [assets, setAssets] = useState<WordLayoutBundle['assets']>(previous?.bundle.assets ?? {})
   const [name, setName] = useState(previous?.name ?? '')
   const [preview, setPreview] = useState<string>()
@@ -86,17 +93,32 @@ export function WordTemplateBuilder({ database, close, onSave, previous, officia
   function extract(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const form = new FormData(event.currentTarget)
-    const body = official?.file ?? formFile(form, 'body')
+    const body = formFile(form, 'body') ?? official?.file
     if (!body) { setError('请选择 Word 样例。'); return }
     form.set('body', body)
-    if (official?.standard) form.set('standard', official.standard)
+    const standard = formFile(form, 'standard') ?? official?.standard
+    if (standard) form.set('standard', standard)
     form.set('intent', 'inspect')
     void run('extract', async signal => {
       if (official) {
         if (official.publish) {
-          setOrigin(await readCandidateOrigin(official.origin, String(form.get('officialVersion') ?? ''), body))
+          const version = String(form.get('officialVersion') ?? '')
+          if (scopedAttachments) {
+            const files: Partial<Record<AttachmentRole, File>> = { ...official.extraFiles, guideline: standard }
+            for (const item of supplemental) files[item.role] = formFile(form, item.role) ?? files[item.role]
+            const candidate = await readWordAttachmentCandidate(official.origin, version, body, files,
+              official.parentAttachments, official.candidateSources)
+            setOrigin(candidate.origin)
+            setReleaseAssets(candidate)
+          } else setOrigin(await readCandidateOrigin(official.origin, version, body))
         } else if (await body.arrayBuffer().then(templateDigest) !== official.origin.sha256) {
           throw new Error('上传的 Word 与卡片所选版本不符。请下载对应原件，或在官方版本管理中验收候选。')
+        } else if (scopedAttachments) {
+          const guide = officialAttachment(catalogWordAttachments(official.origin.id), 'guideline')
+          if (guide) {
+            if (!standard) throw new Error('请提供所选版本的官方规范 PDF。')
+            await verifyAttachment(standard, guide)
+          }
         }
       }
       const response = await wordRequest(form, signal)
@@ -105,7 +127,6 @@ export function WordTemplateBuilder({ database, close, onSave, previous, officia
       setLayout(official?.publish && official.origin.id === 'sjtu-graduate-word' ? sjtuLayout(extracted)
         : official?.origin.id === 'njupt-professional-masters' ? njuptLayout(extracted, true)
           : official?.publish && official.origin.id.startsWith('njupt-') ? njuptLayout(extracted) : extracted)
-      const standard = formFile(form, 'standard')
       setGuidelineHref(standard && /\.pdf$/i.test(standard.name) ? URL.createObjectURL(standard) : undefined)
       setSample(body)
       setAi(String(result.ai))
@@ -135,6 +156,7 @@ export function WordTemplateBuilder({ database, close, onSave, previous, officia
       const form = new FormData()
       form.set('body', sample)
       applyWordBundle(form, { layout: validated, assets })
+      if (releaseAssets?.files.declaration) form.set('declaration', releaseAssets.files.declaration)
       const project = await importWordAsProject(form, 'Word layout preview', signal)
       const { pdf, findings } = layoutKeys.some(key => validated.rules[key].standard)
         ? await previewWordLayout(project, validated, signal)
@@ -151,7 +173,7 @@ export function WordTemplateBuilder({ database, close, onSave, previous, officia
     void run('save', async () => {
       const [major, minor, patch] = (previous?.version ?? '1.0.0').split('.').map(Number)
       const template = await packWordTemplate(name.trim(), { layout, assets }, previous ? `${major}.${minor}.${patch + 1}` : undefined, origin)
-      if (official?.publish) { await official.publish(template, sample!, previewSha256); return }
+      if (official?.publish) { await official.publish(template, sample!, previewSha256, releaseAssets); return }
       await addLocalTemplate(database, template)
       onSave(template)
     })
@@ -173,9 +195,16 @@ export function WordTemplateBuilder({ database, close, onSave, previous, officia
           </p> : <label className="block space-y-1 text-sm">Word 样例
             <Input type="file" name="body" required accept=".doc,.docx" />
           </label>}
-          {official?.standard ? <p className="text-sm">已校验官方规范 PDF · {official.standard.name}</p> : <label className="block space-y-1 text-sm">学校撰写规范（选填）
-            <Input type="file" name="standard" accept=".pdf,.doc,.docx,.txt" />
+          {official?.standard && <p className="text-sm">已核验的规范 PDF · {official.standard.name}</p>}
+          {(!scopedAttachments && !official?.standard || expectsGuideline && (!official?.standard || official.publish)) && <label className="block space-y-1 text-sm">
+            {expectsGuideline ? '官方规范 PDF' : '学校撰写规范（选填）'}
+            <Input type="file" name="standard" accept={expectsGuideline ? '.pdf' : '.pdf,.doc,.docx,.txt'} />
           </label>}
+          {official?.publish && supplemental.map(item => <label className="block space-y-1 text-sm" key={item.role}>
+            {item.role === 'declaration' ? '官方声明 Word' : '官方盲审封面 Word'}
+            {official.extraFiles?.[item.role] && <span className="block text-xs">当前候选使用 {official.extraFiles[item.role]?.name}</span>}
+            <Input type="file" name={item.role} accept=".doc,.docx" required={!official.extraFiles?.[item.role]} />
+          </label>)}
           <label className="flex items-start gap-2 text-sm">
             <input type="checkbox" name="assist" value="1" className="mt-1 accent-workbench-accent" />
             <span>使用 AI 辅助识别结构<span className="mt-1 block text-xs text-workbench-muted">将标题及排版相关摘录发送给已配置的 AI 服务。关闭时在本机提取。</span></span>

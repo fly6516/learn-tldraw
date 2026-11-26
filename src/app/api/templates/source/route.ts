@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto'
 import { catalogReleaseSource, templateCatalog } from '@/lib/project/template-catalog'
+import { cachedOfficialAttachment } from '@/lib/project/official-attachment-cache'
+import { officialAttachment } from '@/lib/project/official-attachments'
+import { catalogWordAttachments } from '@/lib/project/word-release-attachments'
 import { chunksOf, officialResponse } from '@/lib/project/official-template-fetch'
 import { loadSuepBundle } from '@/lib/project/suep-bundle-server'
 import { suepUndergraduateOrigin } from '@/lib/project/suep-undergraduate-source'
@@ -27,7 +30,8 @@ export async function POST(request: Request) {
   const declaration = asset === 'declaration' && source.kind === 'word' ? source.declaration : undefined
   const blindCover = asset === 'blind-cover' && source.kind === 'word' ? source.blindCover : undefined
   const attachment = guideline ?? declaration ?? blindCover
-  if (asset !== null && !(rar && asset === 'docx-bundle' && expected === source.baseline.sha256) && (!attachment || expected !== attachment.sha256)) {
+  const independentlyVersioned = Boolean(attachment && id && catalogWordAttachments(id))
+  if (asset !== null && !independentlyVersioned && !(rar && asset === 'docx-bundle' && expected === source.baseline.sha256) && (!attachment || expected !== attachment.sha256)) {
     return Response.json({ error: '所选模板未登记此校验值的官方附件。' }, { status: 400 })
   }
   const signal = AbortSignal.any([request.signal, AbortSignal.timeout(20_000)])
@@ -40,9 +44,23 @@ export async function POST(request: Request) {
         'X-Content-Type-Options': 'nosniff',
       } })
     }
+    const role = asset === 'guideline' || asset === 'declaration' || asset === 'blind-cover' ? asset : 'original'
+    const pinnedAttachment = id && officialAttachment(catalogWordAttachments(id), role)
+    if (pinnedAttachment && expected === pinnedAttachment.sha256) {
+      const { bytes, status } = await cachedOfficialAttachment(pinnedAttachment, signal)
+      const ext = role === 'guideline' ? '.pdf' : bytes.subarray(0, 2).toString() === 'PK' ? '.docx' : '.doc'
+      return new Response(new Uint8Array(bytes), { headers: {
+        'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store',
+        'Content-Disposition': 'attachment; filename="' + id + '-' + role + ext + '"',
+        'X-Official-Attachment-Source': status, 'X-Content-Type-Options': 'nosniff',
+      } })
+    }
     const pinnedUrl = source.kind === 'zip' && expected === source.baseline.sha256 ? source.pinnedUrl : undefined
     let url = new URL(attachment?.url ?? pinnedUrl ?? source.url)
-    if (!attachment && source.updateLink && expected !== source.baseline.sha256) {
+    const updateLink = attachment && source.kind === 'word' && (asset === 'guideline' || asset === 'declaration')
+      ? source.attachmentUpdateLinks?.[asset] : !attachment ? source.updateLink : undefined
+    const registeredSha = attachment?.sha256 ?? source.baseline.sha256
+    if (updateLink && expected !== registeredSha) {
       const page = new URL(source.sourceUrl)
       const stream = await officialResponse(page, signal)
       const chunks: Uint8Array[] = []
@@ -53,12 +71,14 @@ export async function POST(request: Request) {
         chunks.push(chunk)
       }
       const html = Buffer.concat(chunks).toString('utf8')
-      const anchor = new RegExp(source.updateLink)
+      const anchor = new RegExp(updateLink)
       const matches = [...html.matchAll(/<a\b[^>]*?\s+href\s*=\s*(["'])([^"']+)\1[^>]*>([^<]*)<\/a>/gi)]
         .filter(match => anchor.test(match[3]))
       if (matches.length !== 1) throw new Error('发布页上的模板链接已变动，请查看官方发布页。')
       url = new URL(matches[0][2], page)
-      if (url.origin !== page.origin || !(rar ? /^\/_upload\/article\/files\/.+\.rar$/i : /^\/(?:_upload\/article\/files|static\/upload\/article\/file)\/.+\.docx?$/i).test(url.pathname)) {
+      const extension = rar ? /\.rar$/i : guideline ? /\.pdf$/i : /\.docx?$/i
+      if (url.origin !== page.origin || !extension.test(url.pathname) ||
+        !/^\/(?:_upload\/article\/files|static\/upload\/article\/file)\//i.test(url.pathname)) {
         throw new Error('发布页上的附件地址已变动，请查看官方发布页。')
       }
     }
@@ -82,8 +102,8 @@ export async function POST(request: Request) {
       return Response.json({ error: '官方原件校验失败，发布方返回了非模板文件。请查看发布页。' }, { status: 422 })
     }
     const sha256 = hash.digest('hex')
-    if (!expected) return Response.json({ sha256, url: url.href, scope: source.updateLink ? 'listing' : 'file',
-      matchesBaseline: sha256 === source.baseline.sha256 || source.kind === 'zip' && sha256 === source.equivalentBranchSha256 })
+    if (!expected) return Response.json({ sha256, url: url.href, scope: updateLink ? 'listing' : 'file',
+      matchesBaseline: sha256 === (attachment?.sha256 ?? source.baseline.sha256) || source.kind === 'zip' && sha256 === source.equivalentBranchSha256 })
     if (sha256 !== expected) {
       return Response.json({ error: '官方原件 SHA-256 校验失败，文件已与所选版本或检查结果不同。请重新检查更新，或上传对应版本的原件。' }, { status: 409 })
     }

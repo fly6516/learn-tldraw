@@ -20,7 +20,7 @@ const suepFields = [
 
 export function WordImportDialog({ initialProfile, savedLayout, templateOrigin, officialArchive, manual, close, openProject }: {
   initialProfile: WordProfile
-  savedLayout?: { name: string; bundle: WordLayoutBundle; origin?: TemplateOrigin }
+  savedLayout?: { name: string; bundle: WordLayoutBundle; origin?: TemplateOrigin; declaration?: File }
   templateOrigin?: TemplateOrigin
   officialArchive?: Blob
   manual?: boolean
@@ -43,7 +43,10 @@ export function WordImportDialog({ initialProfile, savedLayout, templateOrigin, 
       setError('Enter a project name and choose a manuscript.')
       return
     }
-    if (savedLayout) applyWordBundle(data, savedLayout.bundle)
+    if (savedLayout) {
+      applyWordBundle(data, savedLayout.bundle)
+      if (savedLayout.declaration) data.set('declaration', savedLayout.declaration)
+    }
     else if (templateOrigin) data.set('profile', initialProfile)
     const size = [...data.values()].reduce((total, value) => total + (value instanceof File ? value.size : 0), 0)
     if (size > wordImportLimit) {
@@ -105,7 +108,8 @@ export function WordImportDialog({ initialProfile, savedLayout, templateOrigin, 
           {!pin && !savedLayout?.bundle.assets.cover && <label className="block space-y-1 text-sm">Word cover (optional)
             <Input name="cover" type="file" accept=".doc,.docx" />
           </label>}
-          {!pin && <label className="block space-y-1 text-sm">Word declaration (optional)
+          {savedLayout?.declaration && <p className="text-sm">已校验所选版本的官方声明 Word</p>}
+          {!pin && !savedLayout?.declaration && <label className="block space-y-1 text-sm">Word declaration (optional)
             <Input name="declaration" type="file" accept=".doc,.docx" />
           </label>}
         </fieldset>

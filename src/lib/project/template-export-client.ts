@@ -15,6 +15,8 @@ import { joinMappedTex, manuscriptRegions, type LineSources, type MappedTex } fr
 import { numericPublisherBibliography, publisherArticle, publisherArticleIds, type PublisherArticleId } from './publisher-article'
 import { suepGeometry, suepTexLayout } from './suep-word-layout'
 import { suepUndergraduateId } from './suep-undergraduate-source'
+import { officialAttachment } from './official-attachments'
+import { wordReleaseFile } from './word-release-client'
 import { bindSuepBundle, prepareSuepBundle, restoreSuepBundle } from './suep-bundle-client'
 import { sjtuExportFront, sjtuLayout, sjtuWordPreamble } from './sjtu-export-front'
 import { zjuCaptionSetup, zjuLayout } from './zju-layout'
@@ -165,8 +167,9 @@ async function prepareZju(target: ExportTarget, fields: ExportFields, signal: Ab
     throw new Error('请填写浙大封面字段、中文题目、中文摘要和中文关键词。')
   }
   const [word, guide] = await Promise.all([
-    officialFile(target, signal, fields.original),
-    officialFile(target, signal, fields.guideline, workflow.guideline.sha256),
+    target.release && !target.release.attachments ? officialFile(target, signal, fields.original)
+      : wordReleaseFile(entry.id, 'original', signal, target.release, fields.original),
+    wordReleaseFile(entry.id, 'guideline', signal, target.release?.attachments ? target.release : undefined, fields.guideline),
   ])
   const form = new FormData()
   form.set('intent', 'inspect')
@@ -178,7 +181,7 @@ async function prepareZju(target: ExportTarget, fields: ExportFields, signal: Ab
   if (conflict) throw new Error(`此版原件与规范存在未确认的冲突（${layout.rules[conflict].standard?.source}）。请先在模板工作台核对版式。`)
   const { original: _original, guideline: _guideline, email: _email, cover: _cover, declaration: _declaration, ...coverFields } = fields
   return { kind: 'zju-undergraduate' as const, main: workflow.compile.mainFile, fields: coverFields,
-    layout: zjuLayout(layout), guidelineSha256: workflow.guideline.sha256, word: await encodeDocument(word) }
+    layout: zjuLayout(layout), guidelineSha256: officialAttachment(target.release?.attachments, 'guideline')?.sha256 ?? workflow.guideline.sha256, word: await encodeDocument(word) }
 }
 
 async function prepareSjtu(target: ExportTarget, fields: ExportFields, signal: AbortSignal) {
@@ -224,18 +227,23 @@ async function prepareNjupt(target: ExportTarget, fields: ExportFields, signal: 
   }
   const word = await officialFile(target, signal, fields.original)
   const layout = await exportWordLayout(target, word, signal)
-  const spec = workflow.declaration
+  const bundle = target.release?.attachments ? target.release : undefined
+  const spec = officialAttachment(bundle?.attachments, 'declaration') ?? workflow.declaration
   let declaration: File | undefined
   if (fields.declarations) {
-    declaration = fields.declaration ?? await fetchOfficialFile(target.entry.id, spec.sha256, 'declaration', signal)
+    declaration = bundle ? await wordReleaseFile(target.entry.id, 'declaration', signal, bundle, fields.declaration)
+      : fields.declaration ?? await fetchOfficialFile(target.entry.id, spec.sha256, 'declaration', signal)
     if (await templateDigest(await declaration.arrayBuffer()) !== spec.sha256) {
-      throw new Error('南邮声明原件的 SHA-256 与目录登记值不一致。')
+      throw new Error('南邮声明原件的 SHA-256 与所选版本不一致。')
     }
   }
+  const blind = officialAttachment(bundle?.attachments, 'blind-cover')
+  const blindCover = blind && await wordReleaseFile(target.entry.id, 'blind-cover', signal, bundle)
   const { original: _original, guideline: _guideline, email: _email, cover: _cover, declaration: _declaration, ...coverFields } = fields
   return { kind: 'njupt-masters' as const, main: workflow.compile.mainFile, fields: coverFields,
     layout: layout.presentation === (professional ? 'njupt-professional' : 'njupt-academic') ? layout : njuptLayout(layout, professional, true), word: await encodeDocument(word),
-    declaration: declaration && await encodeDocument(declaration), declarationSha256: declaration && spec.sha256 }
+    declaration: declaration && await encodeDocument(declaration), declarationSha256: declaration && spec.sha256,
+    ...(blindCover && { blindCover: await encodeDocument(blindCover), blindCoverSha256: blind?.sha256 }) }
 }
 
 async function normalizedWord(word: File, signal: AbortSignal) {
@@ -368,7 +376,7 @@ async function wordThesisBuild(template: WordThesisTemplate, manuscript: Manuscr
     lines: source.lines,
     command: 'latexmk -xelatex -no-shell-escape -interaction=nonstopmode ' + main,
     dependencies: 'TeX Live with XeLaTeX, BibTeX, latexmk, ctex, xeCJK, Fandol fonts, fontspec, TeX Gyre Termes, geometry, graphicx, booktabs, array, amsmath, amssymb, pdfpages, fancyhdr, caption, hyperref, natbib, and the GB/T 7714 bibliography style. To reproduce the original fonts, install SimSun, SimHei and Times New Roman. The rendered cover is included, so recompiling the source ZIP does not require LibreOffice.',
-    notes: blindCover ? 'NJUPT anonymous review cover SHA-256: ' + njuptBlindCover.sha256 + '. The source contains the review cover and the anonymous rendering only.'
+    notes: blindCover ? 'NJUPT anonymous review cover SHA-256: ' + (njupt && template.blindCoverSha256 || njuptBlindCover.sha256) + '. The source contains the review cover and the anonymous rendering only.'
       : zju ? 'Word and guideline SHA-256 were checked independently. Guideline SHA-256: ' + template.guidelineSha256 + '. The exported cover is rendered from the original artwork and text runs. LibreOffice uses automatic front-matter flow to avoid a split cover.'
       : njupt ? 'NJUPT master title pages use the verified Word original; unsigned declarations use the separate registered attachment. Declaration SHA-256: ' + (template.declarationSha256 ?? 'not included')
       : additional ? 'Front pages prepared from the registered university Word original; verify degree, signatures and final submission metadata.'
@@ -610,7 +618,7 @@ export async function prepareExternalTemplate(manuscript: ManuscriptSnapshot, fi
   const { entry, version, sha256 } = registered
   const configuration = current && !fields.original ? { ...current, fields } : await prepareMit(registered, fields, signal)
   const template = activeTemplateSchema.parse({ ...configuration, selectionId: crypto.randomUUID(),
-    name: entry.name, origin: { id: entry.id, version, sha256 } })
+    name: entry.name, origin: { id: entry.id, version, sha256, ...(target.release?.manifestSha256 && { manifestSha256: target.release.manifestSha256 }) } })
   if (template.kind !== 'mit-thesis') throw new Error('缺少 MIT 编译配置。')
   const { files: rendered, lines } = await assembleTemplate(manuscript, template, signal)
   const sourceSha256 = await projectSourceDigest(files, main)
@@ -797,7 +805,7 @@ async function compileTemplateTarget(manuscript: ManuscriptSnapshot, target: Exp
     'suep-undergraduate': prepareSuep, 'prl-article': preparePrl, 'njupt-masters': prepareNjupt, 'official-thesis': prepareAdditionalThesis, 'thuthesis': prepareThuThesis, 'starter-article': prepareStarter, 'sjtu-graduate-word': prepareSjtu, 'mit-thesis': prepareMit }[entry.exportProfile!]
   const configuration = await prepare(target, fields, signal, manuscript)
   const template = activeTemplateSchema.parse({ ...configuration, selectionId: crypto.randomUUID(),
-    name: entry.name, origin: { id: entry.id, version, sha256 } })
+    name: entry.name, origin: { id: entry.id, version, sha256, ...(target.release?.manifestSha256 && { manifestSha256: target.release.manifestSha256 }) } })
   const { project, archive, lines } = await renderTemplate(manuscript, template, signal)
   const name = template.origin.id + '-' + template.origin.version
   const { pdf, regions } = await compileWordProjectWithSync(project, signal)
@@ -814,10 +822,12 @@ export async function projectWithActiveTemplate(project: ProjectFileSystem, main
   if (template.kind !== 'njupt-masters' || template.origin.id !== 'njupt-professional-masters' || template.fields.studyMode !== 'full-time') {
     throw new Error('已核验的南邮专硕盲审封面适用于全日制。请先在「更换模板」中启用南邮专硕版式并填写适用字段。')
   }
-  const cover = uploadedCover ?? await fetchOfficialFile(template.origin.id, njuptBlindCover.sha256, 'blind-cover', signal)
-  if (await templateDigest(await cover.arrayBuffer()) !== njuptBlindCover.sha256) throw new Error('盲审封面原件 SHA-256 校验失败。请选择学校发布的全日制专硕盲审封面。')
+  const attachmentSha256 = template.blindCoverSha256 ?? njuptBlindCover.sha256
+  const cover = uploadedCover ?? (template.blindCover ? new File([Uint8Array.from(atob(template.blindCover), char => char.charCodeAt(0))], 'blind-cover.doc')
+    : await fetchOfficialFile(template.origin.id, attachmentSha256, 'blind-cover', signal))
+  if (await templateDigest(await cover.arrayBuffer()) !== attachmentSha256) throw new Error('盲审封面原件 SHA-256 校验失败。请选择学校发布的全日制专硕盲审封面。')
   const result = await renderTemplate(manuscript, template, signal, { stage, blindCover: new File([await normalizedWord(cover, signal)], 'blind-cover.docx') })
-  return { ...result, blind: { coverVerified: true, identifiers: [
+  return { ...result, blind: { coverVerified: true, attachmentSha256, identifiers: [
     ...manuscript.authors.map(plainTitle), template.fields.studentNumber, template.fields.advisor, template.fields.englishAdvisor ?? '',
   ] } }
 }

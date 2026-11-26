@@ -14,7 +14,8 @@ type LayoutChecks = { kind: 'prl' | 'mnras' | 'elsevier-cas' | 'agu-journal' | '
 }
 
 type OfficialTemplateWorkflow = { version: string; original: OfficialFile; compile: TemplateCompile } & (
-  | { kind: 'word'; guideline?: OfficialFile; declaration?: OfficialFile; blindCover?: OfficialFile; njuptTrack?: 'academic' | 'professional'; updateLink?: string; checks: { kind: 'word-layout' | 'sjtu-word' } }
+  | { kind: 'word'; guideline?: OfficialFile; declaration?: OfficialFile; blindCover?: OfficialFile; njuptTrack?: 'academic' | 'professional'; updateLink?: string;
+      attachmentUpdateLinks?: Partial<Record<'guideline' | 'declaration', string>>; checks: { kind: 'word-layout' | 'sjtu-word' } }
   | { kind: 'zip'; upstream?: OfficialFile & { mainFile: string }; checks: LayoutChecks;
       prepare?: 'revtex' | 'mit-thesis' | 'agu-journal'; entryFiles?: readonly string[]; preview?: 'external'; redirectHosts?: readonly string[] }
 )
@@ -94,6 +95,7 @@ const zjuWorkflow = {
   guideline: { url: zjuFiles + '587de67d-7c81-4475-8e8d-db0a82130801.pdf',
     sha256: '11825591e22311b0d1ca65b9c1ebcb47a58c8f891a1e98942223bbd82040954d' },
   updateLink: '附件6[：:]基础医学院本科生毕业论文-毕业论文模板',
+  attachmentUpdateLinks: { guideline: '附件7[：:]浙江大学本科生毕业论文（设计）编写规则' },
   compile: wordLayoutCompile, checks: { kind: 'word-layout' },
 } as const satisfies OfficialTemplateWorkflow
 
@@ -110,7 +112,7 @@ const jmlrWorkflow = {
     manualDetail: '请按当前投稿阶段核对页眉字段、作者信息、投稿材料及参考文献的著者—出版年格式。' },
 } as const satisfies OfficialTemplateWorkflow
 
-function wordWorkflow(version: string, original: OfficialFile, options: Partial<Pick<Extract<OfficialTemplateWorkflow, { kind: 'word' }>, 'updateLink' | 'guideline' | 'declaration' | 'blindCover' | 'checks' | 'njuptTrack'>> = {}) {
+function wordWorkflow(version: string, original: OfficialFile, options: Partial<Pick<Extract<OfficialTemplateWorkflow, { kind: 'word' }>, 'updateLink' | 'guideline' | 'declaration' | 'blindCover' | 'checks' | 'njuptTrack' | 'attachmentUpdateLinks'>> = {}) {
   return { kind: 'word', version, original, compile: wordLayoutCompile, checks: { kind: 'word-layout' }, ...options } as const
 }
 
@@ -227,7 +229,8 @@ export const templateCatalog: readonly CatalogTemplate[] = [
     language: '简体中文', layout: 'thesis', delivery: 'official', exportProfile: 'njupt-masters', keywords: ['NJUPT', '南邮', '专业学位'],
     workflow: wordWorkflow('2025-05-08', { url: njuptFiles + 'f4ad7a70-88bd-4654-9384-6ed9f42bd5d2.doc',
       sha256: 'b6a4c0d6be8ece25067bf2fda3602ba35ccf8ea4f12663666ac651db8642a509' }, {
-      declaration: njuptDeclaration, blindCover: njuptBlindCover, njuptTrack: 'professional', updateLink: '南京邮电大学专业学位硕士研究生学位论文模板.*自然科学类',
+      declaration: njuptDeclaration, blindCover: njuptBlindCover, njuptTrack: 'professional',
+      attachmentUpdateLinks: { declaration: '南京邮电大学学位论文原创性声明和使用授权声明' }, updateLink: '南京邮电大学专业学位硕士研究生学位论文模板.*自然科学类',
     }),
     summary: '研究生院发布的自然科学类专业学位硕士 Word。填写专业学位类别、培养类型和专业领域，中英文题名页使用官方原件。',
     sourceVersion: '2025-05-08 · 专业学位硕士自然科学类',
@@ -448,7 +451,8 @@ export function catalogReleaseSource(entry: CatalogTemplate) {
   if (workflow.kind === 'word-import') return { kind: workflow.kind, baseline, url: workflow.original.url,
     sourceUrl, updateLink: suepUndergraduateSource.updateLink, guideline: undefined, declaration: undefined, blindCover: undefined }
   if (workflow.kind === 'word') return { kind: workflow.kind, baseline, url: workflow.original.url,
-    sourceUrl, guideline: workflow.guideline, declaration: workflow.declaration, blindCover: workflow.blindCover, updateLink: workflow.updateLink }
+    sourceUrl, guideline: workflow.guideline, declaration: workflow.declaration, blindCover: workflow.blindCover,
+    updateLink: workflow.updateLink, attachmentUpdateLinks: workflow.attachmentUpdateLinks }
   return { kind: workflow.kind, baseline, url: workflow.upstream?.url ?? workflow.original.url,
     sourceUrl, pinnedUrl: workflow.upstream && workflow.original.url, equivalentBranchSha256: workflow.upstream?.sha256,
     redirectHosts: workflow.redirectHosts }

@@ -498,6 +498,7 @@ export async function fillSubmissionDocx(opts: {
   id: SubmissionDocxId; original: Uint8Array; draft: Uint8Array; cover?: Uint8Array; declaration?: Uint8Array
   fields: SubmissionDocxFields; englishTitle: string; tokens: ReadonlyMap<string, WordToken>; headings: WordHeading[]
   math: number; images: number; tables: number; provenance: string
+  wordMargins?: Record<'top' | 'bottom' | 'left' | 'right' | 'gutter', number>
 }) {
   const { fields, tokens, headings } = opts
   const zju = opts.id === 'zju-basic-medicine-undergraduate'
@@ -522,6 +523,11 @@ export async function fillSubmissionDocx(opts: {
 
   const bodySection = zju ? parts[150] && first(parts[150], 'sectPr') : njupt ? first(parts[176], 'sectPr') : parts.at(-1)
   if (!bodySection || bodySection.localName !== 'sectPr') throw new Error('官方原件缺少正文分节。')
+  if (zju && opts.wordMargins) {
+    const margins = first(bodySection, 'pgMar')
+    if (!margins) throw new Error('官方原件缺少正文页边距。')
+    for (const [side, mm] of Object.entries(opts.wordMargins)) set(margins, side, String(Math.round(mm * 1440 / 25.4)))
+  }
   styleDocument(styles, zju, bodySection, njupt)
   save(zip, 'word/styles.xml', styles)
   remapParagraphs(imported, doc, zju, await documentNumbering(zip, zju, njupt), tokens, njupt)

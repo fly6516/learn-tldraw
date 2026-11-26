@@ -66,7 +66,7 @@ export function stagesForTemplate(template?: string): SubmissionStage[] {
 }
 
 type PhaseFinding = Omit<LayoutFinding, 'evidence' | 'sourceUrl'> & { ruleId: string }
-export type BlindEvidence = { coverVerified: boolean; identifiers: readonly string[] }
+export type BlindEvidence = { attachmentSha256?: string; coverVerified: boolean; identifiers: readonly string[] }
 
 function textFiles(project: ProjectFileSystem, main: string) {
   const files = [...project.files].flatMap(([path, file]) => file.type !== 'directory' && typeof file.content === 'string'

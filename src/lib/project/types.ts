@@ -110,7 +110,7 @@ export interface ProjectFileSystem {
     mainFile?: string
     compileProfile?: CompileProfile
     activeTemplate?: ActiveTemplate
-    templateOrigin?: { id: string; version: string; sha256: string }
+    templateOrigin?: { id: string; version: string; sha256: string; manifestSha256?: string }
   }
 }
 

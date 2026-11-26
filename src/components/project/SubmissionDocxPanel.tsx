@@ -5,6 +5,10 @@ import { SuepOfficialAttachments, useSuepAttachments } from './SuepOfficialAttac
 import { bindSuepBundle } from '@/lib/project/suep-bundle-client'
 import { suepDocxMembers, suepMemberRoles, suepUndergraduateId, suepUndergraduateOrigin } from '@/lib/project/suep-undergraduate-source'
 import { listOfficialTemplateReleases } from '@/lib/project/storage'
+import { officialAttachment } from '@/lib/project/official-attachments'
+import { matchingWordRelease, usesWordAttachmentRelease } from '@/lib/project/word-release-attachments'
+import { wordReleaseFile } from '@/lib/project/word-release-client'
+import { readWordTemplate } from '@/lib/project/word-conversion-client'
 import type { OfficialTemplateRelease } from '@/lib/project/template-release'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -53,27 +57,36 @@ export function SubmissionDocxPanel({ project, main, template, stage, database, 
   const config = submissionDocxConfig(school)
   const suep = school === suepUndergraduateId
   const projectOrigin = project.metadata.activeTemplate?.origin ?? project.metadata.templateOrigin
-  const [releaseState, setReleaseState] = useState<{ database: IDBDatabase; releases: OfficialTemplateRelease[] }>()
-  const releases = releaseState?.database === database ? releaseState?.releases : undefined
-  const readReleases = !!database && open && suep
+  const scopedWord = usesWordAttachmentRelease(school)
+  const [releaseState, setReleaseState] = useState<{ database: IDBDatabase; school: string; releases: OfficialTemplateRelease[] }>()
+  const releases = releaseState?.database === database && releaseState?.school === school ? releaseState?.releases : undefined
+  const readReleases = !!database && open && (suep || scopedWord)
   useEffect(() => {
     if (!database || !readReleases) return
     let current = true
-    void listOfficialTemplateReleases(database, suepUndergraduateId)
-      .then(releases => { if (current) setReleaseState({ database, releases }) })
+    void listOfficialTemplateReleases(database, school)
+      .then(releases => { if (current) setReleaseState({ database, school, releases }) })
       .catch(() => {
-        if (current) setError('无法读取本机的上电官方版本记录。')
+        if (current) setError('无法读取本机的官方版本记录。')
       })
     return () => { current = false }
-  }, [database, readReleases])
+  }, [database, readReleases, school])
   const bound = projectOrigin?.id === suepUndergraduateId ? projectOrigin : undefined
   const release = bound ? releases?.find(item => item.version === bound.version && item.sha256 === bound.sha256) : releases?.[0]
   const suepPin = open && suep && (!database || releases) ? {
     ...(bound ?? release ?? suepUndergraduateOrigin), id: suepUndergraduateId,
   } as const : undefined
   const attachments = useSuepAttachments(suepPin, release?.kind === 'word-import' ? release.archive : undefined)
-  const usedVersion = suepPin?.version ?? config.version
-  const usedSha256 = suepPin?.sha256 ?? config.original.sha256
+  const wordOrigin = projectOrigin?.id === school ? projectOrigin : undefined
+  const pinnedWord = scopedWord && (wordOrigin ? matchingWordRelease(wordOrigin, releases ?? [])
+    : (releases ?? []).find(item => item.kind === 'word' && item.attachments))
+  const wordRelease = pinnedWord && pinnedWord.kind === 'word' && pinnedWord.attachments ? pinnedWord : undefined
+  const declarationPin = officialAttachment(wordRelease?.attachments, 'declaration') ?? config.declaration
+  const wordVersionMissing = scopedWord && !!wordOrigin && !wordRelease &&
+    Boolean(wordOrigin.manifestSha256 || wordOrigin.sha256 !== config.original.sha256 || wordOrigin.version !== config.version)
+  const readyWord = !scopedWord || (!database || !!releases) && !wordVersionMissing
+  const usedVersion = suepPin?.version ?? wordRelease?.version ?? (wordVersionMissing ? wordOrigin?.version : undefined) ?? config.version
+  const usedSha256 = suepPin?.sha256 ?? wordRelease?.sha256 ?? (wordVersionMissing ? wordOrigin?.sha256 : undefined) ?? config.original.sha256
   const fieldLabels = njupt ? [...labels.filter(([key]) => key !== 'affiliation').map(row =>
     row[0] === 'program' ? ['program', '专业（领域）', row[2]] as const : row), ...njuptLabels] : labels
   const fresh = checked?.project === project && checked.main === main && checked.school === school && checked.fields === fields ? checked : undefined
@@ -103,7 +116,7 @@ export function SubmissionDocxPanel({ project, main, template, stage, database, 
   }
 
   async function exportDocx() {
-    if (busy || disabled || suep && !attachments.receipt) return
+    if (busy || disabled || !readyWord || suep && !attachments.receipt) return
     setError('')
     const check = runCheck()
     const normalized = check.report.fields
@@ -125,9 +138,12 @@ export function SubmissionDocxPanel({ project, main, template, stage, database, 
       let declaration: File | undefined
       try {
         [word, guide, declaration] = await Promise.all([
-          suep ? undefined : original(config.original.sha256, uploads.original),
-          config.guideline ? original(config.guideline.sha256, uploads.guideline, 'guideline') : undefined,
-          config.declaration ? original(config.declaration.sha256, uploads.declaration, 'declaration') : undefined,
+          suep ? undefined : scopedWord ? wordReleaseFile(school, 'original', signal, wordRelease, uploads.original)
+            : original(config.original.sha256, uploads.original),
+          config.guideline ? scopedWord ? wordReleaseFile(school, 'guideline', signal, wordRelease, uploads.guideline)
+            : original(config.guideline.sha256, uploads.guideline, 'guideline') : undefined,
+          config.declaration ? scopedWord ? wordReleaseFile(school, 'declaration', signal, wordRelease, uploads.declaration)
+            : original(config.declaration.sha256, uploads.declaration, 'declaration') : undefined,
         ])
       } catch (cause) {
         signal.throwIfAborted()
@@ -143,6 +159,10 @@ export function SubmissionDocxPanel({ project, main, template, stage, database, 
       data.set('delivery-id', id)
       if (word) data.set('original', word)
       if (suepPin) bindSuepBundle(data, suepPin)
+      if (wordRelease) data.set('word-release', JSON.stringify({
+        version: wordRelease.version, sha256: wordRelease.sha256, manifestSha256: wordRelease.manifestSha256,
+        attachments: wordRelease.attachments, ...(config.guideline && { layout: (await readWordTemplate(wordRelease.layout)).layout }),
+      }))
       if (guide) data.set('guideline', guide)
       if (declaration) data.set('declaration', declaration)
       const [{ zip, checksum }, snapshotSha256] = await Promise.all([exportExternalBuild(project), projectSourceDigest(project.files, main)])
@@ -153,10 +173,12 @@ export function SubmissionDocxPanel({ project, main, template, stage, database, 
       const name = normalized.title.replace(/[<>:"/\\|?*\p{Cc}]/gu, '-').replace(/[. ]+$/, '') || 'submission'
       const filename = name + '-' + usedVersion + '.docx'
       const template = { id: school, name: config.name, sourceUrl: config.sourceUrl, version: usedVersion, sha256: usedSha256,
-        declarationSha256: config.declaration?.sha256, declarationUrl: config.declaration?.url,
-        attachments: attachments.receipt && suepMemberRoles.map(role => ({
-          name: suepDocxMembers[role].name, sha256: attachments.receipt!.manifest.members[role].sha256,
-        })) }
+        declarationSha256: declarationPin?.sha256, declarationUrl: declarationPin?.url,
+        manifestSha256: wordRelease?.manifestSha256,
+        attachments: wordRelease?.attachments?.map(item => ({ name: item.role, sha256: item.sha256, url: item.url }))
+          ?? (attachments.receipt && suepMemberRoles.map(role => ({
+            name: suepDocxMembers[role].name, sha256: attachments.receipt!.manifest.members[role].sha256,
+          }))) }
       const generated = await verifyWordFinal(new File([blob], filename), { id, template, snapshotSha256 })
       signal.throwIfAborted()
       setReceipt({ check, delivery: { id, name, createdAt: new Date().toISOString(), template, main, snapshotSha256,
@@ -221,9 +243,12 @@ export function SubmissionDocxPanel({ project, main, template, stage, database, 
           {available.map(id => <option key={id} value={id}>{submissionDocxConfig(id).name}</option>)}
         </select>
       </label>
-      <p>官方版本 {usedVersion} · {suep && usedVersion !== config.version ? '此版本待 Word 实机核对' : config.status}</p>
+      <p>官方版本 {usedVersion} · {(suep || scopedWord) && usedVersion !== config.version ? '此版本待 Word 实机核对' : config.status}</p>
       <p className="break-all text-xs">原件 SHA-256 {usedSha256}</p>
-      {config.declaration && <p className="break-all text-xs">声明 SHA-256 {config.declaration.sha256}</p>}
+      {wordVersionMissing && <p role="status">请导入项目绑定的官方版本包以恢复附件。</p>}
+      {wordRelease?.manifestSha256 && <p className="break-all text-xs">附件清单 SHA-256 {wordRelease.manifestSha256}</p>}
+      {wordRelease?.attachments?.map(item => <p key={item.role} className="break-all text-xs">{item.role} SHA-256 {item.sha256}</p>)}
+      {declarationPin && <p className="break-all text-xs">声明 SHA-256 {declarationPin.sha256}</p>}
       {config.requirementsUrl && <a className="mr-3 underline" href={config.requirementsUrl} target="_blank" rel="noreferrer">学校撰写标准</a>}
       <a className="underline" href={config.sourceUrl} target="_blank" rel="noreferrer">原件发布来源</a>
       <div className="grid gap-2 sm:grid-cols-2">
@@ -296,7 +321,7 @@ export function SubmissionDocxPanel({ project, main, template, stage, database, 
     {error && <p role="alert" className="break-words text-red-800">{error}</p>}
     <div className="flex flex-wrap gap-2">
       <Button type="button" variant="outline" disabled={Boolean(busy) || disabled} onClick={runCheck}>检查 DOCX 导出</Button>
-      <Button type="submit" disabled={Boolean(busy) || disabled || suep && !attachments.receipt}>{busy === 'export' ? '正在生成 DOCX…' : '生成并下载 DOCX'}</Button>
+      <Button type="submit" disabled={Boolean(busy) || disabled || !readyWord || suep && !attachments.receipt}>{busy === 'export' ? '正在生成 DOCX…' : '生成并下载 DOCX'}</Button>
       <Button type="button" variant="outline" disabled={Boolean(busy && busy !== 'export')} onClick={() => {
         if (busy === 'export') request.current?.abort()
         else setOpen(false)

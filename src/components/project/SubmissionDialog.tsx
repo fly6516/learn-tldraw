@@ -394,6 +394,7 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
             <p className="break-all">稿件快照 SHA-256 <code>{version.snapshotSha256}</code></p>
             <p className="break-all">原件 SHA-256 <code>{version.template.sha256}</code></p>
             {version.template.declarationSha256 && <p className="break-all">声明 SHA-256 <code>{version.template.declarationSha256}</code></p>}
+            {version.template.manifestSha256 && <p className="break-all">附件清单 SHA-256 <code>{version.template.manifestSha256}</code></p>}
             {version.template.attachments?.map(item => <p key={item.name} className="break-all text-xs">{item.name} · SHA-256 <code>{item.sha256}</code></p>)}
             <ul className="space-y-2">{[
               { metadata: version.source, blob: docxReview.sourceZip, label: '下载归档稿件源包' },
@@ -430,6 +431,7 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
               <p>模板版本 {version.layoutReport.templateOrigin
                 ? version.layoutReport.templateOrigin.id + ' · ' + version.layoutReport.templateOrigin.version : '未记录官方版本'}</p>
               {version.layoutReport.templateOrigin && <p className="break-all text-xs">原件 SHA-256 <code>{version.layoutReport.templateOrigin.sha256}</code></p>}
+              {version.layoutReport.templateOrigin?.manifestSha256 && <p className="break-all text-xs">附件清单 SHA-256 <code>{version.layoutReport.templateOrigin.manifestSha256}</code></p>}
               {version.layoutReport.delivery && <>
                 <p>{submissionStageInfo(version.layoutReport.delivery.stage, version.layoutReport.templateOrigin?.id).label} · {version.layoutReport.delivery.entry} · {compilerLabels[version.layoutReport.delivery.engine]}</p>
                 {version.layoutReport.delivery.sourceMatch === 'author-confirmed' && <p>外部编译 PDF · 源包一致性已由作者确认</p>}

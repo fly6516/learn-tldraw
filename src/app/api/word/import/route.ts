@@ -14,6 +14,9 @@ import { templateCatalog } from '@/lib/project/template-catalog'
 import { zjuCaptionSetup, zjuLayout } from '@/lib/project/zju-layout'
 import { sjtuLayout, sjtuWordPreamble } from '@/lib/project/sjtu-export-front'
 import { fillSuepCover, suepCoverFields } from '@/lib/project/suep-cover'
+import { officialAttachment, officialAttachmentsSchema } from '@/lib/project/official-attachments'
+import { validateWordAttachmentManifest } from '@/lib/project/word-release-attachments'
+import { verifyOfficialAttachmentBytes } from '@/lib/project/official-attachment-cache'
 import { suepDocxMembers, suepMemberRoles, suepUndergraduateOrigin } from '@/lib/project/suep-undergraduate-source'
 import { loadSuepBundle, suepPin } from '@/lib/project/suep-bundle-server'
 import { draftWordLayout } from '@/lib/project/word-layout-extraction'
@@ -358,7 +361,33 @@ async function exportSubmissionWord(work: string, request: Request, data: FormDa
     if (createHash('sha256').update(bytes).digest('hex') !== sha256) throw new ImportError(label + '的 SHA-256 与登记版不一致。')
     return bytes
   }
-  const registered = !suep && original instanceof File ? await pinned(original, config.original.sha256, '官方原件') : undefined
+  const requestedRelease = data.get('word-release')
+  let release: { version: string; sha256: string; manifestSha256: string; attachments: ReturnType<typeof officialAttachmentsSchema.parse> } | undefined
+  let wordMargins: Pick<ReturnType<typeof layoutValues>, 'top' | 'bottom' | 'left' | 'right' | 'gutter'> | undefined
+  if (typeof requestedRelease === 'string') {
+    const input = JSON.parse(requestedRelease)
+    const { version, sha256, manifestSha256 } = input
+    const attachments = officialAttachmentsSchema.parse(input.attachments)
+    if (typeof version !== 'string' || !/^[a-z\d][a-z\d.-]{0,47}$/i.test(version) ||
+        await validateWordAttachmentManifest(config.id, sha256, attachments) !== manifestSha256) {
+      throw new ImportError('官方发布版的附件清单校验失败。')
+    }
+    release = { version, sha256, manifestSha256, attachments }
+    if (config.guideline) {
+      const layout = wordLayoutSchema.parse(input.layout)
+      if (layoutKeys.some(key => hasLayoutConflict(layout.rules[key]))) throw new ImportError('所选版本仍有待确认的规范冲突。')
+      const { top, bottom, left, right, gutter } = layoutValues(layout)
+      wordMargins = { top, bottom, left, right, gutter }
+    }
+    for (const item of attachments) {
+      if (item.role === 'blind-cover') continue
+      const file = data.get(item.role)
+      if (!(file instanceof File)) throw new ImportError('所选发布版缺少校验文件（' + item.role + '）。')
+      verifyOfficialAttachmentBytes(Buffer.from(await file.arrayBuffer()), item)
+    }
+  }
+  const registered = !suep && original instanceof File
+    ? await pinned(original, release?.sha256 ?? config.original.sha256, '官方原件') : undefined
   const project = await importSourceArchive(source, wordImportLimit)
   const manuscript = captureManuscript(project.files, entry, { allowLongtable: true })
   validateDocxSource(manuscript)
@@ -366,17 +395,23 @@ async function exportSubmissionWord(work: string, request: Request, data: FormDa
   let reference: Uint8Array | undefined = registered
   let cover: Uint8Array | undefined
   let declaration: Uint8Array | undefined
-  let provenance = config.name + ' · ' + (pin?.version ?? config.version) + '\n' + config.sourceUrl + '\n官方原件 SHA-256 ' + (pin?.sha256 ?? config.original.sha256)
+  let provenance = config.name + ' · ' + (pin?.version ?? release?.version ?? config.version) + '\n' + config.sourceUrl + '\n官方原件 SHA-256 ' + (pin?.sha256 ?? release?.sha256 ?? config.original.sha256)
+  if (release) {
+    provenance += '\n官方附件清单 SHA-256 ' + release.manifestSha256
+    for (const item of release.attachments) provenance += '\n' + item.role + ' · SHA-256 ' + item.sha256 + '\n来源 ' + item.url
+  }
   if (config.guideline) {
     const guide = data.get('guideline')
     if (!(guide instanceof File)) throw new ImportError('缺少浙大官方规范 PDF。')
-    await pinned(guide, config.guideline.sha256, '官方规范')
-    provenance += '\n官方规范 ' + config.guideline.url + ' · SHA-256 ' + config.guideline.sha256
+    const selectedGuide = officialAttachment(release?.attachments, 'guideline') ?? config.guideline
+    await pinned(guide, selectedGuide.sha256, '官方规范')
+    provenance += '\n官方规范 ' + selectedGuide.url + ' · SHA-256 ' + selectedGuide.sha256
   } else if (config.declaration) {
     const uploaded = data.get('declaration')
     if (!(uploaded instanceof File)) throw new ImportError('缺少南邮官方声明 Word。')
-    declaration = await pinned(uploaded, config.declaration.sha256, '官方声明')
-    provenance += '\n官方声明 ' + config.declaration.url + '\n官方声明 SHA-256 ' + config.declaration.sha256
+    const selected = officialAttachment(release?.attachments, 'declaration') ?? config.declaration
+    declaration = await pinned(uploaded, selected.sha256, '官方声明')
+    provenance += '\n官方声明 ' + selected.url + '\n官方声明 SHA-256 ' + selected.sha256
       + '\n正式归档阶段 ' + config.stage + '\n撰写标准 ' + config.requirementsUrl
   } else if (pin) {
     const { manifest, members } = await loadSuepBundle(pin, {
@@ -394,7 +429,7 @@ async function exportSubmissionWord(work: string, request: Request, data: FormDa
   provenance += '\n稿件快照 SHA-256 ' + await projectSourceDigest(project.files, entry)
   const deliveryId = data.get('delivery-id')
   if (typeof deliveryId === 'string' && /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/.test(deliveryId)) provenance += '\n交付标识 ' + deliveryId
-  provenance += '\n' + (pin && pin.version !== config.version ? '此版本待 Word 实机核对' : config.status)
+  provenance += '\n' + (release || pin && pin.version !== config.version ? '此版本待 Word 实机核对' : config.status)
 
   async function runPandoc(args: string[], part: 'body' | 'abstract') {
     try { await run(process.env.PANDOC_BIN || 'pandoc', args) }
@@ -430,7 +465,7 @@ async function exportSubmissionWord(work: string, request: Request, data: FormDa
   // The JSON writer only receives locally staged, validated image names.
   await runPandoc(['--fail-if-warnings', '-f', 'json', '-t', 'docx', 'render.json', '-o', 'draft.docx'], 'body')
   return fillSubmissionDocx({ ...converted, id: config.id, original: reference, draft: await readFile(join(work, 'draft.docx')),
-    cover, declaration, fields: { ...fields, affiliation: fields.affiliation ?? '' }, englishTitle: manuscript.title.replace(/\\([&%#$ _])/g, '$1'), provenance })
+    cover, declaration, wordMargins, fields: { ...fields, affiliation: fields.affiliation ?? '' }, englishTitle: manuscript.title.replace(/\\([&%#$ _])/g, '$1'), provenance })
 }
 
 export async function POST(request: Request) {

@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button'
 import { WordLayoutReview } from '@/components/research/WordLayoutReview'
 import { LayoutPreflight } from './LayoutPreflight'
 import { assessLayout, layoutPreflightProfile, type LayoutFinding } from '@/lib/project/layout-preflight'
-import { assessSubmissionStage, njuptBlindCover, stagesForTemplate, submissionHasFigures, type BlindEvidence, type SubmissionStage } from '@/lib/project/submission-stages'
+import { assessSubmissionStage, stagesForTemplate, submissionHasFigures, type BlindEvidence, type SubmissionStage } from '@/lib/project/submission-stages'
 import { njuptDepositFontFinding } from '@/lib/project/submission-fonts'
 import { buildSubmissionLayout } from '@/lib/project/submission-layout'
 import { wordLayoutIssuesSchema, wordLayoutSchema } from '@/lib/project/word-layout'
@@ -1036,7 +1036,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         if (info?.hasWarnings && !diagnostics.length) diagnostics.push({ severity: 'warning', message: 'The compiler reported warnings without a source location. See the compiler output.' })
         const delivery = stage ? { stage, buildId: crypto.randomUUID(), entry,
           engine: target.metadata.compileProfile?.engine ?? 'tectonic' as const,
-          snapshotSha256: await projectSourceDigest(source.files, main), figureAttachmentsRequired, attachmentSha256: blind ? njuptBlindCover.sha256 : undefined } : undefined
+          snapshotSha256: await projectSourceDigest(source.files, main), figureAttachmentsRequired, attachmentSha256: blind?.attachmentSha256 } : undefined
         submission = { main: entry, paths: switched ? submissionFilePaths(target.files) : paths, excluded, drafts, issues, pdf, zip: archive, warnings: Boolean(info?.hasWarnings), diagnostics,
           sourceChecksum: packaged?.checksum, compileProfile: target.metadata.compileProfile,
           layoutReport: findings ? await buildSubmissionLayout(findings, { pdf, zip: archive, sourceChecksum: packaged?.checksum }, target.metadata.templateOrigin, delivery) : undefined }

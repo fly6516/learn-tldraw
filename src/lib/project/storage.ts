@@ -9,7 +9,7 @@ import { updateFileContent } from './file-system'
 import type { ExternalTemplatePreview } from './external-template-build'
 import type { ProjectFileSystem } from './types'
 import type { LocalPaperTemplate } from './template-catalog'
-import type { OfficialTemplateRelease, TemplateOrigin } from './template-release'
+import { validateReleaseAttachments, type OfficialTemplateRelease, type TemplateOrigin } from './template-release'
 import type { ProjectSnapshot, ProjectSnapshotInfo } from './snapshots'
 import { restoreSnapshotFiles } from './snapshots'
 import type { SubmissionVersion, SubmissionVersionInfo } from './submission'
@@ -34,6 +34,7 @@ export async function listOfficialTemplateReleases(database: IDBDatabase, id: st
 }
 
 export async function publishOfficialTemplateRelease(database: IDBDatabase, release: OfficialTemplateRelease, parent: TemplateOrigin) {
+    await validateReleaseAttachments(release)
     const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
     const store = transaction.objectStore(storeName)
     const key = ['official-template-current', release.id]
@@ -41,12 +42,12 @@ export async function publishOfficialTemplateRelease(database: IDBDatabase, rele
     let conflict = false
     current.onsuccess = () => {
         const saved = current.result as TemplateOrigin | undefined
-        if (saved && (saved.sha256 !== parent.sha256 || saved.version !== parent.version)) {
+        if (saved && (saved.sha256 !== parent.sha256 || saved.version !== parent.version || saved.manifestSha256 !== parent.manifestSha256)) {
             conflict = true
             return
         }
         store.add(release, ['official-template-release', release.id, release.version])
-        store.put({ id: release.id, version: release.version, sha256: release.sha256 }, key)
+        store.put({ id: release.id, version: release.version, sha256: release.sha256, manifestSha256: release.manifestSha256 }, key)
     }
     await complete(transaction)
     if (conflict) throw new Error('另一个标签页已发布新版本。刷新后重新核对候选。')
@@ -61,7 +62,7 @@ export async function saveOfficialSwitchAcceptance(database: IDBDatabase, releas
     let matched = false
     request.onsuccess = () => {
         const current = request.result as OfficialTemplateRelease | undefined
-        if (current?.sha256 !== release.sha256 || current.kind !== release.kind) return
+        if (current?.sha256 !== release.sha256 || current.kind !== release.kind || current.manifestSha256 !== release.manifestSha256) return
         matched = true
         store.put(release, key)
     }

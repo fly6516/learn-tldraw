@@ -17,7 +17,7 @@ const finding = z.object({
   path: z.string().refine(isProjectPath).optional(), line: z.number().int().positive().optional(),
   page: z.number().int().positive().optional(),
 })
-export const templateOriginSchema = z.object({ id: z.string(), version: z.string(), sha256: checksum })
+export const templateOriginSchema = z.object({ id: z.string(), version: z.string(), sha256: checksum, manifestSha256: checksum.optional() })
 export const submissionLayoutSchema = z.object({
   version: z.literal(1), sourceChecksum: checksum, pdfChecksum: checksum,
   checkedAt: z.string().refine(value => Number.isFinite(Date.parse(value))),

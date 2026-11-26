@@ -30,6 +30,11 @@ import type { WordProfile } from '@/lib/project/word-import'
 import { OfficialSuepCandidate } from './OfficialSuepCandidate'
 import { OfficialZipCandidate } from './OfficialZipCandidate'
 import { validateReleaseCandidate, type OfficialTemplateRelease, type TemplateOrigin } from '@/lib/project/template-release'
+import { attachmentManifestDigest, type AttachmentRole, type OfficialAttachment } from '@/lib/project/official-attachments'
+import { prepareSuepBundle } from '@/lib/project/suep-bundle-client'
+import { suepUndergraduateId } from '@/lib/project/suep-undergraduate-source'
+import { catalogWordAttachments, usesWordAttachmentRelease } from '@/lib/project/word-release-attachments'
+import { wordReleaseFile } from '@/lib/project/word-release-client'
 import { exportRelease, importRelease } from '@/lib/project/release-transfer'
 
 const categories = [
@@ -93,14 +98,14 @@ export function TemplateMarket({ database, storageUnavailable, openProject }: {
   const [layoutBuilder, setLayoutBuilder] = useState(false)
   const [layoutEditor, setLayoutEditor] = useState<{ name: string; version: string; bundle: WordLayoutBundle; origin?: TemplateOrigin }>()
   const [layoutReview, setLayoutReview] = useState<{ name: string; version: string; bundle: WordLayoutBundle }>()
-  const [savedLayout, setSavedLayout] = useState<{ name: string; bundle: WordLayoutBundle; origin?: TemplateOrigin }>()
+  const [savedLayout, setSavedLayout] = useState<{ name: string; bundle: WordLayoutBundle; origin?: TemplateOrigin; declaration?: File }>()
   const [releases, setReleases] = useState<Record<string, OfficialTemplateRelease[]>>({})
   const [releaseChoice, setReleaseChoice] = useState<Record<string, string>>({})
-  const [releaseCandidate, setReleaseCandidate] = useState<{ entry: CatalogTemplate; parent: TemplateOrigin; file?: File }>()
+  const [releaseCandidate, setReleaseCandidate] = useState<{ entry: CatalogTemplate; parent: TemplateOrigin; file?: File; standard?: File; extraFiles?: Partial<Record<AttachmentRole, File>>; parentAttachments?: OfficialAttachment[]; candidateSources?: OfficialAttachment[] }>()
   const [pendingPublication, setPendingPublication] = useState<OfficialTemplateRelease>()
   const [restore, setRestore] = useState<{ release: OfficialTemplateRelease; parent: TemplateOrigin }>()
   const [sourceCheck, setSourceCheck] = useState<Record<string, {
-    sha256: string; url: string; scope: 'listing' | 'file'; matchesBaseline?: boolean
+    sha256: string; url: string; scope: 'listing' | 'file'; matchesBaseline?: boolean; attachments?: OfficialAttachment[]
   }>>({})
   const [officialWord, setOfficialWord] = useState<{ origin: TemplateOrigin; file?: File; standard?: File }>()
   const [error, setError] = useState('')
@@ -148,7 +153,10 @@ export function TemplateMarket({ database, storageUnavailable, openProject }: {
   const parentRelease = history[0] ?? baseline
   const releaseReady = !baseline || Object.hasOwn(releases, baseline.id)
   const checkedSource = baseline && sourceCheck[baseline.id]
-  const matchesPublished = checkedSource?.sha256 === parentRelease?.sha256 || (!history.length && checkedSource?.matchesBaseline)
+  const currentAttachments = history[0]?.attachments ?? (baseline && catalogWordAttachments(baseline.id))
+  const matchesPublished = checkedSource?.attachments
+    ? checkedSource.attachments.every(item => currentAttachments?.some(old => old.role === item.role && old.sha256 === item.sha256))
+    : checkedSource?.sha256 === parentRelease?.sha256 || (!history.length && checkedSource?.matchesBaseline)
   const activeName = categories.find(([id]) => id === category)?.[1]
   const dialogItem = nameDialog?.item
 
@@ -203,8 +211,27 @@ export function TemplateMarket({ database, storageUnavailable, openProject }: {
 
   async function activateRelease(release: OfficialTemplateRelease, parent: TemplateOrigin) {
     if (!database) throw new Error('无法打开本机模板存储。')
-    validateReleaseCandidate(parent, release.version, release.sha256)
-    release = await acceptTemplateSwitchRelease(release, AbortSignal.timeout(120_000))
+    validateReleaseCandidate(parent, release.version, release.sha256, release.manifestSha256)
+    const signal = AbortSignal.timeout(120_000)
+    release = await acceptTemplateSwitchRelease(release, signal)
+    if (!release.attachments && release.kind === 'word-import' && release.id === suepUndergraduateId) {
+      const { manifest } = await prepareSuepBundle({ ...release, id: suepUndergraduateId }, signal, release.archive)
+      const attachments: OfficialAttachment[] = [
+        { role: 'original', sha256: release.sha256, url: manifest.sourceUrl },
+        ...Object.entries(manifest.members).map(([role, item]) => ({
+          role: (role === 'guide' ? 'guideline' : role) as OfficialAttachment['role'],
+          sha256: item.sha256, url: manifest.sourceUrl, member: item.path,
+        })),
+      ]
+      release = { ...release, attachments, manifestSha256: await attachmentManifestDigest(attachments) }
+    } else if (!release.attachments && release.kind === 'zip') {
+      const entry = templateCatalog.find(item => item.id === release.id)
+      const source = entry && catalogReleaseSource(entry)
+      if (source) {
+        const attachments: OfficialAttachment[] = [{ role: 'original', sha256: release.sha256, url: source.url }]
+        release = { ...release, attachments, manifestSha256: await attachmentManifestDigest(attachments) }
+      }
+    }
     await publishOfficialTemplateRelease(database, release, parent)
     setReleases(current => ({ ...current, [release.id]: [release, ...current[release.id] ?? []] }))
     setReleaseChoice(current => ({ ...current, [release.id]: release.version }))
@@ -231,13 +258,44 @@ export function TemplateMarket({ database, storageUnavailable, openProject }: {
       delete next[id]
       return next
     })
-    const result = await (await requestOfficialSource(id)).json()
+    const [result, ...supplemental] = await Promise.all([
+      requestOfficialSource(id).then(response => response.json()),
+      ...(catalogWordAttachments(id) ?? []).filter(item => item.role === 'guideline' || item.role === 'declaration' || item.role === 'blind-cover')
+        .map(async item => {
+          const role = item.role as 'guideline' | 'declaration' | 'blind-cover'
+          const found = await (await requestOfficialSource(id, undefined, role)).json()
+          return { role, sha256: found.sha256, url: found.url } as OfficialAttachment
+        }),
+    ])
+    if (supplemental.length) result.attachments = [{ role: 'original', sha256: result.sha256, url: result.url }, ...supplemental]
     setSourceCheck(current => ({ ...current, [id]: result }))
+  }
+
+  async function openReleaseCandidate(entry: CatalogTemplate, parent: TemplateOrigin, current?: OfficialTemplateRelease,
+    file?: File, candidateSources?: OfficialAttachment[]) {
+    if (!usesWordAttachmentRelease(entry.id)) { setReleaseCandidate({ entry, parent, file }); return }
+    const fallback = () => undefined
+    const [original, ...files] = await Promise.all([
+      file ?? wordReleaseFile(entry.id, 'original', undefined, current).catch(fallback),
+      ...(catalogWordAttachments(entry.id) ?? []).filter(item => item.role !== 'original').map(async item => {
+        const update = candidateSources?.find(change => change.role === item.role && change.sha256 !==
+          (current?.attachments?.find(prior => prior.role === item.role)?.sha256 ?? item.sha256))
+        const role = item.role as 'guideline' | 'declaration' | 'blind-cover'
+        const asset = update ? await fetchOfficialFile(entry.id, update.sha256, role)
+          : await wordReleaseFile(entry.id, role, undefined, current).catch(fallback)
+        return [role, asset] as const
+      }),
+    ])
+    const extraFiles = Object.fromEntries(files)
+    setReleaseCandidate({ entry, parent, file: original, standard: extraFiles.guideline,
+      extraFiles, parentAttachments: current?.attachments, candidateSources })
   }
 
   async function openConfiguredTemplate(item: MarketItem, release?: OfficialTemplateRelease, manual = false) {
     if (release?.kind === 'word') {
-      setSavedLayout({ name: item.name, bundle: await readWordTemplate(release.layout), origin: release.layout.origin })
+      const declaration = release.attachments?.some(item => item.role === 'declaration')
+        ? await wordReleaseFile(item.id, 'declaration', undefined, release) : undefined
+      setSavedLayout({ name: item.name, bundle: await readWordTemplate(release.layout), origin: release.layout.origin, declaration })
       return
     }
     if (item.delivery === 'local' && item.kind === 'word-layout') {
@@ -400,6 +458,7 @@ export function TemplateMarket({ database, storageUnavailable, openProject }: {
             <summary className="cursor-pointer">管理官方版本</summary>
             <p className="mt-2">当前发布版 {parentRelease.version}</p>
             <p className="break-all font-mono text-xs">原件 SHA-256 {parentRelease.sha256}</p>
+            {selectedRelease?.manifestSha256 && <p className="break-all font-mono text-xs">附件清单 SHA-256 {selectedRelease.manifestSha256}</p>}
             {history.length > 0 && <label className="mt-2 block">项目使用版本
               <select className="mt-1 block max-w-full rounded border p-1" value={selectedRelease?.version ?? baseline.version}
                 onChange={event => setReleaseChoice(current => ({ ...current, [selected.id]: event.target.value }))}>
@@ -417,7 +476,7 @@ export function TemplateMarket({ database, storageUnavailable, openProject }: {
             <div className="mt-2 flex flex-wrap gap-2">
               <Button size="sm" variant="outline" disabled={busy} onClick={() => void run(() => checkSource(baseline.id))}>检查官方原件更新</Button>
               <Button size="sm" variant="outline" disabled={!database || busy || !releaseReady}
-                onClick={() => setReleaseCandidate({ entry: selected, parent: parentRelease })}>验收候选文件</Button>
+                onClick={() => void run(() => openReleaseCandidate(selected, parentRelease, history[0]))}>验收候选文件</Button>
               <Button size="sm" variant="outline" disabled={!database || busy || !releaseReady}
                 onClick={() => releaseInput.current?.click()}>导入版本包</Button>
               {selectedRelease && <Button size="sm" variant="outline" disabled={busy} onClick={() => void run(async () => {
@@ -433,7 +492,7 @@ export function TemplateMarket({ database, storageUnavailable, openProject }: {
               if (file) void run(async () => {
                 const release = await importRelease(file, releaseSource)
                 if (history.some(item => item.version === release.version)) throw new Error('此浏览器已有这个版本号。')
-                validateReleaseCandidate(parentRelease, release.version, release.sha256)
+                validateReleaseCandidate(parentRelease, release.version, release.sha256, release.manifestSha256)
                 setRestore({ release, parent: parentRelease })
               })
             }} />
@@ -441,11 +500,14 @@ export function TemplateMarket({ database, storageUnavailable, openProject }: {
               <p>{matchesPublished ? '所检查的官方原件与当前发布版一致。' : '发现不同的官方原件，请核对发布说明并验收候选。'}</p>
               <a href={checkedSource.url} target="_blank" rel="noreferrer" className="underline">打开本次检查的原件</a>
               <p className="break-all font-mono text-xs">{checkedSource.sha256}</p>
+              {checkedSource.attachments?.filter(item => item.role !== 'original').map(item =>
+                <p key={item.role} className="break-all font-mono text-xs">{item.role} · {item.sha256}</p>)}
               {checkedSource.scope === 'file' && <p className="text-workbench-muted">本次检查目录登记的文件地址。新附件另行发布时，请查看发布页。</p>}
               {!matchesPublished && <Button size="sm" variant="outline"
                 disabled={!database || busy || !releaseReady} onClick={() => void run(async () => {
-                  const file = await fetchOfficialFile(selected.id, checkedSource.sha256)
-                  setReleaseCandidate({ entry: selected, parent: parentRelease, file })
+                  const sameMain = checkedSource.sha256 === parentRelease.sha256 && usesWordAttachmentRelease(selected.id)
+                  const file = sameMain ? undefined : await fetchOfficialFile(selected.id, checkedSource.sha256)
+                  await openReleaseCandidate(selected, parentRelease, history[0], file, checkedSource.attachments)
                 })}>载入官方原件验收</Button>}
             </div>}
           </details>}
@@ -511,9 +573,11 @@ export function TemplateMarket({ database, storageUnavailable, openProject }: {
         addToCatalog(template)
       }} />}
     {database && (layoutBuilder || layoutEditor || candidateSource?.kind === 'word') && <WordTemplateBuilder database={database} previous={layoutEditor}
-      official={releaseCandidate && candidateSource?.kind === 'word' ? { origin: releaseCandidate.parent, file: releaseCandidate.file, publish: (layout, original, previewSha256) => {
+      official={releaseCandidate && candidateSource?.kind === 'word' ? { origin: releaseCandidate.parent, file: releaseCandidate.file, standard: releaseCandidate.standard, extraFiles: releaseCandidate.extraFiles, parentAttachments: releaseCandidate.parentAttachments, candidateSources: releaseCandidate.candidateSources,
+        publish: (layout, original, previewSha256, assets) => {
         if (!layout.origin) throw new Error('缺少候选官方原件。')
         return publish({ ...layout.origin, kind: 'word', layout, sourceName: original.name,
+          ...(assets && { attachments: assets.attachments, attachmentFiles: assets.files }),
           ...(supportsSwitchRelease(layout.origin.id) && /\.docx?$/i.test(original.name) && { original }),
           sourceUrl: releaseCandidate.entry.sourceUrl ?? '', publishedAt: new Date().toISOString(), previewSha256 })
       } } : officialWord}

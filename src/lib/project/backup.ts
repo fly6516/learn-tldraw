@@ -54,7 +54,7 @@ const savedManifest = z.object({
       mainFile: z.string().optional(),
       compileProfile: compileProfileSchema.optional(),
       activeTemplate: activeTemplateSchema.optional(),
-      templateOrigin: z.object({ id: z.string(), version: z.string(), sha256: z.string().regex(/^[0-9a-f]{64}$/) }).optional(),
+      templateOrigin: z.object({ id: z.string(), version: z.string(), sha256: z.string().regex(/^[0-9a-f]{64}$/), manifestSha256: z.string().regex(/^[0-9a-f]{64}$/).optional() }).optional(),
     }),
     template: z.object({
       documentClass: z.string(),

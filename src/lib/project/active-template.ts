@@ -10,6 +10,7 @@ const common = {
     id: z.string().min(1),
     version: z.string().min(1),
     sha256: z.string().regex(/^[a-f0-9]{64}$/),
+    manifestSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   }),
   name: z.string().min(1),
   main: z.string().refine(value => isProjectPath(value) && /^[\w.-]+\.tex$/.test(value)),
@@ -51,6 +52,7 @@ export const activeTemplateSchema = z.discriminatedUnion('kind', [
     }),
     layout: wordLayoutSchema, word: documentBytes, declaration: documentBytes.optional(),
     declarationSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+    blindCover: documentBytes.optional(), blindCoverSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   }),
   z.object({
     ...common, kind: z.literal('official-thesis'), variant: z.enum(additionalWordThesisIds),
