@@ -18,7 +18,7 @@ import { suepUndergraduateSource } from '@/lib/project/suep-undergraduate-source
 import { draftWordLayout } from '@/lib/project/word-layout-extraction'
 import { hasLayoutConflict, layoutKeys, layoutValues, wordLayoutSchema, type WordLayout } from '@/lib/project/word-layout'
 import { customWordGeometry, customWordTex, formatCustomWord } from '@/lib/project/custom-word-tex'
-import { submissionDocxConfig, submissionDocxFields, submissionDocxIdSchema, suepDocxMembers } from '@/lib/project/submission-docx-config'
+import { submissionDocxConfig, submissionDocxFieldSchema, submissionDocxIdSchema, suepDocxMembers } from '@/lib/project/submission-docx-config'
 import { captureManuscript } from '@/lib/project/template-export'
 import { importSourceArchive } from '@/lib/project/source-archive'
 import { docxLatexForPandoc, docxSourceError, prepareDocxAst, validateDocxSource, type PandocDocument } from '@/lib/project/docx-manuscript'
@@ -298,10 +298,15 @@ async function exportSubmissionWord(work: string, request: Request, data: FormDa
   const target = submissionDocxIdSchema.safeParse(data.get('school'))
   if (!target.success) throw new ImportError('请选择支持的官方 Word 版本。')
   const config = submissionDocxConfig(target.data)
+  const stage = data.get('stage')
+  const njuptStage = stage === 'njupt-deposit' || stage === 'njupt-blind'
+  if ((config.stage || njuptStage) && stage !== config.stage) {
+    throw new ImportError('南邮正式归档 DOCX 仅在归档阶段提供。盲审请使用匿名 PDF。')
+  }
   let input: unknown
   try { input = JSON.parse(String(data.get('fields') ?? 'null')) }
   catch { throw new ImportError('封面字段格式不正确。') }
-  const parsed = submissionDocxFields.safeParse(input)
+  const parsed = submissionDocxFieldSchema(config.id).safeParse(input)
   if (!parsed.success) throw new ImportError('请核对封面、摘要及关键词中的必填字段。')
   const fields = parsed.data
   const source = data.get('source')
@@ -327,6 +332,12 @@ async function exportSubmissionWord(work: string, request: Request, data: FormDa
     if (!(guide instanceof File)) throw new ImportError('缺少浙大官方规范 PDF。')
     await pinned(guide, config.guideline.sha256, '官方规范')
     provenance += '\n官方规范 ' + config.guideline.url + ' · SHA-256 ' + config.guideline.sha256
+  } else if (config.declaration) {
+    const uploaded = data.get('declaration')
+    if (!(uploaded instanceof File)) throw new ImportError('缺少南邮官方声明 Word。')
+    declaration = await pinned(uploaded, config.declaration.sha256, '官方声明')
+    provenance += '\n官方声明 ' + config.declaration.url + '\n官方声明 SHA-256 ' + config.declaration.sha256
+      + '\n正式归档阶段 ' + config.stage + '\n撰写标准 ' + config.requirementsUrl
   } else {
     await writeFile(join(work, 'official.rar'), registered)
     const contents = {} as Record<keyof typeof suepDocxMembers, Buffer>
@@ -385,7 +396,7 @@ async function exportSubmissionWord(work: string, request: Request, data: FormDa
   // The JSON writer only receives locally staged, validated image names.
   await runPandoc(['--fail-if-warnings', '-f', 'json', '-t', 'docx', 'render.json', '-o', 'draft.docx'], 'body')
   return fillSubmissionDocx({ ...converted, id: config.id, original: reference, draft: await readFile(join(work, 'draft.docx')),
-    cover, declaration, fields, englishTitle: manuscript.title.replace(/\\([&%#$ _])/g, '$1'), provenance })
+    cover, declaration, fields: { ...fields, affiliation: fields.affiliation ?? '' }, englishTitle: manuscript.title.replace(/\\([&%#$ _])/g, '$1'), provenance })
 }
 
 export async function POST(request: Request) {
@@ -408,7 +419,8 @@ export async function POST(request: Request) {
   let work: string | undefined
   try {
     const data = await request.formData().catch(() => { throw new ImportError('Invalid Word upload.') })
-    const fileFields = [...wordRoles, 'logo', 'standard']
+    const fileFields = data.get('intent') === 'export-submission-docx'
+      ? ['source', 'original', 'declaration', 'guideline'] : [...wordRoles, 'logo', 'standard']
     const files = fileFields.flatMap(key => data.getAll(key))
     if (files.some(file => !(file instanceof File))
         || files.reduce((size, file) => size + (file instanceof File ? file.size : 0), 0) > wordImportLimit

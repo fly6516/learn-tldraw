@@ -135,33 +135,35 @@ export function njuptBlindExportFront(original: File, fields: OfficialThesisFiel
 }
 
 export function njuptExportFront(original: File, fields: OfficialThesisFields, professional = false) {
+  return editFront(original, nodes => fillNjuptCoverNodes(nodes, fields, professional))
+}
+
+export function fillNjuptCoverNodes(nodes: Element[], fields: OfficialThesisFields, professional: boolean) {
   const date = thesisDate(fields.date)
-  return editFront(original, nodes => {
-    const titlePattern = professional ? /专\s*业\s*学\s*位\s*硕\s*士\s*论\s*文/ : /学\s*术\s*学\s*位\s*硕\s*士\s*论\s*文/
-    if (!titlePattern.test(text(nodes[6])) ||
-      !/Thesis Submitted to Nanjing University/.test(text(nodes[27])) ||
-      !text(nodes[36]).includes('不要打印')) throw new Error('候选 Word 的南邮中英文封面结构与已支持样式不同。')
-    const title = elements(nodes[9], 't').at(-1)
-    if (!title) throw new Error('无法定位南邮中文题名。')
-    write(title, ' ' + fields.chineseTitle.trim())
-    const rows = professional
-      ? [fields.studentNumber, fields.name, fields.advisor, fields.degree, fields.studyMode === 'full-time' ? '全日制' : '非全日制', fields.program, date.chinese]
-      : [fields.studentNumber, fields.name, fields.advisor, fields.program, fields.direction, fields.degree, date.chinese]
-    const fieldStart = professional ? 11 : 13
-    alignNjuptCoverRows(nodes, fieldStart, rows)
-    for (const [index, value] of [[22, fields.title], [28, fields.englishDegree], [33, fields.name],
-      [34, 'Supervisor: ' + fields.englishAdvisor], [35, date.english]] as const) {
-      const runs = elements(nodes[index], 't')
-      if (!runs.length) throw new Error('无法定位南邮英文封面字段。')
-      write(runs[0], value ?? '')
-      for (const run of runs.slice(1)) write(run, '')
-    }
-    const titleProperties = elements(nodes[22], 'pPr')[0]
-    if (!titleProperties) throw new Error('无法定位南邮英文封面页。')
-    const pageBreak = nodes[22].ownerDocument!.createElementNS(ns, 'w:pageBreakBefore')
-    titleProperties.insertBefore(pageBreak, titleProperties.firstChild)
-    return nodes.slice(0, 36).filter((_node, index) => !(professional ? [18, 20, 21, 23, 24] : [20, 21, 23, 24]).includes(index))
-  })
+  const titlePattern = professional ? /专\s*业\s*学\s*位\s*硕\s*士\s*论\s*文/ : /学\s*术\s*学\s*位\s*硕\s*士\s*论\s*文/
+  if (!titlePattern.test(text(nodes[6])) ||
+    !/Thesis Submitted to Nanjing University/.test(text(nodes[27])) ||
+    !text(nodes[36]).includes('不要打印')) throw new Error('候选 Word 的南邮中英文封面结构与已支持样式不同。')
+  const title = elements(nodes[9], 't').at(-1)
+  if (!title) throw new Error('无法定位南邮中文题名。')
+  write(title, ' ' + fields.chineseTitle.trim())
+  const rows = professional
+    ? [fields.studentNumber, fields.name, fields.advisor, fields.degree, fields.studyMode === 'full-time' ? '全日制' : '非全日制', fields.program, date.chinese]
+    : [fields.studentNumber, fields.name, fields.advisor, fields.program, fields.direction, fields.degree, date.chinese]
+  const fieldStart = professional ? 11 : 13
+  alignNjuptCoverRows(nodes, fieldStart, rows)
+  for (const [index, value] of [[22, fields.title], [28, fields.englishDegree], [33, fields.name],
+    [34, 'Supervisor: ' + fields.englishAdvisor], [35, date.english]] as const) {
+    const runs = elements(nodes[index], 't')
+    if (!runs.length) throw new Error('无法定位南邮英文封面字段。')
+    write(runs[0], value ?? '')
+    for (const run of runs.slice(1)) write(run, '')
+  }
+  const titleProperties = elements(nodes[22], 'pPr')[0]
+  if (!titleProperties) throw new Error('无法定位南邮英文封面页。')
+  const pageBreak = nodes[22].ownerDocument!.createElementNS(ns, 'w:pageBreakBefore')
+  titleProperties.insertBefore(pageBreak, titleProperties.firstChild)
+  return nodes.slice(0, 36).filter((_node, index) => !(professional ? [18, 20, 21, 23, 24] : [20, 21, 23, 24]).includes(index))
 }
 
 export const additionalWordThesisIds = ['suep-masters', 'ustc-graduate-word', 'scau-undergraduate'] as const

@@ -10,6 +10,7 @@ import { exportExternalBuild } from '@/lib/project/submission'
 import { submissionDocxConfig, submissionDocxIds, type SubmissionDocxFields, type SubmissionDocxId } from '@/lib/project/submission-docx-config'
 import { checkDocxSubmission, verifyWordFinal, type SubmissionDocxDelivery } from '@/lib/project/submission-docx-delivery'
 import { captureManuscript } from '@/lib/project/template-export'
+import type { SubmissionStage } from '@/lib/project/submission-stages'
 import type { ProjectFileSystem } from '@/lib/project/types'
 import { wordRequest } from '@/lib/project/word-conversion-client'
 
@@ -19,18 +20,24 @@ const labels = [
   ['chineseKeywords', '中文关键词', 250], ['englishKeywords', '英文关键词', 250],
 ] as const
 
-export function SubmissionDocxPanel({ project, main, template, disabled, download, onLocate, onArchive }: {
-  project: ProjectFileSystem; main: string; template?: string; disabled: boolean; download: (blob: Blob, name: string) => void
+const njuptLabels = [
+  ['degree', '申请学位类别', 40], ['englishDegree', '学位类别英文全称', 80], ['englishAdvisor', '导师英文姓名', 80],
+] as const
+
+export function SubmissionDocxPanel({ project, main, template, stage, disabled, download, onLocate, onArchive }: {
+  project: ProjectFileSystem; main: string; template?: string; stage?: SubmissionStage; disabled: boolean; download: (blob: Blob, name: string) => void
   onLocate: (path: string, line: number) => void
   onArchive?: (delivery: SubmissionDocxDelivery) => Promise<void>
 }) {
   const [open, setOpen] = useState(false)
-  const [school, setSchool] = useState<SubmissionDocxId>(() => submissionDocxIds.find(id => id === template) ?? submissionDocxIds[0])
+  const njupt = template === 'njupt-professional-masters' && stage === 'njupt-deposit'
+  const available = njupt ? ['njupt-professional-masters'] as const : submissionDocxIds.filter(id => id !== 'njupt-professional-masters')
+  const [school, setSchool] = useState<SubmissionDocxId>(() => available.find(id => id === template) ?? available[0])
   const [fields, setFields] = useState<SubmissionDocxFields>({
     title: '', author: '', studentNumber: '', advisor: '', program: '', affiliation: '', date: '',
     chineseAbstract: '', chineseKeywords: '', englishKeywords: '', confidentiality: 'public',
   })
-  const [uploads, setUploads] = useState<{ original?: File; guideline?: File }>({})
+  const [uploads, setUploads] = useState<{ original?: File; guideline?: File; declaration?: File }>({})
   const [error, setError] = useState('')
   const [busy, setBusy] = useState<'export' | 'attach' | 'archive'>()
   const [checked, setChecked] = useState<{ project: ProjectFileSystem; main: string; school: SubmissionDocxId; fields: SubmissionDocxFields; report: ReturnType<typeof checkDocxSubmission> }>()
@@ -39,6 +46,8 @@ export function SubmissionDocxPanel({ project, main, template, disabled, downloa
   const [saved, setSaved] = useState('')
   const request = useRef<AbortController | undefined>(undefined)
   const config = submissionDocxConfig(school)
+  const fieldLabels = njupt ? [...labels.filter(([key]) => key !== 'affiliation').map(row =>
+    row[0] === 'program' ? ['program', '专业（领域）', row[2]] as const : row), ...njuptLabels] : labels
   const fresh = checked?.project === project && checked.main === main && checked.school === school && checked.fields === fields ? checked : undefined
   const delivery = receipt?.check === fresh ? receipt?.delivery : undefined
   useEffect(() => () => request.current?.abort(), [project, main])
@@ -47,7 +56,13 @@ export function SubmissionDocxPanel({ project, main, template, disabled, downloa
     setOpen(true)
     try {
       const snapshot = captureManuscript(project.files, main, { allowLongtable: true })
-      setFields(current => ({ ...current, author: current.author || snapshot.authors.join('、'),
+      const active = project.metadata.activeTemplate
+      const cover = njupt && active?.kind === 'njupt-masters' ? active.fields : undefined
+      setFields(current => ({ ...current, ...(cover && !current.title ? {
+        title: cover.chineseTitle, advisor: cover.advisor, studentNumber: cover.studentNumber, program: cover.program,
+        chineseAbstract: cover.chineseAbstract, chineseKeywords: cover.chineseKeywords, date: cover.date,
+        englishAdvisor: cover.englishAdvisor, degree: cover.degree, englishDegree: cover.englishDegree, studyMode: cover.studyMode,
+      } : {}), author: current.author || snapshot.authors.join('、'),
         englishKeywords: current.englishKeywords || (/^[^\\\$\{\}]*$/.test(snapshot.keywords) ? snapshot.keywords : '') }))
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '无法读取当前稿件。')
@@ -64,7 +79,7 @@ export function SubmissionDocxPanel({ project, main, template, disabled, downloa
     request.current = controller
     setBusy('export')
     const { signal } = controller
-    async function original(pin: string, local?: File, asset?: 'guideline' | 'docx-bundle') {
+    async function original(pin: string, local?: File, asset?: 'guideline' | 'declaration' | 'docx-bundle') {
       if (!local) return fetchOfficialFile(school, pin, asset, signal)
       if (local.size > 16 * 1024 * 1024 || await templateDigest(await local.arrayBuffer()) !== pin) {
         throw new Error((asset === 'guideline' ? '本地规范' : '本地原件') + '的 SHA-256 与所选登记版不一致。')
@@ -74,10 +89,12 @@ export function SubmissionDocxPanel({ project, main, template, disabled, downloa
     try {
       let word: File
       let guide: File | undefined
+      let declaration: File | undefined
       try {
-        [word, guide] = await Promise.all([
+        [word, guide, declaration] = await Promise.all([
           original(config.original.sha256, uploads.original, school === 'suep-undergraduate' ? 'docx-bundle' : undefined),
           config.guideline ? original(config.guideline.sha256, uploads.guideline, 'guideline') : undefined,
+          config.declaration ? original(config.declaration.sha256, uploads.declaration, 'declaration') : undefined,
         ])
       } catch (cause) {
         signal.throwIfAborted()
@@ -86,20 +103,23 @@ export function SubmissionDocxPanel({ project, main, template, disabled, downloa
       const data = new FormData()
       data.set('intent', 'export-submission-docx')
       data.set('school', school)
+      if (stage) data.set('stage', stage)
       data.set('main', main)
       data.set('fields', JSON.stringify(normalized))
       const id = crypto.randomUUID()
       data.set('delivery-id', id)
       data.set('original', word)
       if (guide) data.set('guideline', guide)
+      if (declaration) data.set('declaration', declaration)
       const [{ zip, checksum }, snapshotSha256] = await Promise.all([exportExternalBuild(project), projectSourceDigest(project.files, main)])
-      if (word.size + (guide?.size ?? 0) + zip.size > 16 * 1024 * 1024) throw new Error('官方原件和项目源包共计不得超过 16 MB。')
+      if (word.size + (guide?.size ?? 0) + (declaration?.size ?? 0) + zip.size > 16 * 1024 * 1024) throw new Error('官方原件和项目源包共计不得超过 16 MB。')
       data.set('source', zip, 'manuscript.zip')
       const blob = await (await wordRequest(data, signal)).blob()
       signal.throwIfAborted()
       const name = normalized.title.replace(/[<>:"/\\|?*\p{Cc}]/gu, '-').replace(/[. ]+$/, '') || 'submission'
       const filename = name + '-' + config.version + '.docx'
-      const template = { id: school, name: config.name, sourceUrl: config.sourceUrl, version: config.version, sha256: config.original.sha256 }
+      const template = { id: school, name: config.name, sourceUrl: config.sourceUrl, version: config.version, sha256: config.original.sha256,
+        declarationSha256: config.declaration?.sha256, declarationUrl: config.declaration?.url }
       const generated = await verifyWordFinal(new File([blob], filename), { id, template, snapshotSha256 })
       signal.throwIfAborted()
       setReceipt({ check, delivery: { id, name, createdAt: new Date().toISOString(), template, main, snapshotSha256,
@@ -121,7 +141,7 @@ export function SubmissionDocxPanel({ project, main, template, disabled, downloa
     setError('')
     setSaved('')
     if (fresh) return fresh
-    const value = { project, main, school, fields, report: checkDocxSubmission(project, main, fields) }
+    const value = { project, main, school, fields, report: checkDocxSubmission(project, main, fields, school) }
     setChecked(value)
     return value
   }
@@ -161,17 +181,25 @@ export function SubmissionDocxPanel({ project, main, template, disabled, downloa
           setUploads({})
           setError('')
         }}>
-          {submissionDocxIds.map(id => <option key={id} value={id}>{submissionDocxConfig(id).name}</option>)}
+          {available.map(id => <option key={id} value={id}>{submissionDocxConfig(id).name}</option>)}
         </select>
       </label>
       <p>官方登记版 {config.version} · {config.status}</p>
       <p className="break-all text-xs">原件 SHA-256 {config.original.sha256}</p>
+      {config.declaration && <p className="break-all text-xs">声明 SHA-256 {config.declaration.sha256}</p>}
+      {config.requirementsUrl && <a className="mr-3 underline" href={config.requirementsUrl} target="_blank" rel="noreferrer">学校撰写标准</a>}
       <a className="underline" href={config.sourceUrl} target="_blank" rel="noreferrer">原件发布来源</a>
       <div className="grid gap-2 sm:grid-cols-2">
-        {labels.map(([key, label, maxLength]) => <label key={key} className="block">{label}
-          <Input value={fields[key]} maxLength={maxLength} required onChange={event => setFields({ ...fields, [key]: event.target.value })} />
+        {fieldLabels.map(([key, label, maxLength]) => <label key={key} className="block">{label}
+          <Input value={fields[key] ?? ''} maxLength={maxLength} required onChange={event => setFields({ ...fields, [key]: event.target.value })} />
         </label>)}
-        {school === 'zju-basic-medicine-undergraduate' && <label>论文公开状态
+        {njupt && <label>培养类型
+          <select className="mt-1 block w-full rounded border bg-background p-2" value={fields.studyMode ?? ''} onChange={event =>
+            setFields({ ...fields, studyMode: (event.target.value || undefined) as SubmissionDocxFields['studyMode'] })}>
+            <option value="">请选择</option><option value="full-time">全日制</option><option value="part-time">非全日制</option>
+          </select>
+        </label>}
+        {(school === 'zju-basic-medicine-undergraduate' || njupt) && <label>论文公开状态
           <select className="mt-1 block w-full rounded border bg-background p-2" value={fields.confidentiality} onChange={event =>
             setFields({ ...fields, confidentiality: event.target.value as SubmissionDocxFields['confidentiality'] })}>
             <option value="public">公开</option>
@@ -189,9 +217,12 @@ export function SubmissionDocxPanel({ project, main, template, disabled, downloa
       </label>
       <details className="space-y-2">
         <summary className="cursor-pointer">手动上传官方原件</summary>
-        <label className="block">{config.guideline ? '官方 Word' : '官方附件包 RAR'}
-          <Input key={school} type="file" accept={config.guideline ? '.docx' : '.rar'} onChange={event => setUploads({ ...uploads, original: event.target.files?.[0] })} />
+        <label className="block">{config.guideline || njupt ? '官方 Word' : '官方附件包 RAR'}
+          <Input key={school} type="file" accept={njupt ? '.doc,.docx' : config.guideline ? '.docx' : '.rar'} onChange={event => setUploads({ ...uploads, original: event.target.files?.[0] })} />
         </label>
+        {config.declaration && <label className="block">官方声明 Word
+          <Input type="file" accept=".doc,.docx" onChange={event => setUploads({ ...uploads, declaration: event.target.files?.[0] })} />
+        </label>}
         {config.guideline && <label className="block">官方规范 PDF
           <Input type="file" accept=".pdf" onChange={event => setUploads({ ...uploads, guideline: event.target.files?.[0] })} />
         </label>}
@@ -202,8 +233,8 @@ export function SubmissionDocxPanel({ project, main, template, disabled, downloa
     {fresh && <section aria-label="DOCX 导出前检查" role={fresh.report.findings.some(item => item.status === 'blocking') ? 'alert' : 'status'}>
       <p>{fresh.report.findings.some(item => item.status === 'blocking') ? '请先修正以下问题' : '导出前检查通过'}</p>
       <ul className="list-disc space-y-1 pl-5">{fresh.report.findings.map((item, index) => <li key={index}>
-        {item.field && <strong>{labels.find(([key]) => key === item.field)?.[1] ?? ({
-          chineseAbstract: '中文摘要', acknowledgment: '致谢', confidentiality: '论文公开状态',
+        {item.field && <strong>{fieldLabels.find(([key]) => key === item.field)?.[1] ?? ({
+          chineseAbstract: '中文摘要', acknowledgment: '致谢', confidentiality: '论文公开状态', studyMode: '培养类型',
         } as Record<string, string>)[item.field] ?? item.field} · </strong>}
         {item.location && <button type="button" className="underline" onClick={() => onLocate(item.location!.path, item.location!.line)}>
           {item.location.path}:{item.location.line}

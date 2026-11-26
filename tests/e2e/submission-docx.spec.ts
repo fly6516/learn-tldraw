@@ -9,10 +9,11 @@ import { DOMParser, type Element } from '@xmldom/xmldom'
 import { encodeProjectBackup } from '../../src/lib/project/backup'
 import { emptyCanvas } from '../../src/lib/project/research-graph'
 import { importSourceArchive } from '../../src/lib/project/source-archive'
-import { submissionDocxConfig, submissionDocxIds } from '../../src/lib/project/submission-docx-config'
+import { submissionDocxConfig } from '../../src/lib/project/submission-docx-config'
 import { docxFields, docxFixture, docxLongTableManuscript, docxManuscript } from './fixtures/submission-docx'
 import { replaceProjectSource } from './support/official-template'
 
+const submissionDocxIds = ['zju-basic-medicine-undergraduate', 'suep-undergraduate'] as const
 const fixtures = process.env.RESEARCH_TEMPLATE_PINNED_FIXTURES
 const nativeWord = process.env.RESEARCH_DOCX_WORD_NATIVE === '1'
 const ns = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'

@@ -8,7 +8,7 @@ import { templateDigest } from './paper-templates'
 import { isProjectPath } from './source-archive'
 import { prepareSubmission } from './submission'
 import { captureManuscript } from './template-export'
-import { submissionDocxFields, submissionDocxIdSchema, type SubmissionDocxFields } from './submission-docx-config'
+import { submissionDocxFieldSchema, submissionDocxIdSchema, type SubmissionDocxFields, type SubmissionDocxId } from './submission-docx-config'
 import type { ProjectFileSystem } from './types'
 
 export const submissionDocxMime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
@@ -24,7 +24,8 @@ const finding = z.object({
 export type DocxFinding = z.infer<typeof finding>
 export const submissionDocxDeliveryInfo = z.object({
   id: z.uuid(), createdAt: date, name: z.string().min(1).max(100), main: path,
-  template: z.object({ id: submissionDocxIdSchema, name: z.string(), version: z.string(), sha256: digest, sourceUrl: z.url() }),
+  template: z.object({ id: submissionDocxIdSchema, name: z.string(), version: z.string(), sha256: digest, sourceUrl: z.url(),
+    declarationSha256: digest.optional(), declarationUrl: z.url().optional() }),
   snapshotSha256: digest, source: artifact, generated: artifact, final: artifact.optional(),
   check: z.object({ checkedAt: date, findings: z.array(finding).refine(items => items.every(item => item.status === 'manual')) }),
 })
@@ -33,9 +34,9 @@ export type SubmissionDocxDelivery = SubmissionDocxDeliveryInfo & { sourceZip: B
 
 export const wordReviewFinding: DocxFinding = { status: 'manual', message: '在 Word 更新整个目录和引用字段，保存后重开核对。归档可以附上作者在 Word 保存的文件。' }
 
-export function checkDocxSubmission(project: ProjectFileSystem, main: string, fields: SubmissionDocxFields) {
+export function checkDocxSubmission(project: ProjectFileSystem, main: string, fields: SubmissionDocxFields, school?: SubmissionDocxId) {
   const findings: DocxFinding[] = []
-  const parsed = submissionDocxFields.safeParse(fields)
+  const parsed = submissionDocxFieldSchema(school).safeParse(fields)
   if (!parsed.success) for (const issue of parsed.error.issues) {
     findings.push({ status: 'blocking', field: String(issue.path[0]), message: '请填写有效的内容。' })
   }
@@ -114,7 +115,8 @@ export async function verifyWordFinal(file: File, delivery: Pick<SubmissionDocxD
   if (!zip.file('word/document.xml')) throw new Error('文件缺少 DOCX 正文。')
   const properties = new DOMParser().parseFromString(await readDocxPart(zip, 'docProps/core.xml'), 'application/xml')
   const provenance = properties.getElementsByTagNameNS('http://purl.org/dc/elements/1.1/', 'description')[0]?.textContent?.split(/\r?\n/) ?? []
-  if (![template.name + ' · ' + template.version, '官方原件 SHA-256 ' + template.sha256, '稿件快照 SHA-256 ' + snapshotSha256, '交付标识 ' + id]
+  if (![template.name + ' · ' + template.version, '官方原件 SHA-256 ' + template.sha256, '稿件快照 SHA-256 ' + snapshotSha256, '交付标识 ' + id,
+    ...(template.declarationSha256 ? ['官方声明 SHA-256 ' + template.declarationSha256, '正式归档阶段 njupt-deposit'] : [])]
     .every(value => provenance.includes(value))) throw new Error('这份文件的交付标识、模板或稿件快照与本次导出不匹配。请使用从本次导出文件另存的 DOCX。')
   const metadata = await docxDeliveryArtifact(file, file.name.normalize('NFC'))
   if (metadata.sha256 === delivery.generated?.sha256) throw new Error('请选择在 Word 更新并另存后的文件。当前文件与生成稿完全相同。')

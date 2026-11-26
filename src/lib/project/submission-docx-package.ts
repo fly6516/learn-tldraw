@@ -1,5 +1,6 @@
 import { DOMParser, XMLSerializer, type Document, type Element } from '@xmldom/xmldom'
 import JSZip from 'jszip'
+import { fillNjuptCoverNodes } from './official-thesis-front'
 import { fillZjuCoverNodes } from './zju-export-cover'
 import { chineseChapterNumber, type WordHeading, type WordToken } from './docx-manuscript'
 import type { SubmissionDocxFields, SubmissionDocxId } from './submission-docx-config'
@@ -141,9 +142,12 @@ async function copyLinkedContent(target: JSZip, targetRels: Document, targetType
   }
 }
 
-function styleDocument(styles: Document, zju: boolean, bodySection: Element) {
+const njuptHeading = ['2', '33', '34']
+const runningTitleStyle = 'WbxRunningTitle'
+const njuptToc = ['18', '20', '14']
+function styleDocument(styles: Document, zju: boolean, bodySection: Element, njupt: boolean) {
   const root = styles.documentElement!
-  const base = zju ? 'af8' : 'Normal'
+  const base = zju ? 'af8' : njupt ? '1' : 'Normal'
   const mainSize = '24'
   function add(id: string, size: string, spacing: string, font: string, options: { center?: boolean; bold?: boolean; indent?: boolean; outline?: boolean; keep?: boolean } = {}) {
     const style = el(styles, 'style', { type: 'paragraph', styleId: id, customStyle: '1' })
@@ -163,7 +167,7 @@ function styleDocument(styles: Document, zju: boolean, bodySection: Element) {
     fontProps.appendChild(el(styles, 'szCs', { val: size }))
     root.appendChild(style)
   }
-  add('WbxBody', mainSize, zju ? '360' : '300', zju ? '仿宋' : '宋体', { indent: true })
+  add('WbxBody', mainSize, zju || njupt ? '360' : '300', zju ? '仿宋' : '宋体', { indent: true })
   add('WbxCaption', '21', '240', '宋体', { bold: zju, center: true })
   add('WbxTableCaption', '21', '240', '宋体', { bold: zju, center: true, keep: true })
   add('WbxLongTableCaption', '21', '240', '宋体', { bold: zju, center: true, keep: true })
@@ -173,7 +177,7 @@ function styleDocument(styles: Document, zju: boolean, bodySection: Element) {
   add('WbxFrontTitle', '30', '360', zju ? '仿宋' : '黑体', { center: true, bold: true, keep: true })
   add('WbxKeywords', '24', '360', zju ? '仿宋' : '宋体')
   add('WbxBibliography', '21', '240', '宋体')
-  add('WbxBibliographyHeading', zju ? '32' : '30', '360', zju ? '仿宋' : '黑体', { center: true, bold: true, outline: true, keep: true })
+  add('WbxBibliographyHeading', zju ? '32' : njupt ? '36' : '30', '360', zju ? '仿宋' : '黑体', { center: true, bold: true, outline: true, keep: true })
   add('WbxEquation', mainSize, '360', '宋体')
   const equationStyle = all(styles, 'style').find(style => val(style, 'styleId') === 'WbxEquation')!
   const equationParagraph = first(equationStyle, 'pPr')
@@ -188,7 +192,7 @@ function styleDocument(styles: Document, zju: boolean, bodySection: Element) {
     const id = 'WbxAppendix' + level
     const style = el(styles, 'style', { type: 'paragraph', styleId: id, customStyle: '1' })
     style.appendChild(el(styles, 'name', { val: id }))
-    style.appendChild(el(styles, 'basedOn', { val: zju ? String(level) : 'Heading' + level }))
+    style.appendChild(el(styles, 'basedOn', { val: zju ? String(level) : njupt ? njuptHeading[level - 1] : 'Heading' + level }))
     const paragraph = prop(style, 'pPr')
     const numbering = el(styles, 'numPr')
     numbering.appendChild(el(styles, 'numId', { val: '0' }))
@@ -196,9 +200,16 @@ function styleDocument(styles: Document, zju: boolean, bodySection: Element) {
     paragraph.appendChild(el(styles, 'outlineLvl', { val: String(level - 1) }))
     root.appendChild(style)
   }
-  const tocStyles = all(styles, 'style').filter(style => /^TOC[1-3]$/.test(val(style, 'styleId') ?? ''))
-  const firstLevel = tocStyles.find(style => val(style, 'styleId') === 'TOC1')
-  const pageTab = firstLevel && all(firstLevel, 'tab').find(node => val(node) === 'right')
+  const tocIds = njupt ? njuptToc : ['TOC1', 'TOC2', 'TOC3']
+  const tocStyles = all(styles, 'style').filter(style => tocIds.includes(val(style, 'styleId') ?? ''))
+  const firstLevel = tocStyles.find(style => val(style, 'styleId') === tocIds[0])
+  const pageTab = njupt ? el(styles, 'tab', { val: 'right', leader: 'dot', pos: String(width) })
+    : firstLevel && all(firstLevel, 'tab').find(node => val(node) === 'right')
+  if (njupt) {
+    const marker = el(styles, 'style', { type: 'character', styleId: runningTitleStyle, customStyle: '1' })
+    marker.appendChild(el(styles, 'name', { val: runningTitleStyle }))
+    root.appendChild(marker)
+  }
   if (pageTab) for (const style of tocStyles) {
     const properties = prop(style, 'pPr')
     if (all(properties, 'tab').some(node => val(node) === 'right')) continue
@@ -207,9 +218,9 @@ function styleDocument(styles: Document, zju: boolean, bodySection: Element) {
         'bidi', 'adjustRightInd', 'snapToGrid', 'spacing', 'ind', 'contextualSpacing', 'jc', 'outlineLvl'].includes(node.localName ?? '')) ?? null) as Element
     tabs.appendChild(pageTab.cloneNode(true))
   }
-  if (!zju) for (const [index, size] of ['30', '28', '24'].entries()) {
-    const original = all(styles, 'style').find(node => val(node, 'styleId') === 'Heading' + (index + 1))
-    if (!original) throw new Error('上电示范原件缺少标题样式。')
+  if (!zju) for (const [index, size] of (njupt ? ['36', '30', '28'] : ['30', '28', '24']).entries()) {
+    const original = all(styles, 'style').find(node => val(node, 'styleId') === (njupt ? njuptHeading[index] : 'Heading' + (index + 1)))
+    if (!original) throw new Error('官方原件缺少标题样式。')
     const p = prop(original, 'pPr')
     const ordered = (name: string, later: readonly string[]) => first(p, name) ?? p.insertBefore(el(styles, name),
       children(p).find(child => later.includes(child.localName ?? '')) ?? null) as Element
@@ -221,20 +232,26 @@ function styleDocument(styles: Document, zju: boolean, bodySection: Element) {
     set(spacing, 'before', index === 0 ? '0' : '120')
     set(spacing, 'after', index === 0 ? '120' : '0')
     set(ordered('jc', afterAlignment), 'val', index === 0 ? 'center' : 'left')
+    if (njupt) set(prop(p, 'outlineLvl'), 'val', String(index))
     if (index === 2) set(ordered('ind', afterIndent), 'left', '480')
     const formatting = prop(original, 'rPr')
-    set(prop(formatting, 'rFonts'), 'eastAsia', '黑体')
+    const fonts = first(formatting, 'rFonts') ?? formatting.insertBefore(el(styles, 'rFonts'), formatting.firstChild) as Element
+    set(fonts, 'eastAsia', njupt && index === 1 ? '宋体' : '黑体')
+    if (njupt) {
+      set(fonts, 'ascii', 'Times New Roman')
+      set(fonts, 'hAnsi', 'Times New Roman')
+    }
     const bold = prop(formatting, 'b')
     const fontSize = first(formatting, 'sz')
     if (fontSize) formatting.insertBefore(bold, fontSize)
-    set(bold, 'val', 'true')
+    set(bold, 'val', njupt && index === 2 ? 'false' : 'true')
     set(prop(formatting, 'sz'), 'val', size)
     set(prop(formatting, 'szCs'), 'val', size)
   }
 
 }
 
-function remapParagraphs(nodes: Element[], doc: Document, zju: boolean, numberingId: string, tokens: ReadonlyMap<string, WordToken>) {
+function remapParagraphs(nodes: Element[], doc: Document, zju: boolean, numberingId: string, tokens: ReadonlyMap<string, WordToken>, njupt: boolean) {
   for (const node of nodes) for (const p of node.localName === 'p' ? [node, ...all(node, 'p')] : all(node, 'p')) {
     let pr = first(p, 'pPr')
     if (!pr) {
@@ -250,7 +267,7 @@ function remapParagraphs(nodes: Element[], doc: Document, zju: boolean, numberin
         if (level === '1') pageBreak(p)
         continue
       }
-      set(style, 'val', zju ? level : 'Heading' + level)
+      set(style, 'val', zju ? level : njupt ? njuptHeading[Number(level) - 1] : 'Heading' + level)
       if (level === '1') pageBreak(p)
       const num = el(doc, 'numPr')
       num.appendChild(el(doc, 'ilvl', { val: String(Number(level) - 1) }))
@@ -327,7 +344,7 @@ function repeatLongTableTitles(doc: Document, nodes: Element[]) {
   return moved
 }
 
-function assignTokens(doc: Document, tokens: ReadonlyMap<string, WordToken>, zju: boolean) {
+function assignTokens(doc: Document, tokens: ReadonlyMap<string, WordToken>, separator: string) {
   let number = Math.max(0, ...all(doc, 'bookmarkStart').map(node => Number(val(node, 'id')) || 0))
   const seen = new Set<string>()
   for (const element of all(doc, 't')) {
@@ -355,7 +372,7 @@ function assignTokens(doc: Document, tokens: ReadonlyMap<string, WordToken>, zju
     } else if (token.kind === 'caption') {
       const restart = !/^\d+$/.test(token.chapter) && token.sequence === 1 ? ' \\r 1' : ' \\s 1'
       result.push(run(doc, token.object === 'Figure' ? '图 ' : '表 '), ...anchor(token.bookmark, [
-        run(doc, String(token.chapter) + (zju ? '.' : '-')),
+        run(doc, String(token.chapter) + separator),
         field(doc, 'SEQ Wbx' + token.object + restart, String(token.sequence)),
       ]), run(doc, '　'))
     } else if (token.kind === 'equation') {
@@ -364,7 +381,7 @@ function assignTokens(doc: Document, tokens: ReadonlyMap<string, WordToken>, zju
       parent.insertBefore(tabRun(doc), formula)
       const restart = !/^\d+$/.test(token.chapter) && token.sequence === 1 ? ' \\r 1' : ' \\s 1'
       result.push(tabRun(doc), run(doc, '（'), ...anchor(token.bookmark, [
-        run(doc, token.chapter + (zju ? '.' : '-')),
+        run(doc, token.chapter + separator),
         field(doc, 'SEQ WbxEquation' + restart, String(token.sequence)),
       ]), run(doc, '）'))
     } else if (token.kind === 'bibliography') {
@@ -390,14 +407,14 @@ function assignTokens(doc: Document, tokens: ReadonlyMap<string, WordToken>, zju
   if (seen.size !== tokens.size) throw new Error('一个或多个目录、题注或引用字段在转换时丢失。')
 }
 
-function tableOfContents(doc: Document, headings: WordHeading[], zju: boolean) {
+function tableOfContents(doc: Document, headings: WordHeading[], zju: boolean, njupt: boolean) {
   const fields = (kind: string, instruction?: string) => {
     const row = el(doc, 'r')
     row.appendChild(instruction ? el(doc, 'instrText', {}, instruction) : el(doc, 'fldChar', { fldCharType: kind }))
     return row
   }
   return headings.map((heading, index) => {
-    const row = para(doc, 'TOC' + heading.level)
+    const row = para(doc, njupt ? njuptToc[heading.level - 1] : 'TOC' + heading.level)
     if (index === 0) {
       row.appendChild(fields('begin'))
       row.appendChild(fields('', 'TOC \\o "1-3" \\h \\z \\u'))
@@ -456,7 +473,7 @@ async function discardUnusedParts(zip: JSZip, rels: Document, document: Document
   save(zip, '[Content_Types].xml', types)
 }
 
-async function documentNumbering(zip: JSZip, zju: boolean) {
+async function documentNumbering(zip: JSZip, zju: boolean, njupt: boolean) {
   const numbering = await readXml(zip, 'word/numbering.xml')
   const number = all(numbering, 'num').find(item => val(item, 'numId') === '1')
   const abstract = number && all(numbering, 'abstractNum').find(item => val(item, 'abstractNumId') === val(first(number, 'abstractNumId')))
@@ -469,6 +486,7 @@ async function documentNumbering(zip: JSZip, zju: boolean) {
       set(first(level, 'lvlText'), 'val', rank === 0 ? '第%1章' : ['%1', '%2', '%3'].slice(0, rank + 1).join('.'))
       if (rank > 0 && !first(level, 'isLgl')) level.insertBefore(el(numbering, 'isLgl'), first(level, 'suff') ?? first(level, 'lvlText'))
     }
+    if (njupt && rank === 1) strip(level, ['rPr'])
     const suffix = first(level, 'suff') ?? level.insertBefore(el(numbering, 'suff'), first(level, 'lvlText')) as Element
     set(suffix, 'val', 'space')
   }
@@ -483,6 +501,7 @@ export async function fillSubmissionDocx(opts: {
 }) {
   const { fields, tokens, headings } = opts
   const zju = opts.id === 'zju-basic-medicine-undergraduate'
+  const njupt = opts.id === 'njupt-professional-masters'
   const zip = await JSZip.loadAsync(opts.original)
   const draft = await JSZip.loadAsync(opts.draft)
   const doc = await readXml(zip, main)
@@ -495,18 +514,19 @@ export async function fillSubmissionDocx(opts: {
   const frontLimit = raw.findIndex(item => text(item) === 'WbxStartBodyX')
   const bibliographyStart = raw.findIndex(item => text(item) === 'WbxStartBibliographyX')
   const appendixStart = raw.findIndex(item => text(item) === 'WbxStartAppendicesX')
+  const acknowledgmentStart = njupt ? raw.findIndex(item => text(item) === 'WbxStartAcknowledgmentX') : -1
   if (frontLimit < 1 || bibliographyStart <= frontLimit || appendixStart <= bibliographyStart) throw new Error('无法定位稿件的摘要、正文、参考文献和附录。')
   const imported = raw.map(item => doc.importNode(item, true))
   await copyLinkedContent(zip, rels, types, draft, imported, 'Body')
   for (const item of imported) strip(item, ['bookmarkStart', 'bookmarkEnd'])
 
-  const bodySection = zju ? parts[150] && first(parts[150], 'sectPr') : parts.at(-1)
+  const bodySection = zju ? parts[150] && first(parts[150], 'sectPr') : njupt ? first(parts[176], 'sectPr') : parts.at(-1)
   if (!bodySection || bodySection.localName !== 'sectPr') throw new Error('官方原件缺少正文分节。')
-  styleDocument(styles, zju, bodySection)
+  styleDocument(styles, zju, bodySection, njupt)
   save(zip, 'word/styles.xml', styles)
-  remapParagraphs(imported, doc, zju, await documentNumbering(zip, zju), tokens)
+  remapParagraphs(imported, doc, zju, await documentNumbering(zip, zju, njupt), tokens, njupt)
   const repeatedTitles = repeatLongTableTitles(doc, imported)
-  const firstHeading = imported.slice(frontLimit + 1).find(item => /^(?:1|Heading1)$/.test(val(first(item, 'pStyle')) ?? ''))
+  const firstHeading = imported.slice(frontLimit + 1).find(item => val(first(item, 'pStyle')) === (zju ? '1' : njupt ? njuptHeading[0] : 'Heading1'))
   if (firstHeading) strip(firstHeading, ['pageBreakBefore'])
   const selected: Element[] = []
   let ending: Element
@@ -525,12 +545,19 @@ export async function fillSubmissionDocx(opts: {
     tocHeadings.push({ level: 1, number: '', title, bookmark })
     tail.push(heading, ...content)
   }
-  if (!zju && fields.acknowledgment) backMatter('致谢', 'WbxAcknowledgment',
+  if (njupt && bibliographyStart < appendixStart - 1) backMatter('参考文献', 'WbxBibliography', imported.slice(bibliographyStart + 1, appendixStart))
+  if (!zju && !njupt && fields.acknowledgment) backMatter('致谢', 'WbxAcknowledgment',
     fields.acknowledgment.split(/\n+/).filter(Boolean).map(value => para(doc, 'WbxBody', value)))
-  if (bibliographyStart < appendixStart - 1) backMatter('参考文献', 'WbxBibliography', imported.slice(bibliographyStart + 1, appendixStart))
+  if (!njupt && bibliographyStart < appendixStart - 1) backMatter('参考文献', 'WbxBibliography', imported.slice(bibliographyStart + 1, appendixStart))
   tocHeadings.push(...headings.filter(item => item.appendix))
-  tail.push(...imported.slice(appendixStart + 1))
-  const toc = tableOfContents(doc, tocHeadings, zju)
+  tail.push(...imported.slice(appendixStart + 1, acknowledgmentStart < 0 ? undefined : acknowledgmentStart))
+  if (njupt && (acknowledgmentStart >= 0 || fields.acknowledgment)) {
+    if (acknowledgmentStart >= 0 && fields.acknowledgment?.trim()) throw new Error('当前稿件已有致谢。请清空导出表单中的致谢，或在原稿中统一编辑。')
+    const paragraphs = acknowledgmentStart >= 0 ? imported.slice(acknowledgmentStart + 1)
+      : fields.acknowledgment!.split(/\n+/).filter(Boolean).map(value => para(doc, 'WbxBody', value))
+    backMatter('致谢', 'WbxAcknowledgment', paragraphs)
+  }
+  const toc = tableOfContents(doc, tocHeadings, zju, njupt)
   if (zju) {
     if (!text(parts[15]).includes('原创性声明') || !text(parts[39]).includes('目录') || !first(parts[150], 'sectPr')) {
       throw new Error('浙大原件的封面、声明或正文分节与登记版不同。')
@@ -574,6 +601,57 @@ export async function fillSubmissionDocx(opts: {
       }
       save(zip, file.name, header)
     }
+  } else if (njupt) {
+    if (!opts.declaration || !text(parts[65]).includes('摘要') || !text(parts[74]).includes('目录')) {
+      throw new Error('南邮中英文封面、声明或正文示范与登记版不同。')
+    }
+    const cover = fillNjuptCoverNodes(parts, {
+      ...fields, title: opts.englishTitle, chineseTitle: fields.title, name: fields.author, declarations: true,
+    }, true)
+    strip(cover[1], ['lastRenderedPageBreak'])
+    replaceText(cover[1], '单位代码：  10293   密  级：' + (fields.confidentiality === 'restricted' ? '涉密' : '公开'))
+    strip(parts[22], ['pageBreakBefore'])
+    pageBreak(parts[22])
+    const declaration = await JSZip.loadAsync(opts.declaration)
+    const declarationNodes = children(first(await readXml(declaration, main), 'body')).map(node => doc.importNode(node, true))
+    const declarationSection = declarationNodes.pop()
+    if (declarationSection?.localName !== 'sectPr' || !text(declarationNodes[0]).includes('原创性声明') ||
+      !declarationNodes.some(node => text(node).includes('使用授权声明'))) throw new Error('南邮官方声明结构与登记版不同。')
+    for (const node of declarationNodes) strip(node, ['lastRenderedPageBreak'])
+    pageBreak(declarationNodes[0])
+    strip(declarationSection, ['docGrid'])
+    await copyLinkedContent(zip, rels, types, declaration, declarationNodes, 'Declaration')
+    const roman = first(parts[135], 'sectPr').cloneNode(true) as Element
+    strip(roman, ['docGrid'])
+    const chineseTitle = para(doc, '50', '摘要')
+    const englishTitle = para(doc, '50', 'Abstract')
+    const tocTitle = para(doc, '50', '目录')
+    pageBreak(englishTitle)
+    pageBreak(tocTitle)
+    prop(toc.at(-1)!, 'pPr').appendChild(roman)
+    selected.push(...cover, ...declarationNodes, sectionEnd(doc, declarationSection), chineseTitle, ...cnSummary, cnKeywords,
+      englishTitle, ...imported.slice(0, frontLimit), enKeywords, tocTitle, ...toc)
+    ending = bodySection.cloneNode(true) as Element
+    const footer = first(roman, 'footerReference')
+    ending.insertBefore(footer.cloneNode(true), first(ending, 'pgSz'))
+    const header = await readXml(zip, 'word/header2.xml')
+    const headerParagraph = first(header, 'p')
+    const rightTab = all(headerParagraph, 'tab').find(node => val(node) === 'right' && Number(val(node, 'pos')) > 0)
+    if (rightTab) set(rightTab, 'pos', String(Number(val(first(ending, 'pgSz'), 'w')) -
+      Number(val(first(ending, 'pgMar'), 'left')) - Number(val(first(ending, 'pgMar'), 'right'))))
+    for (const node of children(headerParagraph)) if (node.localName !== 'pPr') headerParagraph.removeChild(node)
+    const headerText = run(header, '南京邮电大学专业学位硕士研究生学位论文')
+    const heading = field(header, 'STYLEREF ' + runningTitleStyle, headings[0]?.title ?? '')
+    for (const node of [headerText, first(heading, 'r')]) {
+      const format = el(header, 'rPr')
+      format.appendChild(el(header, 'rFonts', { ascii: 'Times New Roman', hAnsi: 'Times New Roman', eastAsia: '黑体' }))
+      format.appendChild(el(header, 'sz', { val: '21' }))
+      node.insertBefore(format, node.firstChild)
+    }
+    headerParagraph.appendChild(headerText)
+    headerParagraph.appendChild(tabRun(header))
+    headerParagraph.appendChild(heading)
+    save(zip, 'word/header2.xml', header)
   } else {
     if (!opts.cover || !opts.declaration || !text(parts[1]).replace(/\s/g, '').includes('摘要') || !first(parts[33], 'sectPr')) {
       throw new Error('上电封面、声明或正文示范与登记版不同。')
@@ -620,7 +698,14 @@ export async function fillSubmissionDocx(opts: {
   strip(ending, ['docGrid'])
   body.appendChild(ending)
   strip(body, ['commentRangeStart', 'commentRangeEnd', 'commentReference', 'proofErr'])
-  assignTokens(doc, tokens, zju)
+  assignTokens(doc, tokens, opts.id === 'suep-undergraduate' ? '-' : '.')
+  if (njupt) for (const paragraph of children(body)) {
+    if (![njuptHeading[0], 'WbxBibliographyHeading', 'WbxAppendix1'].includes(val(first(paragraph, 'pStyle')) ?? '')) continue
+    for (const titleRun of all(paragraph, 'r').filter(item => text(item).trim())) {
+      const formatting = first(titleRun, 'rPr') ?? titleRun.insertBefore(el(doc, 'rPr'), titleRun.firstChild) as Element
+      formatting.insertBefore(el(doc, 'rStyle', { val: runningTitleStyle }), formatting.firstChild)
+    }
+  }
   Array.from(doc.getElementsByTagNameNS(drawing, 'docPr')).forEach((item, index) => item.setAttribute('id', String(index + 1)))
   if (doc.getElementsByTagNameNS(math, 'oMath').length < opts.math || all(body, 'tbl').length < opts.tables ||
     imported.reduce((count, item) => count + all(item, 'drawing').length, 0) !== opts.images) {
@@ -633,7 +718,7 @@ export async function fillSubmissionDocx(opts: {
   strip(root, ['footnote', 'endnote'])
   // Word asks about external links on open when this option is set, even for
   // the local TOC and bookmark fields. Let authors request a field refresh explicitly.
-  strip(root, ['updateFields'])
+  strip(root, njupt ? ['updateFields', 'evenAndOddHeaders'] : ['updateFields'])
   save(zip, 'word/settings.xml', settings)
   const core = await readXml(zip, 'docProps/core.xml')
   const coreRoot = core.documentElement!

@@ -1,7 +1,8 @@
 import { z } from 'zod'
+import { thesisDate } from './official-thesis-front'
 import { templateCatalog } from './template-catalog'
 
-export const submissionDocxIds = ['zju-basic-medicine-undergraduate', 'suep-undergraduate'] as const
+export const submissionDocxIds = ['zju-basic-medicine-undergraduate', 'suep-undergraduate', 'njupt-professional-masters'] as const
 export const submissionDocxIdSchema = z.enum(submissionDocxIds)
 export type SubmissionDocxId = z.infer<typeof submissionDocxIdSchema>
 const reviewedInWord = '已通过 Microsoft Word 16.115.2（macOS）实机验收'
@@ -12,9 +13,19 @@ export const submissionDocxFields = z.object({
   program: line(40), affiliation: line(40), date: line(30),
   chineseAbstract: z.string().trim().min(1).max(5000), chineseKeywords: line(250),
   englishKeywords: line(250), acknowledgment: z.string().trim().max(5000).optional(),
+  degree: line(40).optional(), englishDegree: line(80).optional(), englishAdvisor: line(80).optional(),
+  studyMode: z.enum(['full-time', 'part-time']).optional(),
   confidentiality: z.enum(['public', 'restricted']).default('public'),
 })
 export type SubmissionDocxFields = z.input<typeof submissionDocxFields>
+
+export function submissionDocxFieldSchema(id?: SubmissionDocxId) {
+  return id !== 'njupt-professional-masters' ? submissionDocxFields : submissionDocxFields.extend({
+    affiliation: line(40).optional().or(z.literal('')), degree: line(40), englishDegree: line(80),
+    englishAdvisor: line(80), studyMode: z.enum(['full-time', 'part-time']),
+    date: line(30).refine(value => { try { thesisDate(value); return true } catch { return false } }),
+  })
+}
 
 export const suepDocxMembers = {
   guide: { name: '6.上海电力大学本科生毕业设计（论文）撰写规范.docx', sha256: '349dd0189406227e776fac8197c479dba80bc1b0679a9002821dae014d3804a4' },
@@ -26,6 +37,10 @@ export const suepDocxMembers = {
 export function submissionDocxConfig(id: SubmissionDocxId) {
   const entry = templateCatalog.find(entry => entry.id === id)!
   const workflow = entry.workflow
+  if (id === 'njupt-professional-masters' && workflow.kind === 'word' && workflow.declaration) {
+    return { id, name: entry.name, version: workflow.version, sourceUrl: entry.sourceUrl!, original: workflow.original,
+      declaration: workflow.declaration, requirementsUrl: entry.requirementsUrl, stage: 'njupt-deposit', status: reviewedInWord }
+  }
   if (workflow.kind === 'word' && workflow.guideline) {
     return { id, name: entry.name, version: workflow.version, sourceUrl: entry.sourceUrl!, original: workflow.original,
       guideline: workflow.guideline, status: reviewedInWord }

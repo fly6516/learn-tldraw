@@ -1,11 +1,14 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { createHash } from 'node:crypto'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import JSZip from 'jszip'
 import sharp from 'sharp'
 import { decodeProjectBackup, encodeProjectBackup } from '../../src/lib/project/backup'
 import { emptyCanvas } from '../../src/lib/project/research-graph'
+import { submissionDocxConfig } from '../../src/lib/project/submission-docx-config'
 import { submissionMaterialPath } from '../../src/lib/project/submission-materials'
 import { importSourceArchive } from '../../src/lib/project/source-archive'
 import { externalTexCommand } from '../fixtures/external-tex'
@@ -1264,15 +1267,18 @@ for (const pilot of ['njupt', 'agu'] as const) {
   test('validates ' + pilot + ' submission stage delivery and archival against the original build', async ({ page }, info) => {
     const fixtures = process.env.RESEARCH_TEMPLATE_PINNED_FIXTURES
     test.skip(acceptance !== '1' || !fixtures, 'Requires pinned originals, loopback compile and an external TeX installation.')
-    test.setTimeout(300_000)
+    test.setTimeout(420_000)
     const output = info.outputPath('delivery')
     await mkdir(output, { recursive: true })
     const njupt = pilot === 'njupt'
     const id = njupt ? 'njupt-professional-masters' : 'agu-jgr-atmospheres'
+    const nativeWord = njupt && process.env.RESEARCH_DOCX_WORD_NATIVE === '1'
+    const studySource = nativeWord ? study + Array.from({ length: 30 }, (_, i) =>
+      `\n\\subsection{Protocol series ${i + 1}}\nA sample was measured for this protocol.\n\\subsubsection{Control ${i + 1}}\nThe result was checked against an independent reference.\n`).join('') : study
     const originalResults = njupt ? results + '\n\\section*{Acknowledgments}\nCasey Lin thanks the instrumentation team.\n' : results
     await page.goto('/research')
     await page.getByLabel('Choose project ZIP or backup').setInputFiles({
-      name: 'submission-stage.research-canvas', mimeType: 'application/zip', buffer: await seedProject(study, originalResults),
+      name: 'submission-stage.research-canvas', mimeType: 'application/zip', buffer: await seedProject(studySource, originalResults),
     })
     await page.getByRole('button', { name: 'Import as new project', exact: true }).click()
     await page.waitForURL(url => url.searchParams.has('project'))
@@ -1348,6 +1354,15 @@ for (const pilot of ['njupt', 'agu'] as const) {
 
     await open.click()
     await choose.selectOption(first)
+    if (njupt) await expect(dialog.getByRole('button', { name: '导出 Word（DOCX）' })).toHaveCount(0)
+    if (nativeWord) {
+      const rejected = await page.request.post('/api/word/import', {
+        headers: { origin: new URL(page.url()).origin },
+        multipart: { intent: 'export-submission-docx', school: id, stage: 'njupt-blind' },
+      })
+      expect(rejected.status()).toBe(422)
+      expect((await rejected.json()).error).toContain('盲审请使用匿名 PDF')
+    }
     const firstCompileSha = await compileAndInspect()
     const confirmRule = njupt ? '图表、成果及隐藏身份信息' : '初投稿系统信息'
     await dialog.getByRole('checkbox', { name: '人工确认 · ' + confirmRule, exact: true }).check()
@@ -1372,20 +1387,36 @@ for (const pilot of ['njupt', 'agu'] as const) {
     await close()
 
     const marker = 'This paragraph belongs to the revised manuscript only.'
-    await replaceProjectSource(page, 'sections/study.tex', study + '\n' + marker + '\n')
+    await replaceProjectSource(page, 'sections/study.tex', studySource + '\n' + marker + '\n')
     await expect(page.getByText(/1 local draft/)).toBeVisible()
+    const beforeDocx = nativeWord && await backup(page, join(output, 'before-deposit.research-canvas'))
     await open.click()
     await expect(dialog.getByText(/稿件已修改。请重新编译/)).toBeVisible()
     await expect(download).toHaveCount(0)
     await expect(dialog.getByRole('button', { name: 'Save submission version' })).toHaveCount(0)
     await verifyArchive(legacyTitle, first, initial)
+    const draftSource = dialog.getByRole('radio', { name: /Include local drafts/ })
+    let blindFromDepositSnapshot: string | undefined
+    if (nativeWord) {
+      await draftSource.check()
+      await compileAndInspect()
+      const matching = join(output, 'same-snapshot-blind')
+      await mkdir(matching, { recursive: true })
+      const anonymous = await readDelivery(page, download, matching, first)
+      blindFromDepositSnapshot = anonymous.report.delivery.snapshotSha256
+      const anonymousText = pdfText(join(matching, first + '.pdf'), matching)
+      expect(anonymousText).toContain(marker)
+      for (const secret of ['Casey Lin', '20260001', 'Ming Li', '原创性声明', '使用授权声明', 'instrumentation team',
+        'Thesis Submitted to Nanjing University']) expect(anonymousText).not.toContain(secret)
+    }
     await choose.selectOption(second)
-    await dialog.getByRole('radio', { name: /Include local drafts/ }).check()
+    await draftSource.check()
     const secondCompileSha = await compileAndInspect()
     const revised = await readDelivery(page, download, output, second)
     expect(revised.source).toBe(secondCompileSha)
     expect(revised.report.delivery.buildId).not.toBe(initial.report.delivery.buildId)
     expect(revised.report.delivery.snapshotSha256).not.toBe(initial.report.delivery.snapshotSha256)
+    if (blindFromDepositSnapshot) expect(revised.report.delivery.snapshotSha256).toBe(blindFromDepositSnapshot)
     expect(revised.report.templateOrigin).toEqual(initial.report.templateOrigin)
     expect(revised.report.confirmed).toEqual([])
     expect(pdfText(join(output, second + '.pdf'), output)).toContain(marker)
@@ -1405,6 +1436,10 @@ for (const pilot of ['njupt', 'agu'] as const) {
     const local = dialog.getByRole('region', { name: '本地核验材料' })
     await expect(local.getByRole('button', { name: '下载交付包' })).toBeVisible()
     let updated: typeof revised | undefined
+    let finalDigest: string | undefined
+    let initialDocx: Buffer | undefined
+    const docxArchiveName = '南邮正式归档 Word 验收'
+    const attachableWord = join(output, 'njupt-deposit-word-final.docx')
     const replacementArchive = 'Verified AGU replacement attachment'
     if (njupt) {
       const fonts = revised.report.findings.find(item => item.ruleId === 'deposit-embedded-fonts')
@@ -1414,8 +1449,65 @@ for (const pilot of ['njupt', 'agu'] as const) {
       if (process.env.RESEARCH_NJUPT_REQUIRE_DEPOSIT_FONTS === '1') expect(fonts?.status, fonts?.detail).toBe('pass')
       if (fonts?.status === 'issue') await expect(formal).toContainText('材料待核对')
       await expect(formal.getByRole('button', { name: '下载稿件 PDF' })).toBeVisible()
-      await formal.getByLabel('正式归档 Word').setInputFiles(join(fixtures!, 'independent.docx'))
-      await expect(formal.getByRole('button', { name: 'independent.docx' })).toBeVisible()
+      if (nativeWord) {
+        await dialog.getByRole('button', { name: '导出 Word（DOCX）' }).click()
+        const form = dialog.getByRole('form', { name: '导出 Word（DOCX）' })
+        await expect(form.getByRole('combobox', { name: '目标学校' })).toHaveValue('njupt-professional-masters')
+        await expect(form.getByLabel('中文题目')).toHaveValue('三组测量通道的可复现校准')
+        await form.getByLabel('英文关键词').fill('calibration; measurements; reproducibility')
+        // Offline/unavailable attachment fallback and pin mismatch are both exercised in the real form.
+        await page.route(url => url.pathname === '/api/templates/source' && url.searchParams.get('asset') === 'declaration',
+          route => route.fulfill({ status: 502, json: { error: 'Official source unavailable in acceptance test' } }), { times: 1 })
+        const generate = form.getByRole('button', { name: '生成并下载 DOCX' })
+        await generate.click()
+        await expect(form.getByRole('alert')).toContainText('手动上传官方原件')
+        await form.getByText('手动上传官方原件', { exact: true }).click()
+        await form.getByLabel('官方 Word', { exact: true }).setInputFiles(join(fixtures!, 'njupt-professional-masters.doc'))
+        await form.getByLabel('官方声明 Word').setInputFiles(join(fixtures!, 'njupt-academic-masters.doc'))
+        await generate.click()
+        await expect(form.getByRole('alert')).toContainText('SHA-256')
+        await form.getByLabel('官方声明 Word').setInputFiles(join(fixtures!, 'njupt-declaration.doc'))
+        const exported = page.waitForEvent('download', { timeout: 30_000 })
+        await generate.click()
+        await expect(form.getByLabel('交付归档名称').or(form.getByRole('alert'))).toBeVisible({ timeout: 30_000 })
+        expect(await form.getByRole('alert').allTextContents()).toEqual([])
+        const generated = join(output, 'njupt-deposit-generated.docx')
+        await (await exported).saveAs(generated)
+        initialDocx = await readFile(generated)
+        const pinned = submissionDocxConfig('njupt-professional-masters')
+        const packageZip = await JSZip.loadAsync(initialDocx, { checkCRC32: true })
+        const document = await packageZip.file('word/document.xml')!.async('string')
+        const core = await packageZip.file('docProps/core.xml')!.async('string')
+        expect(core).toContain(revised.report.delivery.snapshotSha256)
+        expect(core).toContain(pinned.original.sha256)
+        expect(core).toContain(pinned.declaration!.sha256)
+        expect(document).toContain(marker)
+        expect(document).toContain('instrumentation team')
+        expect(document).toContain('原创性声明')
+        expect(document).toContain('使用授权声明')
+        expect(document).toContain('SEQ WbxFigure')
+        expect(document).toContain('SEQ WbxTable')
+        expect(document).not.toMatch(/章内标题|GB\/T 7714|XXXXXXXX|论文定稿时/)
+        const header = await packageZip.file('word/header2.xml')!.async('string')
+        expect(header).toContain('南京邮电大学专业学位硕士研究生学位论文')
+        expect(header).toContain('STYLEREF WbxRunningTitle')
+        await form.getByLabel('交付归档名称').fill(docxArchiveName)
+        await form.getByRole('button', { name: '归档 DOCX 交付' }).click()
+        await expect(form.getByText('已归档 ' + docxArchiveName)).toBeVisible()
+
+        await copyFile(generated, attachableWord)
+        const script = join(__dirname, 'fixtures/submission-docx-word.applescript')
+        const { stdout } = await promisify(execFile)('/usr/bin/osascript', [script, attachableWord, 'Study design'], { timeout: 120_000 })
+        expect(stdout).toMatch(/reopened.+\d+\.\d+.+1–3/)
+        expect(stdout).toMatch(/1\.1 Observation protocol/)
+        expect(stdout).toContain('参考文献')
+        await writeFile(join(output, 'microsoft-word.log'), stdout)
+        finalDigest = hash(await readFile(attachableWord))
+        expect(finalDigest).not.toBe(hash(initialDocx))
+      }
+      const formalWord = nativeWord ? attachableWord : join(fixtures!, 'independent.docx')
+      await formal.getByLabel('正式归档 Word').setInputFiles(formalWord)
+      await expect(formal.getByRole('button', { name: nativeWord ? 'njupt-deposit-word-final.docx' : 'independent.docx' })).toBeVisible()
       await dialog.getByRole('checkbox', { name: '人工确认 · 学校系统和图书馆交稿' }).check()
     } else {
       await expect(formal.getByRole('button', { name: '下载清洁版 LaTeX 源包' })).toBeVisible()
@@ -1431,6 +1523,7 @@ for (const pilot of ['njupt', 'agu'] as const) {
     const attached = await readDelivery(page, download, attachmentOutput, second, true)
     expect(attached.source).toBe(revised.source)
     expect(attached.report.materials?.length).toBe(njupt ? 1 : 3)
+    if (finalDigest) expect(attached.report.materials?.[0].sha256).toBe(finalDigest)
     await save(secondTitle)
     if (!njupt) {
       const responseCheck = dialog.getByRole('checkbox', { name: '人工确认 · 逐条回复审稿意见', exact: true })
@@ -1447,8 +1540,46 @@ for (const pilot of ['njupt', 'agu'] as const) {
       await save(replacementArchive)
     }
     await close()
+    if (nativeWord && beforeDocx) {
+      const after = await backup(page, join(output, 'after-deposit.research-canvas'))
+      const projectFiles = (files: typeof after.files) => Object.fromEntries(Object.entries(files).filter(([path]) =>
+        !path.startsWith('history/') || path.startsWith('history/snapshots/')))
+      expect(after.project).toEqual(beforeDocx.project)
+      expect(after.snapshots).toEqual(beforeDocx.snapshots)
+      expect(projectFiles(after.files)).toEqual(projectFiles(beforeDocx.files))
+      await writeFile(join(output, 'project-invariance.json'), JSON.stringify({
+        unchanged: true, before: projectFiles(beforeDocx.files), after: projectFiles(after.files), template: after.project.metadata.activeTemplate.origin,
+      }, null, 2) + '\n')
+      await replaceProjectSource(page, 'sections/study.tex', studySource + '\n' + marker + '\nPost-deposit draft only.\n')
+      await open.click()
+      await expect(dialog.getByText(/稿件已修改。请重新编译/)).toBeVisible()
+      await expect(download).toHaveCount(0)
+      await expect(dialog.getByRole('button', { name: 'Save submission version' })).toHaveCount(0)
+      const details = archive.getByText(new RegExp('^' + docxArchiveName + ' ·')).locator('..')
+      await details.locator('summary').click()
+      await details.getByRole('button', { name: '复查归档 DOCX' }).click()
+      const report = details.getByRole('region', { name: 'DOCX 归档检查报告' })
+      await expect(report).toContainText(revised.report.delivery.snapshotSha256)
+      await report.getByLabel('补附 Word 保存的最终文件').setInputFiles(attachableWord)
+      await expect(report).toContainText(finalDigest!)
+      await close()
+    }
     await page.goto(projectUrl)
     await open.click()
+    if (nativeWord) {
+      const details = archive.getByText(new RegExp('^' + docxArchiveName + ' ·')).locator('..')
+      await details.locator('summary').click()
+      await details.getByRole('button', { name: '复查归档 DOCX' }).click()
+      const report = details.getByRole('region', { name: 'DOCX 归档检查报告' })
+      await expect(report).toContainText('归档文件 SHA-256 校验通过')
+      await expect(report).toContainText(revised.report.delivery.snapshotSha256)
+      const [final] = await Promise.all([page.waitForEvent('download'), report.getByRole('button', { name: '下载归档 Word 定稿' }).click()])
+      expect(hash(await readFile((await final.path())!))).toBe(finalDigest)
+      const [generated] = await Promise.all([page.waitForEvent('download'), report.getByRole('button', { name: '下载归档生成稿' }).click()])
+      expect(await readFile((await generated.path())!)).toEqual(initialDocx)
+      const [json] = await Promise.all([page.waitForEvent('download'), report.getByRole('button', { name: '下载 DOCX 检查报告' }).click()])
+      await json.saveAs(join(output, 'njupt-deposit-docx-report.json'))
+    }
     await verifyArchive(secondTitle, second, attached)
     if (updated) {
       await verifyArchive(replacementArchive, second, updated)
@@ -1460,5 +1591,6 @@ for (const pilot of ['njupt', 'agu'] as const) {
     expect(proof.publication.submissions).toHaveLength(njupt ? 2 : 3)
     expect(proof.publication.submissions.some((entry: { layoutReport?: { materials?: unknown[] } }) => entry.layoutReport?.materials?.length === (njupt ? 1 : 3))).toBe(true)
     expect(proof.project.metadata.activeTemplate.origin).toEqual(initial.report.templateOrigin)
+    if (finalDigest) expect(proof.publication.docx[0].final.sha256).toBe(finalDigest)
   })
 }

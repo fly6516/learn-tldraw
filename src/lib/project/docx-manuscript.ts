@@ -192,7 +192,7 @@ export function prepareDocxAst(body: PandocDocument, abstract: PandocDocument, s
       headings.push({ level, title: tocTitle, number: appendix ? '' : number, bookmark: tocBookmark, appendix: appendixMode })
       const referenceBookmark = attributes[0] ? name : undefined
       if (referenceBookmark) {
-        const chineseChapter = !appendix && school === 'suep-undergraduate' && level === 1
+        const chineseChapter = !appendix && school !== 'zju-basic-medicine-undergraduate' && level === 1
         references.set(attributes[0], { name, value: chineseChapter ? chineseChapterNumber(number) : number,
           kind: appendix ? 'appendix' : 'heading', chineseChapter })
       }
@@ -251,8 +251,21 @@ export function prepareDocxAst(body: PandocDocument, abstract: PandocDocument, s
     if (object === 'Table') return [cap, entry]
     return [...nodes(parts[2]), cap]
   })
-  body.blocks = blocks(body.blocks)
-  if (headings.length !== snapshot.sections.length || floats !== snapshot.floats.length) {
+  const isAcknowledgment = (entry: Node) => {
+    if (entry.t !== 'Header' || school !== 'njupt-professional-masters') return false
+    const [level, attributes, inlines] = entry.c as [number, Attribute, Node[]]
+    return level === 1 && attributes[1].includes('unnumbered') &&
+      /^(?:致谢|acknowledg(?:e)?ments?)$/i.test(nodeText(inlines).trim())
+  }
+  const acknowledgmentIndex = body.blocks.findIndex(isAcknowledgment)
+  if (acknowledgmentIndex !== -1 && body.blocks.slice(acknowledgmentIndex + 1).some(entry => entry.t === 'Header')) {
+    const location = snapshot.sections.find(section => /^(?:致谢|acknowledg(?:e)?ments?)$/i.test(section.title.trim()))
+    throw new Error(`${location?.path ?? 'main.tex'}:${location?.line ?? 1} · 请将无编号的致谢放在稿件末尾。`)
+  }
+  const acknowledgmentBlocks = acknowledgmentIndex < 0 ? [] : body.blocks.slice(acknowledgmentIndex + 1)
+  body.blocks = blocks(acknowledgmentIndex < 0 ? body.blocks : body.blocks.slice(0, acknowledgmentIndex))
+  const acknowledgments = blocks(acknowledgmentBlocks)
+  if (headings.length + Number(acknowledgmentIndex >= 0) !== snapshot.sections.length || floats !== snapshot.floats.length) {
     throw new Error('正文标题或图表的解析数量与原稿不一致，请检查源文件结构。')
   }
   if (!headings.length) throw new Error('请至少添加一个一级标题再导出。')
@@ -307,6 +320,7 @@ export function prepareDocxAst(body: PandocDocument, abstract: PandocDocument, s
   walk(body.blocks, transform)
   walk(abstract.blocks, transform)
   walk(bibliography, transform)
+  walk(acknowledgments, transform)
 
   // Use sentinel paragraphs to split the Pandoc output without serializing a second OOXML package.
   const sentinel = (title: string) => para([{ t: 'Code', c: [['', [], []], title] }])
@@ -315,6 +329,6 @@ export function prepareDocxAst(body: PandocDocument, abstract: PandocDocument, s
   const appendixBlocks = appendixIndex < 0 ? [appendixStart] : body.blocks.slice(appendixIndex)
   body.meta = {}
   body.blocks = [...abstract.blocks, sentinel('WbxStartBodyX'), ...mainBlocks,
-    sentinel('WbxStartBibliographyX'), ...bibliography, ...appendixBlocks]
+    sentinel('WbxStartBibliographyX'), ...bibliography, ...appendixBlocks, ...(acknowledgmentIndex < 0 ? [] : [sentinel('WbxStartAcknowledgmentX'), ...acknowledgments])]
   return { body, tokens, headings, assets, math, images, tables: snapshot.floats.filter(item => item.kind === 'table').length }
 }

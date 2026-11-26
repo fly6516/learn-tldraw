@@ -1,9 +1,13 @@
 on run argv
-  set manuscript to POSIX file (item 1 of argv)
+  set inputPath to item 1 of argv
+  set manuscript to POSIX file inputPath
+  set expectedName to do shell script "/usr/bin/basename " & quoted form of inputPath
+  set expectedHeading to "实验设计"
+  if (count of argv) > 1 then set expectedHeading to item 2 of argv
   with timeout of 75 seconds
     tell application id "com.microsoft.Word"
       open manuscript add to recent files false repair false
-      set submission to active document
+      set submission to document expectedName
       if read only of submission then error "Test DOCX is read-only."
       if (count of tables of contents of submission) is not 1 then error "Expected one native TOC."
       set contentsTable to first table of contents of submission
@@ -25,10 +29,10 @@ on run argv
       save submission
       close submission saving no
       open manuscript read only true add to recent files false repair false
-      set submission to active document
+      set submission to document expectedName
       set contentsTable to first table of contents of submission
       set tocText to content of text object of contentsTable
-      if tocText contains "—" or tocText does not contain "实验设计" or tocText does not contain "参考文献" then error "Saved TOC incomplete."
+      if tocText contains "—" or tocText does not contain expectedHeading or tocText does not contain "参考文献" or tocText contains "Error!" or tocText contains "错误!" then error "Saved TOC incomplete."
       if (upper heading level of contentsTable is not 1) or (lower heading level of contentsTable is not 3) then error "Invalid TOC depth."
       set tableProof to ""
       repeat with tableIndex from 1 to (count of tables of submission)
