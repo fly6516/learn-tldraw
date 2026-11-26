@@ -1,6 +1,6 @@
 import { templateDigest } from './paper-templates'
 
-export async function requestOfficialSource(id: string, sha256?: string, asset?: 'guideline' | 'declaration' | 'blind-cover', signal?: AbortSignal) {
+export async function requestOfficialSource(id: string, sha256?: string, asset?: 'guideline' | 'declaration' | 'blind-cover' | 'docx-bundle', signal?: AbortSignal) {
   const params = new URLSearchParams({ id })
   if (sha256) params.set('sha256', sha256)
   if (asset) params.set('asset', asset)
@@ -15,9 +15,9 @@ export async function requestOfficialSource(id: string, sha256?: string, asset?:
   return response
 }
 
-export async function fetchOfficialFile(id: string, sha256: string, asset?: 'guideline' | 'declaration' | 'blind-cover', signal?: AbortSignal) {
+export async function fetchOfficialFile(id: string, sha256: string, asset?: 'guideline' | 'declaration' | 'blind-cover' | 'docx-bundle', signal?: AbortSignal) {
   const response = await requestOfficialSource(id, sha256, asset, signal)
-  const name = /filename="([a-z\d-]+\.(?:docx?|zip|pdf))"/i.exec(response.headers.get('Content-Disposition') ?? '')?.[1]
+  const name = /filename="([a-z\d-]+\.(?:docx?|zip|rar|pdf))"/i.exec(response.headers.get('Content-Disposition') ?? '')?.[1]
   const bytes = await response.arrayBuffer()
   if (!name || await templateDigest(bytes) !== sha256) {
     throw new Error('获取的官方原件校验失败。请重试或手动上传所选版本的原件。')

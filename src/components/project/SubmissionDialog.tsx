@@ -14,6 +14,7 @@ import { compilerLabels } from '@/lib/project/compile-profile'
 import type { ProjectFileSystem } from '@/lib/project/types'
 import { claimSourceLine } from '@/lib/project/writing-claims'
 import { SubmissionEvidenceFindings, SubmissionEvidencePanel, useSubmissionEvidence } from './SubmissionEvidence'
+import { SubmissionDocxPanel } from './SubmissionDocxPanel'
 import { LayoutPreflight } from './LayoutPreflight'
 import type { LayoutFinding } from '@/lib/project/layout-preflight'
 import { blindDeliveryBlocked, njuptBlindCover, submissionStageInfo, type SubmissionStage } from '@/lib/project/submission-stages'
@@ -226,6 +227,7 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
           <a href={njuptBlindCover.page} target="_blank" rel="noreferrer" className="underline">封面发布页</a>
         </label>}
       </fieldset>}
+      <SubmissionDocxPanel project={target} main={main} template={templateOriginId} disabled={busy || saving || conflicting} download={download} />
       {staleStage && <p role="status" className="rounded border border-amber-200 bg-amber-50 p-2 text-sm text-amber-900">稿件已修改。请重新编译和检查后下载交付包。历史记录仍可复查。</p>}
       <p className="text-sm">Compile entry <code className="break-all">{compileEntry}</code></p>
       {drafts.length > 0 && <fieldset disabled={busy || saving} className="space-y-1 text-sm">

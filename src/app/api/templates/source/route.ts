@@ -47,7 +47,11 @@ export async function POST(request: Request) {
   const expected = params.get('sha256')
   const asset = params.get('asset')
   const entry = templateCatalog.find(item => item.id === id)
-  const source = entry && catalogReleaseSource(entry)
+  const bundle = asset === 'docx-bundle' && entry?.id === 'suep-undergraduate' && entry.workflow.kind === 'word-import'
+    ? entry.workflow.original : undefined
+  const source = entry && (bundle ? { kind: 'word' as const, baseline: { id: entry.id, version: '', sha256: bundle.sha256 },
+    url: bundle.url, sourceUrl: entry.sourceUrl ?? bundle.url, guideline: undefined, declaration: undefined, blindCover: undefined, updateLink: undefined }
+    : catalogReleaseSource(entry))
   if (!source) return Response.json({ error: '该模板尚无可检查的来源。' }, { status: 404 })
   if (expected !== null && !/^[a-f\d]{64}$/.test(expected)) {
     return Response.json({ error: '请求缺少有效的 SHA-256。' }, { status: 400 })
@@ -55,7 +59,7 @@ export async function POST(request: Request) {
   const guideline = asset === 'guideline' && source.kind === 'word' ? source.guideline : undefined
   const declaration = asset === 'declaration' && source.kind === 'word' ? source.declaration : undefined
   const blindCover = asset === 'blind-cover' && source.kind === 'word' ? source.blindCover : undefined
-  const attachment = guideline ?? declaration ?? blindCover
+  const attachment = guideline ?? declaration ?? blindCover ?? bundle
   if (asset !== null && (!attachment || expected !== attachment.sha256)) {
     return Response.json({ error: '所选模板未登记此校验值的官方附件。' }, { status: 400 })
   }
@@ -97,7 +101,7 @@ export async function POST(request: Request) {
       if (expected) file.push(chunk)
     }
     const signature = magic.toString('hex')
-    const isTemplate = guideline ? signature.startsWith('255044462d') // %PDF-
+    const isTemplate = bundle ? signature.startsWith('526172211a07') : guideline ? signature.startsWith('255044462d') // %PDF-
       : signature.startsWith('504b0304') || source.kind === 'word' && signature === 'd0cf11e0a1b11ae1'
     if (!isTemplate) {
       return Response.json({ error: '官方原件校验失败，发布方返回了非模板文件。请查看发布页。' }, { status: 422 })
@@ -108,7 +112,7 @@ export async function POST(request: Request) {
     if (sha256 !== expected) {
       return Response.json({ error: '官方原件 SHA-256 校验失败，文件已与所选版本或检查结果不同。请重新检查更新，或上传对应版本的原件。' }, { status: 409 })
     }
-    const suffix = guideline ? '-guidelines.pdf' : source.kind === 'zip' ? '.zip' : signature.startsWith('504b0304') ? '.docx' : '.doc'
+    const suffix = bundle ? '.rar' : guideline ? '-guidelines.pdf' : source.kind === 'zip' ? '.zip' : signature.startsWith('504b0304') ? '.docx' : '.doc'
     return new Response(new Uint8Array(Buffer.concat(file, size)), { headers: {
       'Content-Type': 'application/octet-stream',
       'Content-Disposition': 'attachment; filename="' + source.baseline.id + suffix + '"',

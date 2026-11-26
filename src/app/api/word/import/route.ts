@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { join, extname } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { cwd } from 'node:process'
 import { promisify } from 'node:util'
 import JSZip from 'jszip'
 import sharp from 'sharp'
@@ -17,6 +18,12 @@ import { suepUndergraduateSource } from '@/lib/project/suep-undergraduate-source
 import { draftWordLayout } from '@/lib/project/word-layout-extraction'
 import { hasLayoutConflict, layoutKeys, layoutValues, wordLayoutSchema, type WordLayout } from '@/lib/project/word-layout'
 import { customWordGeometry, customWordTex, formatCustomWord } from '@/lib/project/custom-word-tex'
+import { submissionDocxConfig, submissionDocxFields, submissionDocxIdSchema, suepDocxMembers } from '@/lib/project/submission-docx-config'
+import { captureManuscript } from '@/lib/project/template-export'
+import { importSourceArchive } from '@/lib/project/source-archive'
+import { docxLatexForPandoc, docxSourceError, prepareDocxAst, validateDocxSource, type PandocDocument } from '@/lib/project/docx-manuscript'
+import { fillSubmissionDocx } from '@/lib/project/submission-docx-package'
+import { projectSourceDigest } from '@/lib/project/external-template-build'
 import type { GuidelinePage } from '@/lib/project/pdf-guideline'
 
 export const runtime = 'nodejs'
@@ -287,6 +294,100 @@ async function importWord(work: string, request: Request, data: FormData, school
   return archive.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' })
 }
 
+async function exportSubmissionWord(work: string, request: Request, data: FormData) {
+  const target = submissionDocxIdSchema.safeParse(data.get('school'))
+  if (!target.success) throw new ImportError('请选择支持的官方 Word 版本。')
+  const config = submissionDocxConfig(target.data)
+  let input: unknown
+  try { input = JSON.parse(String(data.get('fields') ?? 'null')) }
+  catch { throw new ImportError('封面字段格式不正确。') }
+  const parsed = submissionDocxFields.safeParse(input)
+  if (!parsed.success) throw new ImportError('请核对封面、摘要及关键词中的必填字段。')
+  const fields = parsed.data
+  const source = data.get('source')
+  const original = data.get('original')
+  const entry = String(data.get('main') ?? '')
+  if (!(source instanceof File) || !(original instanceof File) || !source.size || !original.size) throw new ImportError('缺少当前稿件源包或官方原件。')
+  const pinned = async (file: Blob, sha256: string, label: string) => {
+    const bytes = Buffer.from(await file.arrayBuffer())
+    if (createHash('sha256').update(bytes).digest('hex') !== sha256) throw new ImportError(label + '的 SHA-256 与登记版不一致。')
+    return bytes
+  }
+  const registered = await pinned(original, config.original.sha256, '官方原件')
+  const project = await importSourceArchive(source, wordImportLimit)
+  const manuscript = captureManuscript(project.files, entry)
+  validateDocxSource(manuscript)
+  const abstractCitation = /\\(?:cite[a-z]*|nocite)\b/i.exec(manuscript.abstract)
+  if (abstractCitation) docxSourceError(manuscript, 'abstract', abstractCitation.index, '提交版摘要暂不支持文献引用。')
+  const { run, office } = await wordJob(work, request.signal)
+  let reference: Uint8Array = registered
+  let cover: Uint8Array | undefined
+  let declaration: Uint8Array | undefined
+  let provenance = config.name + ' · ' + config.version + '\n' + config.sourceUrl + '\n官方原件 SHA-256 ' + config.original.sha256
+  if (config.guideline) {
+    const guide = data.get('guideline')
+    if (!(guide instanceof File)) throw new ImportError('缺少浙大官方规范 PDF。')
+    await pinned(guide, config.guideline.sha256, '官方规范')
+    provenance += '\n官方规范 ' + config.guideline.url + ' · SHA-256 ' + config.guideline.sha256
+  } else {
+    await writeFile(join(work, 'official.rar'), registered)
+    const contents = {} as Record<keyof typeof suepDocxMembers, Buffer>
+    for (const [key, member] of Object.entries(suepDocxMembers)) {
+      const { stdout } = await exec(process.env.BSDTAR_BIN || 'bsdtar', ['-xOf', 'official.rar',
+        '附件：毕业设计、论文相关20261013/' + member.name],
+      { cwd: work, encoding: 'buffer', timeout: 15_000, maxBuffer: wordImportLimit, signal: request.signal })
+      if (createHash('sha256').update(stdout).digest('hex') !== member.sha256) throw new ImportError(member.name + ' 的 SHA-256 与登记版不一致。')
+      contents[key as keyof typeof suepDocxMembers] = stdout
+      provenance += '\n' + member.name + ' · SHA-256 ' + member.sha256
+    }
+    for (const key of ['cover', 'declaration', 'body'] as const) {
+      await writeFile(join(work, key + '.doc'), contents[key])
+    }
+    await office('docx:Office Open XML Text', ['cover.doc', 'declaration.doc', 'body.doc'])
+    reference = await readFile(join(work, 'body.docx'))
+    cover = await fillSuepCover(await readFile(join(work, 'cover.docx')), suepCoverFields.parse(fields))
+    declaration = await readFile(join(work, 'declaration.docx'))
+  }
+  provenance += '\n稿件快照 SHA-256 ' + await projectSourceDigest(project.files, entry)
+  provenance += '\n' + config.status
+
+  async function runPandoc(args: string[], part: 'body' | 'abstract') {
+    try { await run(process.env.PANDOC_BIN || 'pandoc', args) }
+    catch (cause) {
+      const failure = cause as NodeJS.ErrnoException & { stderr?: string; killed?: boolean }
+      if (failure.code === 'ENOENT' || failure.killed) throw cause
+      const message = (failure.stderr ?? '').trim().slice(0, 500)
+      const line = Number(/(?:line |\.tex"? \(line )(\d+)/i.exec(message)?.[1] ?? 1)
+      const location = manuscript.lineSources[part].get(line) ?? [...manuscript.lineSources[part].values()][0]
+      const formula = /math|formula/i.test(message) ? /\$|\\(?:\[|\(|begin\s*\{equation)/.exec(manuscript[part]) : undefined
+      if (formula) docxSourceError(manuscript, part, formula.index, '公式无法转换为可编辑的 Word 公式。' + message)
+      throw new ImportError((location ? `${location.path}:${location.line} · ` : '') + 'Pandoc 无法可靠转换稿件。' + message)
+    }
+  }
+  for (const part of ['body', 'abstract'] as const) {
+    await writeFile(join(work, part + '.tex'), docxLatexForPandoc(manuscript[part]))
+    await runPandoc(['--sandbox', '--fail-if-warnings', '-f', 'latex', '-t', 'json', part + '.tex', '-o', part + '.json'], part)
+  }
+  if (manuscript.bibliography.length) {
+    await writeFile(join(work, 'references.bib'), manuscript.bibliography.map(item => item.content).join('\n'))
+    const csl = await readFile(join(cwd(), 'src/lib/project/docx-assets/gbt7714-numeric.csl'))
+    if (createHash('sha256').update(csl).digest('hex') !== 'd9cd04f94bc21a99dc320d0a2230d5a1fb47e3634c17c5820cf975c40db3c0c7') {
+      throw new ImportError('参考文献格式配置 SHA-256 校验失败。')
+    }
+    await writeFile(join(work, 'style.csl'), csl)
+    await runPandoc(['--sandbox', '--fail-if-warnings', '-f', 'json', '-t', 'json', '--citeproc',
+      '--bibliography=references.bib', '--csl=style.csl', '--metadata=link-citations:true', 'body.json', '-o', 'citations.json'], 'body')
+  }
+  const parse = async (name: string) => JSON.parse(await readFile(join(work, name + '.json'), 'utf8')) as PandocDocument
+  const converted = prepareDocxAst(await parse(manuscript.bibliography.length ? 'citations' : 'body'), await parse('abstract'), manuscript, config.id)
+  for (const { blob, name } of converted.assets) await writeFile(join(work, name), new Uint8Array(await blob.arrayBuffer()))
+  await writeFile(join(work, 'render.json'), JSON.stringify(converted.body))
+  // The JSON writer only receives locally staged, validated image names.
+  await runPandoc(['--fail-if-warnings', '-f', 'json', '-t', 'docx', 'render.json', '-o', 'draft.docx'], 'body')
+  return fillSubmissionDocx({ ...converted, id: config.id, original: reference, draft: await readFile(join(work, 'draft.docx')),
+    cover, declaration, fields, englishTitle: manuscript.title.replace(/\\([&%#$ _])/g, '$1'), provenance })
+}
+
 export async function POST(request: Request) {
   if (process.env.WORD_IMPORT_ENABLED !== '1') {
     return Response.json({ error: 'Enable WORD_IMPORT_ENABLED=1 on the local server with LibreOffice and Pandoc installed.' }, { status: 503 })
@@ -315,6 +416,19 @@ export async function POST(request: Request) {
       throw new ImportError('Choose one Word file per field, totaling at most 16 MB.')
     }
     work = await mkdtemp(join(tmpdir(), 'research-word-'))
+    if (data.get('intent') === 'export-submission-docx') {
+      try {
+        return new Response(await exportSubmissionWord(work, request, data), { headers: {
+          'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'Cache-Control': 'no-store',
+        } })
+      } catch (cause) {
+        const failure = cause as NodeJS.ErrnoException
+        if (failure.code === 'ENOENT') throw new ImportError('缺少 LibreOffice、Pandoc 或 bsdtar。请检查本机安装。')
+        // Application-level diagnostics include source locations. Child process commands and paths stay local.
+        if (failure.code !== undefined && !(cause instanceof ImportError)) throw new ImportError('本地 Word 转换失败，请核对编译工具和登记的原件。')
+        throw new ImportError(cause instanceof Error ? cause.message : '提交版 DOCX 导出失败。')
+      }
+    }
     if (data.get('intent') === 'inspect') {
       return Response.json(await inspectWord(work, request, data), { headers: { 'Cache-Control': 'no-store' } })
     }

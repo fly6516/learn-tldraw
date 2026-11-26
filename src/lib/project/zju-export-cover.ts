@@ -16,23 +16,7 @@ export async function zjuExportCover(original: File, includeDeclarations: boolea
   if (!body || !nodes || !section || !nodes[15]?.textContent?.includes('原创性声明')) {
     throw new Error('此版官方 Word 的封面或声明位置无法识别。')
   }
-  const labels = ['题目', '姓名与学号', '指导教师', '年级与专业', '所在学院', '提交日期']
-  for (const [position, paragraph] of [6, 9, 10, 11, 12, 14].entries()) {
-    const text = Array.from(nodes[paragraph].getElementsByTagNameNS(word, 't'))
-    const label = labels[position]
-    let prefix = ''
-    let value = 0
-    while (value < text.length && prefix.length < label.length) prefix += text[value++].textContent
-    if (prefix !== label || !text[value]) throw new Error(`官方 Word 封面无法定位“${label}”。`)
-    // Retain the original title run's font and the other fields' underline formatting.
-    if (position === 0) value = 3
-    for (let i = label === '题目' ? 1 : value; i < text.length; i++) {
-      if (i === value) {
-        text[i].setAttribute('xml:space', 'preserve')
-        text[i].textContent = position === 0 ? '   ' + fields[position] : '     ' + fields[position] + '     '
-      } else text[i].textContent = ''
-    }
-  }
+  fillZjuCoverNodes(nodes, fields)
   for (const node of nodes.slice(end + 1)) body.removeChild(node)
   for (const frontSection of Array.from(body.getElementsByTagNameNS(word, 'sectPr'))) {
     // Writer expands Word's East Asian character grid, pushing the original cover onto two pages.
@@ -62,4 +46,24 @@ export async function zjuExportCover(original: File, includeDeclarations: boolea
   body.appendChild(section)
   zip.file(main, new XMLSerializer().serializeToString(doc))
   return new File([await zip.generateAsync({ type: 'arraybuffer' })], 'cover.docx')
+}
+
+export function fillZjuCoverNodes(nodes: readonly Element[], fields: readonly string[], compact = false) {
+  const labels = ['题目', '姓名与学号', '指导教师', '年级与专业', '所在学院', '提交日期']
+  for (const [position, paragraph] of [6, 9, 10, 11, 12, 14].entries()) {
+    const text = Array.from(nodes[paragraph].getElementsByTagNameNS(word, 't'))
+    const label = labels[position]
+    let prefix = ''
+    let value = 0
+    while (value < text.length && prefix.length < label.length) prefix += text[value++].textContent
+    if (prefix !== label || !text[value]) throw new Error(`官方 Word 封面无法定位“${label}”。`)
+    // Retain the original title run's font and the other fields' underline formatting.
+    if (position === 0) value = 3
+    for (let i = label === '题目' ? 1 : value; i < text.length; i++) {
+      if (i === value) {
+        text[i].setAttribute('xml:space', 'preserve')
+        text[i].textContent = position === 0 ? '   ' + fields[position] : compact ? ' ' + fields[position] + ' ' : '     ' + fields[position] + '     '
+      } else text[i].textContent = ''
+    }
+  }
 }
