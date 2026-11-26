@@ -29,6 +29,7 @@ import { ProjectSnapshotsDialog } from './ProjectSnapshotsDialog'
 import { ProjectConflictNotice } from './ProjectConflictNotice'
 import { ResearchGraphEditor } from './ResearchGraphEditor'
 import { ProjectSearchDialog } from './ProjectSearchDialog'
+import { SaveTemplateDialog } from './SaveTemplateDialog'
 import { researchNodeTitle, type CanvasLocation } from '@/lib/project/canvas-search'
 import { recordHistory, stepCanvasHistory, type CanvasHistory } from '@/lib/project/canvas-history'
 import type { OutlineHeading } from '@/lib/project/outline'
@@ -66,6 +67,8 @@ function Workspace({ sample, initialProject, notice, projectListHref, onViewChan
   useEffect(() => { onViewChange?.(view) }, [onViewChange, view])
   const [importOpen, setImportOpen] = useState(false)
   const [backupOpen, setBackupOpen] = useState<{ writing?: PortableWritingState; recovery?: boolean }>()
+  const [templateSource, setTemplateSource] = useState<ProjectFileSystem>()
+  const [templateMessage, setTemplateMessage] = useState('')
   const [snapshotsOpen, setSnapshotsOpen] = useState(false)
   const [loadError, setLoadError] = useState(false)
   const [showFiles, setShowFiles] = useState(true)
@@ -552,6 +555,18 @@ function Workspace({ sample, initialProject, notice, projectListHref, onViewChan
               Source link check{sourceIssues.length > 0 && ` (${sourceIssues.length})`}
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => setBackupOpen({ writing: writing.current?.getDraftBackup() })}>Project Backup</DropdownMenuItem>
+            {projectListHref && storage && storageKey && <DropdownMenuItem onSelect={() => {
+              setTemplateMessage('')
+              void readProject(storage, storageKey).then(saved => {
+                if (!saved) throw new Error('Save the project before saving a template.')
+                if (saved.metadata.sourceMode === 'archive') setTemplateSource(saved)
+                else {
+                  const savedCanvas = documentPage(normalizeCanvas(saved.canvas ?? emptyCanvas))
+                  const source = updateFileContent(saved, 'main.tex', generateProjectSource(savedCanvas, saved))
+                  setTemplateSource({ ...source, metadata: { ...source.metadata, mainFile: 'main.tex' } })
+                }
+              }).catch(cause => setTemplateMessage(cause instanceof Error ? cause.message : 'Could not read the saved project.'))
+            }}>Save as template</DropdownMenuItem>}
             <DropdownMenuItem onSelect={() => setSnapshotsOpen(true)} disabled={!storage || !storageKey}>Project Snapshots</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -559,6 +574,12 @@ function Workspace({ sample, initialProject, notice, projectListHref, onViewChan
         <div ref={setWritingActions} className={view === 'write' ? 'order-4 col-span-2 flex min-w-0 flex-1 items-center justify-end gap-2' : 'hidden'} />
       </header>
       {notice}
+      {templateMessage && <div role="status" className="flex shrink-0 items-center justify-between gap-3 border-b px-3 py-1 text-sm">
+        <span>{templateMessage}</span>
+        <Button size="sm" variant="ghost" onClick={() => setTemplateMessage('')}>Dismiss</Button>
+      </div>}
+      {storage && templateSource && <SaveTemplateDialog database={storage} project={templateSource}
+        onClose={() => setTemplateSource(undefined)} onSave={() => { setTemplateSource(undefined); setTemplateMessage('Template saved to My templates.') }} />}
       {storageError && <div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 border-b bg-amber-50 px-3 py-1.5 text-sm text-amber-950">
         <span>Project storage is unavailable. Back up the files and Canvas held in this tab.</span>
         <Button size="sm" variant="outline" onClick={() => setBackupOpen({ writing: writing.current?.getDraftBackup(), recovery: true })}>Back up this tab</Button>

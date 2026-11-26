@@ -12,7 +12,7 @@ import { decodeProjectBackup, encodeProjectBackup, projectBackupExtension, proje
 import { downloadFile } from '@/lib/export/export-actions'
 import type { PortableProjectHistory } from '@/lib/project/backup-history'
 import { createDefaultProject } from '@/lib/project/file-system'
-import { createTemplateProject, importSpringerTemplate, paperTemplates, springerTemplate, type PaperTemplateId } from '@/lib/project/paper-templates'
+import { createTemplateProject, builtInPaperTemplates } from '@/lib/project/paper-templates'
 import { libraryChangesChannel, libraryProjectUrl, libraryStorageKey, type LibraryProject, type LibraryProjectState, type LibraryView, type RecoveryStatus } from '@/lib/project/project-library'
 import { addLibraryProject, deleteTrashedLibraryProject, listLibraryProjects, openProjectStorage, readLibraryBackup, readRecoveryBaseline, recordProjectBackup, updateLibraryProject } from '@/lib/project/storage'
 import { normalizeCanvas } from '@/lib/project/canvas-overview'
@@ -23,6 +23,9 @@ import type { PortableWritingState } from '@/lib/project/writing-drafts'
 import { ResearchWorkspace } from './ResearchWorkspace'
 import { BackupContents } from './BackupContents'
 import { WorkbenchSetup } from '@/components/project/WorkbenchSetup'
+import { TemplateMarket, templateMarketHref } from './TemplateMarket'
+import { templateCatalog } from '@/lib/project/template-catalog'
+import { WordImportDialog } from './WordImportDialog'
 
 const sections = [['active', 'Projects', Folder], ['archived', 'Archived', Archive], ['trash', 'Trash', Trash2]] as const
 const openedAt = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
@@ -46,14 +49,14 @@ export function ProjectLibrary() {
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<'recent' | 'name'>('recent')
   const [busy, setBusy] = useState(false)
+  const [wordImport, setWordImport] = useState(false)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
-  const [nameDialog, setNameDialog] = useState<{ id?: string; value: string; starter?: 'canvas' | PaperTemplateId }>()
+  const [nameDialog, setNameDialog] = useState<{ id?: string; value: string; starter?: 'canvas' | (typeof builtInPaperTemplates)[number]['id'] }>()
   const [selection, setSelection] = useState<string>()
   const [mobileDetails, setMobileDetails] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<LibraryProject>()
   const fileInput = useRef<HTMLInputElement>(null)
-  const templateInput = useRef<HTMLInputElement>(null)
   const searchInput = useRef<HTMLInputElement>(null)
   const details = useRef<HTMLElement>(null)
   const rows = useRef(new Map<string, HTMLButtonElement>())
@@ -177,18 +180,22 @@ export function ProjectLibrary() {
   const active = catalog?.find(project => project.id === requested && project.state === 'active')
   if (active) return <ResearchWorkspace key={active.id} storageNamespace={libraryStorageKey(active.id)}
     onViewChange={recordView} onImportCopy={openCopy} projectListHref="/research" />
+  if (!requested && params?.get('section') === 'templates') {
+    return <TemplateMarket database={database} storageUnavailable={storageUnavailable} openProject={project => openCopy(project, 'write')} />
+  }
 
   const sectionProjects = catalog?.filter(project => project.state === section) ?? []
   const nameFilter = query.trim().normalize().toLocaleLowerCase()
   const projects = sectionProjects.filter(project => project.name.normalize().toLocaleLowerCase().includes(nameFilter))
   if (sort === 'name') projects.sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: 'base', numeric: true }))
   const recent = catalog?.find(project => project.state === 'active')
-  const selectedTemplate = paperTemplates.find(template => template.id === nameDialog?.starter)
-  const publisherTemplate = selectedTemplate?.id === springerTemplate.id ? selectedTemplate : undefined
+  const selectedTemplate = builtInPaperTemplates.find(template => template.id === nameDialog?.starter)
   const selected = projects.find(project => project.id === selection) ?? projects[0]
   const recoveryStatus = selected && recovery[selected.id]
   const origin = selected?.templateOrigin
-  const templateName = origin && (paperTemplates.find(template => template.id === origin.id)?.name ?? origin.id)
+  const catalogTemplate = origin && templateCatalog.find(template => template.id === origin.id)
+  const templateName = origin && (catalogTemplate?.name
+    ?? (origin.id.startsWith('local-') ? 'My templates' : origin.id))
   const sectionTitle = sections.find(([id]) => id === section)?.[1]
 
   function changeState(project: LibraryProject, state: LibraryProjectState, focusList = false) {
@@ -268,6 +275,8 @@ export function ProjectLibrary() {
           onClick={() => setNameDialog({ value: '', starter: 'canvas' })}><Plus /> New project</Button>
         <Button variant="outline" size="sm"
           disabled={!catalog || busy} onClick={() => fileInput.current?.click()}><FileUp /> Import project</Button>
+        <Button variant="outline" size="sm" disabled={!catalog || busy}
+          onClick={() => setWordImport(true)}><FileText /> Import Word</Button>
         <WorkbenchSetup storage={storageUnavailable ? 'unavailable' : database ? 'ready' : 'checking'} />
       </div>
     </header>
@@ -289,10 +298,9 @@ export function ProjectLibrary() {
           </button>)}
         </nav>
         <div className="mt-2 flex flex-wrap gap-1 border-t border-workbench-line pt-2 lg:mt-4 lg:flex-col lg:pt-3">
-          <button type="button" className="flex min-h-9 items-center gap-2 rounded-md px-2.5 text-left text-sm font-medium text-workbench-ink hover:bg-workbench-selection focus-visible:outline-2 focus-visible:outline-workbench-accent disabled:opacity-50"
-            disabled={!catalog || busy} onClick={() => setNameDialog({ value: '', starter: 'english-article' })}>
+          <Link href={templateMarketHref} className="flex min-h-9 items-center gap-2 rounded-md px-2.5 text-left text-sm font-medium text-workbench-ink hover:bg-workbench-selection focus-visible:outline-2 focus-visible:outline-workbench-accent">
             <BookOpen className="size-4 shrink-0" aria-hidden="true" /> Paper templates
-          </button>
+          </Link>
           <button type="button" className="flex min-h-9 items-center gap-2 rounded-md px-2.5 text-left text-sm font-medium text-workbench-ink hover:bg-workbench-selection focus-visible:outline-2 focus-visible:outline-workbench-accent disabled:opacity-50"
             disabled={!catalog || busy} onClick={() => void run(async () => {
               const { testPaperZip, testPaperName } = await import('@/lib/project/test-paper')
@@ -408,7 +416,9 @@ export function ProjectLibrary() {
           </div>
           <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2 border-y border-workbench-line py-3 text-xs">
             <dt className="text-workbench-muted">Last opened</dt><dd>{formatDate(selected.lastOpenedAt)}</dd>
-            <dt className="text-workbench-muted">Template</dt><dd className="break-words">{origin ? `${templateName} · ${origin.version}` : 'None recorded'}</dd>
+            <dt className="text-workbench-muted">Template</dt><dd className="break-words">{origin
+              ? `${templateName} · ${origin.version}${catalogTemplate?.delivery === 'official' ? ' · Legacy LaTeX starter' : ''}`
+              : 'None recorded'}</dd>
             <dt className="text-workbench-muted">Backup</dt><dd>
               <p>{recoveryStatus ? 'Saved on this browser' : 'Local save status unavailable'}</p>
               {recoveryStatus?.receipt ? <>
@@ -489,10 +499,6 @@ export function ProjectLibrary() {
           if (!name) return
           const id = nameDialog?.id
           const starter = nameDialog?.starter
-          if (starter === springerTemplate.id) {
-            templateInput.current?.click()
-            return
-          }
           void run(async connection => {
             if (id) {
               await updateLibraryProject(connection, id, { name })
@@ -512,6 +518,9 @@ export function ProjectLibrary() {
           </label>
           {!nameDialog?.id && <fieldset className="space-y-2" disabled={busy}>
             <legend className="pb-1 text-sm font-medium">Start with</legend>
+            <Link href={templateMarketHref} onClick={() => setNameDialog(undefined)} className="inline-flex gap-2 rounded-md px-2 py-1 text-sm font-medium text-workbench-accent hover:bg-workbench-selection">
+              <BookOpen className="size-4" /> Browse all paper templates
+            </Link>
             <label className="flex cursor-pointer items-start gap-3 rounded-lg border p-3 has-[:checked]:border-workbench-accent">
               <input className="mt-1 accent-workbench-accent" aria-label="Blank canvas" type="radio" name="starter" value="canvas"
                 checked={nameDialog?.starter === 'canvas'} onChange={() => setNameDialog(current => current && { ...current, starter: 'canvas' })} />
@@ -520,39 +529,27 @@ export function ProjectLibrary() {
                 <span className="text-muted-foreground">Map ideas and connect notes.</span>
               </span>
             </label>
-            {paperTemplates.map(template => <label key={template.id} className="flex cursor-pointer items-start gap-3 rounded-lg border p-3 has-[:checked]:border-workbench-accent">
+            {builtInPaperTemplates.map(template => <label key={template.id} className="flex cursor-pointer items-start gap-3 rounded-lg border p-3 has-[:checked]:border-workbench-accent">
               <input className="mt-1 accent-workbench-accent" aria-label={template.name} type="radio" name="starter" value={template.id}
                 checked={nameDialog?.starter === template.id} onChange={() => setNameDialog(current => current && { ...current, starter: template.id })} />
               <span className="min-w-0 text-sm">
                 <span className="block font-medium">{template.name}</span>
-                <span className="text-muted-foreground">{template.language} · {template.id === springerTemplate.id ? 'Official ZIP import' : 'Built-in template'}</span>
+                <span className="text-muted-foreground">{template.language} · Built-in template</span>
               </span>
             </label>)}
             {selectedTemplate && <div className="space-y-1.5 rounded-lg bg-muted p-3 text-sm" aria-label={selectedTemplate.name + ' contents'}>
               <p>{selectedTemplate.sections.join(' · ')}</p>
               <p className="text-muted-foreground">{selectedTemplate.compileDescription}</p>
-              {publisherTemplate && <a href={publisherTemplate.sourceUrl} target="_blank" rel="noreferrer"
-                className="inline-flex items-center gap-1 font-medium text-workbench-accent underline underline-offset-4">
-                Download the December 2024 ZIP from Springer Nature <ArrowUpRight aria-hidden="true" className="size-4 shrink-0" />
-              </a>}
             </div>}
           </fieldset>}
-          {publisherTemplate && <input ref={templateInput} hidden type="file" accept=".zip" aria-label="Choose Springer Nature ZIP"
-            onChange={event => {
-              const file = event.target.files?.[0]
-              event.target.value = ''
-              const name = nameDialog?.value.trim()
-              if (file && name) void run(async () => {
-                await openCopy(await importSpringerTemplate(file, name), 'write')
-                setNameDialog(undefined)
-              })
-            }} />}
           {error && <p role="alert" className="text-sm text-red-900">{error}</p>}
           <DialogFooter><Button type="submit" disabled={busy || !nameDialog?.value.trim()}>
-            {nameDialog?.id ? 'Save name' : publisherTemplate ? 'Import template ZIP' : 'Create project'}
+            {nameDialog?.id ? 'Save name' : 'Create project'}
           </Button></DialogFooter>
         </form>
       </DialogContent>
     </Dialog>
+    {wordImport && <WordImportDialog initialProfile="article" close={() => setWordImport(false)}
+      openProject={project => openCopy(project, 'write')} />}
   </main>
 }

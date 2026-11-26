@@ -1,15 +1,17 @@
 import { execFile } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { gunzipSync } from 'node:zlib'
 import { importSourceArchive, isProjectPath } from '@/lib/project/source-archive'
-import { compileFailureMessage, compileLog, parseCompileDiagnostics, type CompileReport } from '@/lib/project/compile-diagnostics'
+import { compileFailureMessage, compileLog, missingTexFile, parseCompileDiagnostics, type CompileReport } from '@/lib/project/compile-diagnostics'
 import { readSyncTex } from '@/lib/project/read-synctex'
 import { claimLocalCompiler, currentLocalCompile, writeCompileSources } from '@/lib/project/local-compile'
 import { compileProfileSchema } from '@/lib/project/compile-profile'
 import { runSystemTex, systemCompilerUnavailable } from '@/lib/project/system-tex'
+import { parsePdfFonts, type PdfFontInventory } from '@/lib/project/submission-fonts'
+import { readCompiledGeometry } from '@/lib/project/layout-geometry'
 
 export const runtime = 'nodejs'
 
@@ -57,7 +59,9 @@ export async function POST(request: Request) {
     }
 
     work = await mkdtemp(join(tmpdir(), 'research-latex-'))
-    const sources = join(work, 'sources')
+    // Tectonic records canonical absolute paths in SyncTeX, including on macOS
+    // where the system temporary directory may be reached through a symlink.
+    const sources = join(await realpath(work), 'sources')
     await writeCompileSources(sources, project)
     const engine = profile.data.engine
     const output = engine === 'tectonic' ? join(work, 'output') : await mkdtemp(join(dirname(join(sources, mainFile)), 'research-build-'))
@@ -94,8 +98,9 @@ export async function POST(request: Request) {
         ? 'Tectonic executable not found. Install it or set TECTONIC_BIN.'
         : failure.killed ? 'LaTeX compilation timed out.' : compileFailureMessage(outputText, onlyCached)
       const log = await readLog()
+      const dependency = missingTexFile(outputText) ?? missingTexFile(log)
       return Response.json({
-        error,
+        error: dependency ? '缺少 LaTeX 依赖文件 ' + dependency + '。请检查本机 TeX 安装或项目源包。' : error,
         diagnostics: parseCompileDiagnostics(outputText, mainFile, project.files.keys()),
         log: compileLog(outputText, log, 50_000),
       }, { status: 422 })
@@ -108,6 +113,19 @@ export async function POST(request: Request) {
         const text = gunzipSync(await readFile(mapPath), { maxOutputLength: maxBytes }).toString()
         return readSyncTex(text, syncRoot, mainFile, project.files.keys())
       }).catch(() => [])
+      let pdfFonts: PdfFontInventory | undefined
+      const fontLine = Number(params.get('fontLine'))
+      if (Number.isSafeInteger(fontLine) && fontLine > 0) {
+        let firstPage = Infinity
+        for (const region of map) {
+          if (region.path === mainFile && region.line >= fontLine) firstPage = Math.min(firstPage, region.page)
+        }
+        if (Number.isFinite(firstPage)) {
+          const fonts = await exec(process.env.PDFFONTS_BIN || 'pdffonts', ['-f', String(firstPage), join(output, job + '.pdf')],
+            { timeout: 6000, maxBuffer: 256 * 1024, signal: request.signal }).then(({ stdout }) => parsePdfFonts(stdout)).catch(() => undefined)
+          if (fonts) pdfFonts = { firstPage, fonts }
+        }
+      }
       const result = new FormData()
       result.set('pdf', new Blob([pdf], { type: 'application/pdf' }), job + '.pdf')
       result.set('sourceMap', JSON.stringify(map))
@@ -115,7 +133,7 @@ export async function POST(request: Request) {
       const diagnostics = parseCompileDiagnostics(outputText, mainFile, project.files.keys()).filter(issue => issue.severity === 'warning')
       const hasWarnings = /^warning:/mi.test(outputText) || /^(?:LaTeX|Package .+|Class .+) Warning:|^(?:Over|Under)full \\[hv]box/m.test(log)
       result.set('report', JSON.stringify({
-        diagnostics, hasWarnings,
+        diagnostics, hasWarnings, pdfFonts, geometry: readCompiledGeometry(log),
         log: [outputText, log].filter(Boolean).join('\n\n').slice(-50_000),
       } satisfies CompileReport))
       return new Response(result, { headers: { 'Cache-Control': 'no-store' } })

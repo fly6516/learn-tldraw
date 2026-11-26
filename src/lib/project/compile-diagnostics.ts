@@ -1,3 +1,6 @@
+import type { PdfFontInventory } from './submission-fonts'
+import type { CompiledGeometry } from './layout-geometry'
+
 export interface CompileDiagnostic {
   path: string
   line: number
@@ -9,6 +12,12 @@ export interface CompileReport {
   diagnostics: CompileDiagnostic[]
   hasWarnings: boolean
   log: string
+  pdfFonts?: PdfFontInventory
+  geometry?: CompiledGeometry[]
+}
+
+export function missingTexFile(output: string) {
+  return /(?:LaTeX Error:\s+File\s+|Missing input file\s+|I can't find file\s+)[\x60'"]?([a-z\d_][a-z\d_.+-]{0,119}\.(?:sty|cls|def|fd|tfm|pfb))['"\x60]/i.exec(output)?.[1]
 }
 
 export function compileFailureMessage(output: string, onlyCached: boolean) {

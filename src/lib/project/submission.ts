@@ -7,15 +7,17 @@ import { detectCompileCompatibility, type ExternalEngine } from './compile-compa
 import { exportSourceArchive } from './source-archive'
 import type { SubmissionEvidence } from './submission-evidence'
 import type { CompileProfile } from './compile-profile'
+import type { SubmissionLayout } from './submission-layout'
+import type { SubmissionStage } from './submission-stages'
 
 export type SubmissionIssue = { severity: 'error' | 'warning'; message: string; location?: SourceLocation }
-export type SubmissionFiles = { pdf: Blob; zip: Blob; warnings: boolean; diagnostics: SubmissionIssue[] }
+export type SubmissionFiles = { pdf: Blob; zip: Blob; materials?: Blob[]; warnings: boolean; diagnostics: SubmissionIssue[] }
 export type SubmissionVersion = SubmissionFiles & { id: string; name: string; createdAt: string; main: string;
   paths: string[]; excluded: string[]; drafts: string[]; issues: SubmissionIssue[]; externalEngine?: ExternalEngine; sourceChecksum?: string
-  evidence?: SubmissionEvidence; compileProfile?: CompileProfile }
-export type SubmissionVersionInfo = Omit<SubmissionVersion, 'pdf' | 'zip'>
+  evidence?: SubmissionEvidence; compileProfile?: CompileProfile; layoutReport?: SubmissionLayout }
+export type SubmissionVersionInfo = Omit<SubmissionVersion, 'pdf' | 'zip' | 'materials'>
 export type SubmissionBuild = Omit<SubmissionVersion, 'id' | 'name' | 'createdAt'>
-export type SubmissionSelection = Pick<SubmissionVersion, 'paths' | 'excluded' | 'drafts' | 'issues'> & { target: ProjectFileSystem }
+export type SubmissionSelection = Pick<SubmissionVersion, 'paths' | 'excluded' | 'drafts' | 'issues'> & { target: ProjectFileSystem; stage?: SubmissionStage; blindCover?: File }
 
 export async function exportExternalBuild(project: ProjectFileSystem) {
   const files = new Map([...project.files].filter(([, file]) => file.type !== 'directory')

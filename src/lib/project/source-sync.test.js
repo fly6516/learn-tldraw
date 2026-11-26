@@ -32,3 +32,26 @@ g3,9:10485760,9830400
   expect(findSourceRegion(map, 1, chapter.x, chapter.y)).toBeUndefined()
   expect(findSourceRegion(map, 2, 80, 400)).toBeUndefined()
 })
+
+test('keeps the first word of a paragraph on its source line when the box inherits the next heading tag', () => {
+  const root = resolve('sync-project')
+  const map = readSyncTex(`SyncTeX Version:1
+Input:1:./sample.tex
+Content:
+{1
+(1,17:5920357,17323024:28417720,498346,139537
+x1,17:7156258,17323024
+g1,16:7395464,17323024
+x1,16:7714406,17323024
+k1,17:34338077,17323024:26623671
+g1,17:34338077,17323024
+)
+(1,17:5920357,19161556:28417720,498346,139537
+x1,17:6974851,19161556
+g1,17:7387479,19161556
+)
+}1
+`, root, 'sample.tex', ['sample.tex'])
+  expect(findSourceRegion(map, 1, 96, 260)).toMatchObject({ path: 'sample.tex', line: 16 })
+  expect(findSourceRegion(map, 1, 96, 289)).toMatchObject({ path: 'sample.tex', line: 17 })
+})

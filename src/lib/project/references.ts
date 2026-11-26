@@ -43,7 +43,7 @@ function bibliographyFields(body: string) {
 export function bibliographyRecords(path: string, source: string) {
   const text = withoutComments(source)
   const header = /@([a-z]+)\s*([({])/gi
-  const entries: { entry: BibliographyEntry; start: number; end: number; fields: string; fieldsStart: number }[] = []
+  const entries: { entry: BibliographyEntry; type: string; start: number; end: number; fields: string; fieldsStart: number }[] = []
   for (let match = header.exec(text); match; match = header.exec(text)) {
     const bodyStart = header.lastIndex
     const open = match[2]
@@ -58,7 +58,7 @@ export function bibliographyRecords(path: string, source: string) {
     const start = bodyStart + keyMatch[0].indexOf(key)
     const fields = body.slice(keyMatch[0].length)
     const entry = { path, start, end: start + key.length, line: lineNumber(source, start), key, ...bibliographyFields(fields) }
-    entries.push({ entry, start: match.index, end: end + 1, fields, fieldsStart: bodyStart + keyMatch[0].length })
+    entries.push({ entry, type: match[1], start: match.index, end: end + 1, fields, fieldsStart: bodyStart + keyMatch[0].length })
   }
   return entries
 }
@@ -109,7 +109,7 @@ export function findCitations(path: string, source: string): (ReferenceLocation 
   const commands = /\\(?:\\|((?:[a-z]*cite[a-z]*|nocite))\*?(?![a-zA-Z@]))/gi
   const citations: (ReferenceLocation & { key: string })[] = []
   for (let match = commands.exec(text); match; match = commands.exec(text)) {
-    if (!match[1] || /^(?:citestyle|citepunct|citereset|citename|citefield|citelist)$/i.test(match[1])) continue
+    if (!match[1] || /^(?:setcitestyle|citestyle|citepunct|citereset|citename|citefield|citelist)$/i.test(match[1])) continue
     const multiple = /cites$/i.test(match[1])
     let cursor = commands.lastIndex
     do {

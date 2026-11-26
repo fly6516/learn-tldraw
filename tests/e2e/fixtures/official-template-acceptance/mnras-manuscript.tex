@@ -1,0 +1,70 @@
+\documentclass[fleqn,usenatbib]{mnras}
+\usepackage{newtxtext,newtxmath}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+
+\title[Survey window checks]{Repeatable Survey Window Checks}
+\author[A. Observer]{A. Observer\thanks{Acceptance fixture only}\\
+Survey Methods Laboratory}
+\date{Accepted for a local layout test}
+\pubyear{2026}
+
+\newcommand{\sampleparagraph}{The independent layout manuscript uses synthetic observations from two windows. We assign each observation to its original window before comparing the summaries. Recording the window assignment makes it possible to reconstruct the count when a row is updated. We retain an explicit description of the sampling conditions alongside each measurement so the example can be read without access to a separate data source.}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+A synthetic survey demonstrates how figure and table references, column flow, and a bibliography appear in the publisher class.
+\end{abstract}
+\begin{keywords}
+methods: observational
+\end{keywords}
+
+\section{Introduction}
+We compare synthetic windows in Fig.~\ref{fig:windows} and Table~\ref{tab:windows}. The included publisher example bibliography exercises BibTeX with \citet{Fournier1901}.
+\sampleparagraph
+
+\begin{figure}
+\centering
+\includegraphics[width=.80\columnwidth]{example.png}
+\caption{Reference image used to test column width.}
+\label{fig:windows}
+\end{figure}
+
+\section{Observation method}
+\sampleparagraph
+
+\sampleparagraph
+
+\begin{table}
+\centering
+\caption{Simulated counts by window.}
+\label{tab:windows}
+\begin{tabular}{lr}
+\hline
+Window & Count \\
+\hline
+Early & 4 \\
+Late & 2 \\
+\hline
+\end{tabular}
+\end{table}
+
+\section{Results}
+\sampleparagraph
+
+\sampleparagraph
+
+\sampleparagraph
+
+\section{Conclusions}
+\sampleparagraph
+
+\section*{Data availability}
+The synthetic counts are shown in Table~\ref{tab:windows}.
+
+\bibliographystyle{mnras}
+\bibliography{example}
+\bsp
+\label{lastpage}
+\end{document}

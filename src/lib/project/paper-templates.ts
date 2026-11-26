@@ -2,8 +2,9 @@ import JSZip from 'jszip'
 import { defaultCompileProfile, type CompileProfile } from './compile-profile'
 import { importSourceArchive } from './source-archive'
 import type { ProjectFileSystem } from './types'
+import { editableSource } from './writing-drafts'
 
-type PaperTemplate = {
+export type PaperTemplate = {
   id: string
   name: string
   language: string
@@ -50,8 +51,6 @@ export const springerTemplate = {
 } as const satisfies PaperTemplate & { sourceUrl: string; sha256: string }
 
 export const builtInPaperTemplates = [articleTemplate, chineseArticleTemplate] as const
-export const paperTemplates = [...builtInPaperTemplates, springerTemplate] as const
-export type PaperTemplateId = (typeof paperTemplates)[number]['id']
 type BuiltInId = (typeof builtInPaperTemplates)[number]['id']
 
 const englishFiles = {
@@ -132,36 +131,34 @@ const builtInFiles: Record<BuiltInId, Record<string, string>> = {
   'chinese-article': chineseFiles,
 }
 
-async function digest(bytes: ArrayBuffer) {
+export async function templateDigest(bytes: ArrayBuffer) {
   const hash = await crypto.subtle.digest('SHA-256', bytes)
   return Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, '0')).join('')
 }
 
 export async function createTemplateProject(templateId: BuiltInId, name: string): Promise<ProjectFileSystem> {
-  const template = templateId === articleTemplate.id ? articleTemplate : chineseArticleTemplate
+  const template = builtInPaperTemplates.find(template => template.id === templateId)!
   const zip = new JSZip()
   // Pin member dates so the provenance identifies the same source ZIP across projects.
   const date = new Date('2000-01-01T00:00:00Z')
   for (const [path, text] of Object.entries(builtInFiles[templateId])) zip.file(path, text, { date, createFolders: false })
   const bytes = await zip.generateAsync({ type: 'arraybuffer' })
-  return openTemplateArchive(new File([bytes], template.id + '.zip'), template, name, await digest(bytes))
+  return openTemplateArchive(new File([bytes], template.id + '.zip'), template, name, await templateDigest(bytes))
 }
 
-export async function importSpringerTemplate(file: File, name: string): Promise<ProjectFileSystem> {
-  if (file.size > 128 * 1024 * 1024 || await digest(await file.arrayBuffer()) !== springerTemplate.sha256) {
-    throw new Error('Choose the December 2024 ZIP from Springer Nature. For another release, use Import project.')
-  }
-  return openTemplateArchive(file, springerTemplate, name, springerTemplate.sha256)
-}
-
-async function openTemplateArchive(file: File, template: PaperTemplate, name: string, sha256: string) {
+export async function openTemplateArchive(file: File, template: Pick<PaperTemplate, 'id' | 'version' | 'mainFile' | 'compileProfile'>, name: string,
+  sha256: string, resolveMain?: (project: ProjectFileSystem) => string) {
   const project = await importSourceArchive(file)
+  const mainFile = resolveMain?.(project) ?? template.mainFile
+  if (!/\.tex$/i.test(mainFile) || !/\\documentclass\b/.test(editableSource(project, mainFile) ?? '')) {
+    throw new Error('The selected main file must be a LaTeX document with a document class.')
+  }
   return {
     ...project,
     metadata: {
       ...project.metadata,
       projectName: name,
-      mainFile: template.mainFile,
+      mainFile,
       compileProfile: template.compileProfile,
       templateOrigin: { id: template.id, version: template.version, sha256 },
     },

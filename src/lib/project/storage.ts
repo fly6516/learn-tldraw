@@ -6,7 +6,10 @@ import { buildManuscriptSnapshot } from './manuscript-review'
 import { chatActionPaths, nextChatCheckpoint, type ChatAction } from './writing-chat-actions'
 import type { ChatCheckpoint, ChatHistory, ChatReplyTarget, ChatSource, ChatTaskStep } from './writing-chat'
 import { updateFileContent } from './file-system'
+import type { ExternalTemplatePreview } from './external-template-build'
 import type { ProjectFileSystem } from './types'
+import type { LocalPaperTemplate } from './template-catalog'
+import type { OfficialTemplateRelease, TemplateOrigin } from './template-release'
 import type { ProjectSnapshot, ProjectSnapshotInfo } from './snapshots'
 import { restoreSnapshotFiles } from './snapshots'
 import type { SubmissionVersion, SubmissionVersionInfo } from './submission'
@@ -16,6 +19,81 @@ import type { RevisionPackageInput } from './revision-package'
 import { applyWritingDrafts, draftConflicts, editableSource, sameDraft, type PortableWritingState, type WritingDraft, type WritingDrafts, type WritingKey, type WritingView } from './writing-drafts'
 
 const storeName = 'projects'
+
+export async function listOfficialTemplateReleases(database: IDBDatabase, id: string) {
+    const transaction = database.transaction(storeName)
+    const store = transaction.objectStore(storeName)
+    const request = store.getAll(IDBKeyRange.bound(
+        ['official-template-release', id], ['official-template-release', id, []], true, true))
+    const current = store.get(['official-template-current', id])
+    await complete(transaction)
+    const version = (current.result as TemplateOrigin | undefined)?.version
+    return (request.result as OfficialTemplateRelease[]).sort((a, b) =>
+        Number(b.version === version) - Number(a.version === version) || b.publishedAt.localeCompare(a.publishedAt))
+}
+
+export async function publishOfficialTemplateRelease(database: IDBDatabase, release: OfficialTemplateRelease, parent: TemplateOrigin) {
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    const store = transaction.objectStore(storeName)
+    const key = ['official-template-current', release.id]
+    const current = store.get(key)
+    let conflict = false
+    current.onsuccess = () => {
+        const saved = current.result as TemplateOrigin | undefined
+        if (saved && (saved.sha256 !== parent.sha256 || saved.version !== parent.version)) {
+            conflict = true
+            return
+        }
+        store.add(release, ['official-template-release', release.id, release.version])
+        store.put({ id: release.id, version: release.version, sha256: release.sha256 }, key)
+    }
+    await complete(transaction)
+    if (conflict) throw new Error('另一个标签页已发布新版本。刷新后重新核对候选。')
+}
+
+export async function saveOfficialSwitchAcceptance(database: IDBDatabase, release: OfficialTemplateRelease) {
+    if (!release.switchAcceptance) throw new Error('缺少项目内切换验收结果。')
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    const store = transaction.objectStore(storeName)
+    const key = ['official-template-release', release.id, release.version]
+    const request = store.get(key)
+    let matched = false
+    request.onsuccess = () => {
+        const current = request.result as OfficialTemplateRelease | undefined
+        if (current?.sha256 !== release.sha256 || current.kind !== release.kind) return
+        matched = true
+        store.put(release, key)
+    }
+    await complete(transaction)
+    if (!matched) throw new Error('已发布版本发生变化，请重新验收。')
+}
+
+export async function listLocalTemplates(database: IDBDatabase) {
+    const transaction = database.transaction(storeName)
+    const request = transaction.objectStore(storeName).getAll(IDBKeyRange.bound(['paper-template'], ['paper-template', []], true, true))
+    await complete(transaction)
+    return (request.result as LocalPaperTemplate[]).sort((a, b) => a.name.localeCompare(b.name))
+}
+
+export async function addLocalTemplate(database: IDBDatabase, template: LocalPaperTemplate) {
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    transaction.objectStore(storeName).add(template, ['paper-template', template.id])
+    await complete(transaction)
+}
+
+export async function updateLocalTemplate(database: IDBDatabase, id: string, name?: string) {
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    const store = transaction.objectStore(storeName)
+    const key = ['paper-template', id]
+    const request = store.get(key)
+    request.onsuccess = () => {
+        if (!request.result) return
+        if (name === undefined) store.delete(key)
+        else store.put({ ...request.result, name }, key)
+    }
+    await complete(transaction)
+    if (!request.result) throw new Error('This local template is no longer available.')
+}
 
 export class ProjectStorageConflict extends Error {
     constructor() { super('Another tab saved a newer project version. Your drafts were kept. Review the saved version before continuing.') }
@@ -81,12 +159,12 @@ export async function listSubmissionVersions(database: IDBDatabase, key: Writing
 export async function saveSubmissionVersion(database: IDBDatabase, key: WritingKey, version: SubmissionVersion, chatRun?: string) {
     const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
     const store = transaction.objectStore(storeName)
-    const { pdf, zip, ...info } = version
+    const { pdf, zip, materials, ...info } = version
   const entry = ['submission-info', ...key, version.id]
   const previous = store.get(entry)
   previous.onsuccess = () => {
       if (previous.result) return
-      store.add({ pdf, zip }, ['submission-files', ...key, version.id])
+      store.add({ pdf, zip, materials }, ['submission-files', ...key, version.id])
       store.add(info, entry)
       if (chatRun) {
           appendTaskStep(store, key, chatRun, { kind: 'archived', at: Date.now(), detail: version.name })
@@ -101,7 +179,7 @@ export async function readSubmissionFiles(database: IDBDatabase, key: WritingKey
     const transaction = database.transaction(storeName)
     const request = transaction.objectStore(storeName).get(['submission-files', ...key, id])
     await complete(transaction)
-    return request.result as Pick<SubmissionVersion, 'pdf' | 'zip'> | undefined
+    return request.result as Pick<SubmissionVersion, 'pdf' | 'zip' | 'materials'> | undefined
 }
 
 export async function readRevisionPackage(database: IDBDatabase, key: WritingKey, reviewed: RevisionRound): Promise<RevisionPackageInput> {
@@ -441,7 +519,7 @@ function backupHistoryReader(store: IDBObjectStore, key: WritingKey, selection: 
     }
     const publication = selection.publication ? {
         submissions: store.getAll(historyRange('submission-info', key)),
-        files: readRecord<Pick<SubmissionVersion, 'pdf' | 'zip'>>('submission-files'),
+        files: readRecord<Pick<SubmissionVersion, 'pdf' | 'zip' | 'materials'>>('submission-files'),
         rounds: store.getAll(historyRange('revision-round', key)),
     } : undefined
     const snapshots = selection.snapshots ? { list: store.get(snapshotList(key)), projects: readRecord<ProjectFileSystem>('snapshot') } : undefined
@@ -491,8 +569,8 @@ export async function readBackupHistory(database: IDBDatabase, key: WritingKey, 
 function restoreBackupHistory(store: IDBObjectStore, key: WritingKey, history: PortableProjectHistory) {
     if (history.publication) {
         for (const bucket of ['submission-files', 'submission-info', 'revision-round']) store.delete(historyRange(bucket, key))
-        for (const { pdf, zip, ...info } of history.publication.submissions) {
-            store.put({ pdf, zip }, ['submission-files', ...key, info.id])
+        for (const { pdf, zip, materials, ...info } of history.publication.submissions) {
+            store.put({ pdf, zip, materials }, ['submission-files', ...key, info.id])
             store.put(info, ['submission-info', ...key, info.id])
         }
         for (const round of history.publication.rounds) store.put(round, ['revision-round', ...key, round.id])
@@ -776,13 +854,30 @@ export function readProject(database: IDBDatabase, key: string): Promise<Project
     })
 }
 
-export async function writeProject(database: IDBDatabase, key: string, project: ProjectFileSystem, expected: ProjectFileSystem | null) {
+export async function readExternalTemplatePreview(database: IDBDatabase, key: string, project: ProjectFileSystem) {
+    const transaction = database.transaction(storeName)
+    const request = transaction.objectStore(storeName).get(['external-template-preview', key, project.metadata.createdAt])
+    await complete(transaction)
+    const preview = request.result as (ExternalTemplatePreview & { selectionId: string }) | undefined
+    return preview?.selectionId === project.metadata.activeTemplate?.selectionId ? preview : undefined
+}
+
+export async function writeProject(database: IDBDatabase, key: string, project: ProjectFileSystem, expected: ProjectFileSystem | null,
+    externalPreview?: ExternalTemplatePreview) {
     const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
     const store = transaction.objectStore(storeName)
     const current = store.get(key)
     let saved: ProjectFileSystem | undefined
     current.onsuccess = () => {
-        if (sameStoredProject(current.result, expected)) saved = putProject(store, key, project)
+        if (!sameStoredProject(current.result, expected)) return
+        saved = putProject(store, key, project)
+        const artifactKey = ['external-template-preview', key, project.metadata.createdAt]
+        if (externalPreview && project.metadata.activeTemplate?.kind === 'mit-thesis') {
+            store.put({ ...externalPreview, selectionId: project.metadata.activeTemplate.selectionId }, artifactKey)
+        } else if (expected?.metadata.activeTemplate?.kind === 'mit-thesis'
+            && expected.metadata.activeTemplate.selectionId !== project.metadata.activeTemplate?.selectionId) {
+            store.delete(artifactKey)
+        }
     }
     await complete(transaction)
     if (!saved) throw new ProjectStorageConflict()

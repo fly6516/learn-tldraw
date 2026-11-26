@@ -114,18 +114,16 @@ test('creates independent Chinese manuscripts and compiles the edited one with l
 })
 
 test('keeps an unrecognized ZIP out of the publisher template flow', async ({ page }) => {
-  await page.goto('/research')
-  await page.getByRole('button', { name: 'New project', exact: true }).click()
-  const dialog = page.getByRole('dialog', { name: 'New project' })
-  await dialog.getByRole('radio', { name: 'Springer Nature journal article' }).check()
-  await expect(dialog.getByRole('link', { name: /Download the December 2024 ZIP/ }))
-    .toHaveAttribute('href', /springernature\.com\/.*latex-author-support$/)
+  await page.goto('/research?section=templates&template=springer-nature')
+  await page.getByRole('button', { name: '手动上传原件', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Create project from template' })
   await dialog.getByRole('textbox', { name: 'Project name' }).fill('Publisher manuscript')
-  await dialog.getByLabel('Choose Springer Nature ZIP').setInputFiles({
+  await dialog.getByLabel('Publisher template ZIP').setInputFiles({
     name: 'wrong.zip', mimeType: 'application/zip', buffer: Buffer.from('wrong archive'),
   })
-  await expect(dialog.getByRole('alert')).toContainText('Choose the December 2024 ZIP')
-  await expect(page).toHaveURL(/\/research$/)
+  await dialog.getByRole('button', { name: 'Create project' }).click()
+  await expect(dialog.getByRole('alert')).toContainText('This ZIP does not match the catalog version')
+  await expect(page).toHaveURL(/template=springer-nature/)
 })
 
 test('leaving a project revokes a pending AI save while keeping the proposal for review', async ({ page }) => {

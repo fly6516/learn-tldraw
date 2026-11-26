@@ -8,6 +8,7 @@ export const compileProfileSchema = z.discriminatedUnion('engine', [
 
 export type CompileProfile = z.infer<typeof compileProfileSchema>
 export const defaultCompileProfile = { engine: 'tectonic', bibliography: 'auto' } satisfies CompileProfile
+export const wordLayoutCompile = { mainFile: 'main.tex', compileProfile: { engine: 'xelatex', bibliography: 'none' } } as const
 export const compilerLabels: Record<CompileProfile['engine'], string> = {
   tectonic: 'Tectonic', pdflatex: 'pdfLaTeX', xelatex: 'XeLaTeX', lualatex: 'LuaLaTeX',
 }

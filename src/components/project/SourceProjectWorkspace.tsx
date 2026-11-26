@@ -6,6 +6,13 @@ import dynamic from 'next/dynamic'
 import type { editor, IPosition } from 'monaco-editor'
 import { BookOpen, ChevronRight, CircleAlert, Download, Ellipsis, FileCode2, FileText, Folder, Link2, ListChecks, LocateFixed, PanelLeft, Play, Save, SlidersHorizontal, Sparkles, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { WordLayoutReview } from '@/components/research/WordLayoutReview'
+import { LayoutPreflight } from './LayoutPreflight'
+import { assessLayout, layoutPreflightProfile, type LayoutFinding } from '@/lib/project/layout-preflight'
+import { assessSubmissionStage, njuptBlindCover, stagesForTemplate, submissionHasFigures, type BlindEvidence, type SubmissionStage } from '@/lib/project/submission-stages'
+import { njuptDepositFontFinding } from '@/lib/project/submission-fonts'
+import { buildSubmissionLayout } from '@/lib/project/submission-layout'
+import { wordLayoutIssuesSchema, wordLayoutSchema } from '@/lib/project/word-layout'
 import { WorkbenchSetup } from './WorkbenchSetup'
 import { RightToolPanel, useRightToolPanelWide } from '@/components/ui/right-tool-panel'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
@@ -15,6 +22,8 @@ import type { ImperativePanelGroupHandle, ImperativePanelHandle } from 'react-re
 import { useProjectFileSystem } from '@/contexts/ProjectFileSystemContext'
 import { getFileTree, updateFileContent, type FileTreeNode } from '@/lib/project/file-system'
 import { exportSourceArchive, sourceArchiveEntry } from '@/lib/project/source-archive'
+import { projectSourceDigest, type ExternalTemplatePreview } from '@/lib/project/external-template-build'
+import { activeTemplateEngine, type ActiveTemplate } from '@/lib/project/active-template'
 import type { ProjectFile, ProjectFileSystem, ResearchNodeData } from '@/lib/project/types'
 import { WritingAiWorkbench } from './WritingAiWorkbench'
 import type { ChatAction } from '@/lib/project/writing-chat-actions'
@@ -32,9 +41,10 @@ import { checkCitations, collectBibliography, indexCanvasReferences, type Biblio
 import { indexLatexLabels, sourceOffsetAtPosition, sourcePosition, type SourceLocation } from '@/lib/project/latex-source'
 import type { SourceProblem } from './MonacoSourceEditor'
 import type { CompileDiagnostic, CompileReport } from '@/lib/project/compile-diagnostics'
+import { manuscriptRegions, type TemplatePreview, type LineSources } from '@/lib/project/template-source-map'
 import { findPdfRegion, type SyncRegion } from '@/lib/project/source-sync'
 import { applyWritingDrafts, draftConflicts, editableSource, sameDraft, type PortableWritingState, type WritingDrafts } from '@/lib/project/writing-drafts'
-import { commitFileOperation, commitWritingDrafts, commitChatAction, commitManuscriptSave, readSourceMoves, undoChatBatches } from '@/lib/project/storage'
+import { readExternalTemplatePreview, writeProject, commitFileOperation, commitWritingDrafts, commitChatAction, commitManuscriptSave, readSourceMoves, undoChatBatches } from '@/lib/project/storage'
 import type { ChatVerification } from '@/lib/project/writing-chat-validation'
 import type { SourceMove } from '@/lib/project/writing-ai-evidence'
 import type { FileOperation } from '@/lib/project/file-refactor'
@@ -55,6 +65,7 @@ const MonacoSourceEditor = dynamic(() => import('./MonacoSourceEditor').then(mod
   ssr: false,
   loading: () => <p role="status" className="p-4 text-sm text-muted-foreground">Loading source editor…</p>,
 })
+const TemplateExportDialog = dynamic(() => import('./TemplateExportDialog').then(module => module.TemplateExportDialog), { ssr: false })
 const SyncedPdfPreview = dynamic(() => import('./SyncedPdfPreview').then(module => module.SyncedPdfPreview), {
   ssr: false,
   loading: () => <p role="status" className="p-4 text-sm text-muted-foreground">Loading PDF preview…</p>,
@@ -117,14 +128,23 @@ function Files({ nodes, selected, main, onSelect, dirty, sourcePaths, onSetMain,
 
 type GenerateSource = (project: ProjectFileSystem, onNode?: (node: ResearchNodeData, line: number) => void) => string
 type CompileSnapshot = { main: string; profile: string; files: ProjectFileSystem['files'] }
-type ExternalSubmission = Omit<SubmissionBuild, 'pdf' | 'warnings' | 'diagnostics'> & { checksum: string; downloadUrl: string; snapshot: CompileSnapshot }
+type SubmissionSnapshot = CompileSnapshot & { stage?: SubmissionStage; working?: ProjectFileSystem['files']; blindCover?: File }
+type ExternalSubmission = Omit<SubmissionBuild, 'pdf' | 'warnings' | 'diagnostics'> & { checksum: string; downloadUrl: string; snapshot: SubmissionSnapshot; rendered: ProjectFileSystem }
 
-function sameSubmissionInputs(previous: CompileSnapshot, current?: CompileSnapshot) {
-  return current && previous.main === current.main && previous.profile === current.profile && previous.files.size === current.files.size
+function sameSubmissionInputs(previous: SubmissionSnapshot, current?: SubmissionSnapshot) {
+  if (!current || previous.main !== current.main || previous.profile !== current.profile ||
+    previous.stage !== current.stage || previous.blindCover !== current.blindCover) return false
+  if (previous.stage) return Boolean(previous.working && current.working && sameSources(previous.working, current.working)
+    && sameSources(previous.files, current.files))
+  return previous.files.size === current.files.size
     && [...previous.files].every(([path, before]) => {
       const after = current.files.get(path)
       return after && sourceArchiveEntry(before) === sourceArchiveEntry(after)
     })
+}
+
+function submissionFilePaths(files: ProjectFileSystem['files']) {
+  return [...files.values()].filter(file => file.type !== 'directory').map(file => file.path).sort()
 }
 
 function submissionDiagnostics(diagnostics: CompileDiagnostic[], files: ProjectFileSystem['files']): SubmissionIssue[] {
@@ -187,22 +207,42 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     (file): file is ProjectFile & { content: string } => file.type !== 'directory' && typeof file.content === 'string',
   ).sort((a, b) => a.path.localeCompare(b.path)), [project.files])
   const sourcePaths = useMemo(() => new Set(textFiles.map(file => file.path)), [textFiles])
+  const activeTemplate = project.metadata.activeTemplate
+  const wordLayoutReview = useMemo(() => {
+    if (activeTemplate?.kind === 'zju-undergraduate' || activeTemplate?.kind === 'sjtu-graduate-word') return { rules: activeTemplate.layout, issues: [] }
+    if (activeTemplate) return
+    const layout = textFiles.find(file => file.path === 'layout.json')
+    if (!layout || !sourcePaths.has('word-layout.tex')) return
+    try {
+      const rules = wordLayoutSchema.parse(JSON.parse(layout.content))
+      const file = textFiles.find(file => file.path === 'word-layout-issues.json')
+      const issues = file ? wordLayoutIssuesSchema.safeParse(JSON.parse(file.content)).data : undefined
+      return { rules, issues: issues ?? [] }
+    } catch { return undefined }
+  }, [activeTemplate, sourcePaths, textFiles])
   const texFiles = textFiles.filter(file => /\.tex$/i.test(file.path))
   const main = texFiles.find(file => file.path === project.metadata.mainFile)?.path
     ?? (generateSource && sourcePaths.has('main.tex') ? 'main.tex' : texFiles[0]?.path ?? '')
   const profile = project.metadata.compileProfile
-  const profileKey = compileProfileKey(profile)
+  const templateSelectionKey = activeTemplate?.selectionId ?? ''
+  const profileKey = compileProfileKey(profile) + (templateSelectionKey ? ':' + templateSelectionKey : '')
+  const originalTemplateName = project.metadata.templateOrigin
+    ? project.metadata.templateOrigin.id + ' · ' + project.metadata.templateOrigin.version : '原项目版式'
   const [compileSettingsOpen, setCompileSettingsOpen] = useState(false)
+  const [wordReviewOpen, setWordReviewOpen] = useState(false)
   const [selection, setSelected] = useState<string>()
   const wanted = selection ?? restoredView?.path ?? main
   const selected = sourcePaths.has(wanted) ? wanted : main
   const [busy, setBusy] = useState(false)
   const [writing, setWriting] = useState(false)
   const [submissionOpen, setSubmissionOpen] = useState(false)
+  const [templateExport, setTemplateExport] = useState<{ files: ProjectFileSystem['files']; main: string }>()
   const [revision, setRevision] = useState<{ submissionId?: string }>()
   const [revisionRoundId, setRevisionRoundId] = useState<string>()
   const [includeDrafts, setIncludeDrafts] = useState(false)
-  const [submissionResult, setSubmissionResult] = useState<{ build: SubmissionBuild; snapshot: CompileSnapshot }>()
+  const [selectedStage, setSelectedStage] = useState<SubmissionStage>()
+  const [uploadedBlindCover, setUploadedBlindCover] = useState<File>()
+  const [submissionResult, setSubmissionResult] = useState<{ build: SubmissionBuild; snapshot: SubmissionSnapshot; layout?: LayoutFinding[] }>()
   const [externalSubmission, setExternalSubmission] = useState<ExternalSubmission>()
   const externalPreparation = useRef(0)
   const [submissionExcluded, setSubmissionExcluded] = useState<ReadonlySet<string>>(new Set())
@@ -226,6 +266,8 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const [sourceMap, setSourceMap] = useState<SyncRegion[]>([])
   const [pdfPage, setPdfPage] = useState(1)
   const [pdfTarget, setPdfTarget] = useState<SyncRegion | null>(null)
+  const [layoutFindings, setLayoutFindings] = useState<LayoutFinding[]>()
+  const [layoutCheckOpen, setLayoutCheckOpen] = useState(false)
   const [syncMessage, setSyncMessage] = useState('')
   const [panel, setPanel] = useState<'problems' | 'references' | 'cross-references' | 'review' | null>(null)
   const [aiOpen, setAiOpen] = useState(Boolean(project.metadata.writingSample))
@@ -304,6 +346,8 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const workingProject = useMemo(() => withGeneratedSource(applyWritingDrafts(project, drafts)), [drafts, project, withGeneratedSource])
   const savedProject = useMemo(() => withGeneratedSource(project), [project, withGeneratedSource])
   const workingFiles = workingProject.files
+  const latestTemplateSource = useRef({ main, files: workingFiles })
+  useLayoutEffect(() => { latestTemplateSource.current = { main, files: workingFiles } }, [main, workingFiles])
   const { headings, blocks, index, crossReferences, labelTitles } = useMemo(() => {
     const source = { files: workingFiles }
     const documents = new Map<string, string>()
@@ -340,15 +384,22 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const submission = useMemo(() => {
     if (!submissionOpen) return
     const source = includeDrafts ? workingProject : withGeneratedSource(project)
-    const paths = [...source.files].filter(([, file]) => file.type !== 'directory').map(([path]) => path).sort()
+    const paths = submissionFilePaths(source.files)
     const excluded = new Set(paths.filter(path => path !== main && submissionExcluded.has(path)))
     return { ...prepareSubmission(source, main, excluded), paths, excluded }
   }, [submissionOpen, includeDrafts, workingProject, withGeneratedSource, project, main, submissionExcluded])
-  const submissionSnapshot = useMemo(() => submission && { main, profile: profileKey, files: submission.target.files }, [main, profileKey, submission])
+  const submissionStageOptions = stagesForTemplate(activeTemplate?.origin.id ?? project.metadata.templateOrigin?.id)
+  const stage = selectedStage && submissionStageOptions.includes(selectedStage) ? selectedStage : undefined
+  const blindCover = stage === 'njupt-blind' ? uploadedBlindCover : undefined
+  const submissionSnapshot = useMemo(() => submission && { main, profile: profileKey, files: submission.target.files,
+    stage, blindCover, working: stage ? workingFiles : undefined }, [main, profileKey, submission, stage, blindCover, workingFiles])
   const latestSubmission = useRef(submissionSnapshot)
   useLayoutEffect(() => { latestSubmission.current = submissionSnapshot }, [submissionSnapshot])
   const freshExternal = externalSubmission && sameSubmissionInputs(externalSubmission.snapshot, submissionSnapshot) ? externalSubmission : undefined
   const freshResult = submissionResult && sameSubmissionInputs(submissionResult.snapshot, submissionSnapshot) ? submissionResult.build : undefined
+  const templateId = project.metadata.templateOrigin?.id
+  const activeEngine = activeTemplate && activeTemplateEngine(activeTemplate)
+  const preflightAvailable = Boolean(activeTemplate || layoutPreflightProfile(workingFiles, templateId))
   const catalog = useMemo(() => ({ project: project.metadata.createdAt, index, blocks, references, files: workingFiles }),
     [index, blocks, references, workingFiles, project.metadata.createdAt])
   useLayoutEffect(() => {
@@ -804,6 +855,54 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     markSourceChanged()
   }
 
+  async function setCurrentTemplate(template?: ActiveTemplate, preview?: TemplatePreview | ExternalTemplatePreview) {
+    if (!storage || !storageKey || locked || writeInProgress.current) throw new Error('本机项目暂时无法保存，请稍后重试。')
+    if (template && conflicts.length) throw new Error('请先处理稿件的本地草稿冲突。')
+    if (template && (!templateExport || templateExport.main !== latestTemplateSource.current.main
+      || !sameSources(templateExport.files, latestTemplateSource.current.files))) {
+      throw new Error('稿件在预览后发生了变化，请重新打开面板并编译预览。')
+    }
+    writeInProgress.current = true
+    setWriting(true)
+    try {
+      const stored = await flushProject(project)
+      const metadata = { ...stored.metadata }
+      if (template) metadata.activeTemplate = template
+      else delete metadata.activeTemplate
+      const external = preview && 'sourceSha256' in preview ? preview : undefined
+      if (template?.kind === 'mit-thesis') {
+        const current = latestTemplateSource.current
+        if (!external || external.sourceSha256 !== await projectSourceDigest(current.files, current.main)
+          || current !== latestTemplateSource.current) throw new Error('稿件在外部编译后发生了变化，请重新准备源包。')
+      }
+      const saved = await writeProject(storage, storageKey, { ...stored, metadata }, stored, external)
+      acceptStoredProject(saved, stored)
+      markSourceChanged()
+      setLayoutFindings(undefined)
+      if (template && preview && templateExport) {
+        setPdfUrl(URL.createObjectURL(preview.pdf))
+        setPdfFilename(template.main.replace(/\.tex$/i, '.pdf'))
+        setLastCompile({ ...templateExport, profile: compileProfileKey(profile) + ':' + template.selectionId })
+        setSourceMap(preview.regions)
+        setPdfPage(1)
+        setNarrowView('pdf')
+      }
+    } finally {
+      writeInProgress.current = false
+      setWriting(false)
+    }
+  }
+
+  async function compileSource(source: ProjectFileSystem, signal: AbortSignal, stage?: SubmissionStage, cover?: File):
+    Promise<{ project: ProjectFileSystem; lines?: LineSources; blind?: BlindEvidence }> {
+    if (!source.metadata.activeTemplate) {
+      if (stage === 'njupt-blind') throw new Error('请先在「更换模板」中启用已配置题名与专业字段的南邮专硕版式。')
+      return { project: source }
+    }
+    const { projectWithActiveTemplate } = await import('@/lib/project/template-export-client')
+    return projectWithActiveTemplate(source, main, signal, stage, cover)
+  }
+
   async function discard(paths: string[]) {
     if (locked) return
     setWriting(true)
@@ -824,15 +923,19 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     const signal = chatSignal ? AbortSignal.any([chatSignal, controller.signal]) : controller.signal
     compileRequest.current = controller
     setBusy(true)
-    const target = submissionSelection?.target ?? workingProject
+    const source = submissionSelection?.target ?? workingProject
+    const stage = submissionSelection?.stage
+    const cover = submissionSelection?.blindCover
+    const submitted: SubmissionSnapshot = { main, profile: profileKey, files: source.files, stage, blindCover: cover, working: stage ? workingFiles : undefined }
     // A saved-only submission may differ from the sources in Monaco.
-    const updatePreview = !submissionSelection || (!chatSignal
-      && sameSources(target.files, new Map([...workingFiles].filter(([, file]) => file.type !== 'directory'))))
+    const updatePreview = !submissionSelection || (!chatSignal && stage !== 'njupt-blind'
+      && sameSources(source.files, new Map([...workingFiles].filter(([, file]) => file.type !== 'directory'))))
     const feedback = (status: ChatCompileFeedback['status'], message: string, issues: CompileDiagnostic[] = [], log?: string) => ({
       status, message: message.slice(0, 1000), diagnostics: issues.slice(0, 40).map(issue => ({ ...issue, message: issue.message.slice(0, 500) })),
       log: log?.slice(-4000),
     })
     if (updatePreview) {
+      setLayoutFindings(undefined)
       setSyncMessage('')
       setError('')
       setLog('')
@@ -841,10 +944,42 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       setHasWarnings(false)
     }
     try {
-      const snapshot = { main, profile: profileKey, files: updatePreview ? workingFiles : target.files }
+      const snapshot = { main, profile: profileKey, files: updatePreview ? workingFiles : source.files }
+      if (source.metadata.activeTemplate?.kind === 'mit-thesis') {
+        if (submissionSelection) throw new Error('当前 MIT 版式需要外部 LuaLaTeX。在此面板准备外部编译 ZIP 后上传 PDF。')
+        if (chatSignal) return { feedback: feedback('failed', 'Use the workbench to verify the current MIT external build.') }
+        const preview = storage && storageKey ? await readExternalTemplatePreview(storage, storageKey, source) : undefined
+        const digest = preview ? await projectSourceDigest(source.files, main) : undefined
+        if (signal.aborted) return
+        if (preview && digest === preview.sourceSha256 && sameSources(source.files, latestTemplateSource.current.files)
+          && main === latestTemplateSource.current.main) {
+          setPdfUrl(URL.createObjectURL(preview.pdf))
+          setPdfFilename('mit-thesis.pdf')
+          setLastCompile(snapshot)
+          setSourceMap(preview.regions)
+          setPdfTarget(null)
+          setPdfPage(1)
+          setNarrowView('pdf')
+          return { feedback: feedback('passed', 'Verified MIT external PDF restored.') }
+        }
+        setTemplateExport(latestTemplateSource.current)
+        return
+      }
+      const { project: target, lines, blind } = await compileSource(source, signal, stage, cover)
+      const switched = target !== source
+      const entry = switched ? target.metadata.mainFile! : main
+      const editorDiagnostics = (issues: CompileDiagnostic[]) => switched
+        ? issues.map(issue => ({ ...issue, path: '', message: `${issue.path}:${issue.line} · ${issue.message}` }))
+        : issues
       const packaged = submissionSelection ? await exportExternalBuild(target) : undefined
       const archive = packaged?.zip ?? await exportSourceArchive(target)
-      const response = await fetch(projectCompileUrl(main, target.metadata.compileProfile), {
+      let compileUrl = projectCompileUrl(entry, target.metadata.compileProfile)
+      if (stage === 'njupt-deposit') {
+        const source = target.files.get(entry)
+        const bodyLine = source && 'content' in source ? source.content?.split(/\r?\n/).findIndex(line => /^\s*\\CustomWordBody\b/.test(line)) : undefined
+        if (bodyLine !== undefined && bodyLine >= 0) compileUrl += '&fontLine=' + (bodyLine + 2)
+      }
+      const response = await fetch(compileUrl, {
         method: 'POST', body: archive, signal,
       })
       if (!response.ok) {
@@ -852,12 +987,13 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         if (signal.aborted) return
         if (submissionSelection && !chatSignal) {
           setSubmissionError([failure.error, failure.log].filter(Boolean).join('\n'))
-          setSubmissionCompilerIssues(submissionDiagnostics(failure.diagnostics ?? [], target.files))
+          setSubmissionCompilerIssues(submissionDiagnostics(editorDiagnostics(failure.diagnostics ?? []), source.files))
         }
         if (updatePreview) {
-          setError(failure.error)
+          const generatedError = switched && failure.diagnostics?.[0]
+          setError(generatedError ? `${failure.error} ${generatedError.path}:${generatedError.line} · ${generatedError.message}` : failure.error)
           setLog(failure.log ?? '')
-          setDiagnostics(failure.diagnostics ?? [])
+          setDiagnostics(editorDiagnostics(failure.diagnostics ?? []))
           setDiagnosticSnapshot(snapshot)
           if (!chatSignal && !aiDocked && !wideTools) setAiOpen(false)
           setPanel('problems')
@@ -871,34 +1007,63 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       const map = result.get('sourceMap')
       const report = result.get('report')
       const info = typeof report === 'string' ? JSON.parse(report) as CompileReport : undefined
+      const regions: SyncRegion[] = typeof map === 'string' ? JSON.parse(map) : []
+      let findings: LayoutFinding[] | undefined
+      let figureAttachmentsRequired: boolean | undefined
+      const targetTemplate = target.metadata.templateOrigin?.id
+      const layoutProfile = layoutPreflightProfile(target.files, targetTemplate)
+      if (layoutProfile || stage) {
+        const inspectionSignal = AbortSignal.any([signal, AbortSignal.timeout(30_000)])
+        const footerOffset = Number(layoutProfile?.layout?.rules.footerOffset.chosen.value ?? 0)
+        const topMargin = layoutProfile?.layout && Number(layoutProfile.layout.rules.top.chosen.value)
+        const pages = await import('@/lib/project/pdf-layout-client').then(({ readPdfLayout }) => readPdfLayout(pdf, inspectionSignal, footerOffset, topMargin))
+          .catch(() => [])
+        if (signal.aborted) return
+        findings = layoutProfile && stage !== 'njupt-blind' ? assessLayout(target.files, entry, pages, regions, info, targetTemplate) : []
+        if (stage) {
+          if (stage === 'agu-revision') figureAttachmentsRequired = submissionHasFigures(target, entry, pages)
+          const stageFindings = assessSubmissionStage(target, entry, stage, pages, switched, blind)
+          if (stage === 'njupt-deposit') stageFindings.push(njuptDepositFontFinding(info?.pdfFonts))
+          const replaced = new Set(stageFindings.map(finding => finding.label))
+          findings = [...stageFindings, ...findings.filter(finding => !replaced.has(finding.label) &&
+            (stage !== 'njupt-deposit' || finding.ruleId !== 'njupt-declaration-signatures'))]
+        }
+      }
       let submission: SubmissionBuild | undefined
       if (submissionSelection) {
         const { paths, excluded, drafts, issues } = submissionSelection
-        const diagnostics = submissionDiagnostics(info?.diagnostics ?? [], target.files)
+        const diagnostics = submissionDiagnostics(editorDiagnostics(info?.diagnostics ?? []), source.files)
         if (info?.hasWarnings && !diagnostics.length) diagnostics.push({ severity: 'warning', message: 'The compiler reported warnings without a source location. See the compiler output.' })
-        submission = { main, paths, excluded, drafts, issues, pdf, zip: archive, warnings: Boolean(info?.hasWarnings), diagnostics,
-          sourceChecksum: packaged?.checksum, compileProfile: target.metadata.compileProfile }
+        const delivery = stage ? { stage, buildId: crypto.randomUUID(), entry,
+          engine: target.metadata.compileProfile?.engine ?? 'tectonic' as const,
+          snapshotSha256: await projectSourceDigest(source.files, main), figureAttachmentsRequired, attachmentSha256: blind ? njuptBlindCover.sha256 : undefined } : undefined
+        submission = { main: entry, paths: switched ? submissionFilePaths(target.files) : paths, excluded, drafts, issues, pdf, zip: archive, warnings: Boolean(info?.hasWarnings), diagnostics,
+          sourceChecksum: packaged?.checksum, compileProfile: target.metadata.compileProfile,
+          layoutReport: findings ? await buildSubmissionLayout(findings, { pdf, zip: archive, sourceChecksum: packaged?.checksum }, target.metadata.templateOrigin, delivery) : undefined }
+        if (signal.aborted) return
         if (!chatSignal) {
           setSubmissionCompilerIssues(diagnostics)
-          setSubmissionResult({ build: submission, snapshot: { ...snapshot, files: target.files } })
+          setSubmissionResult({ build: submission, snapshot: submitted, layout: findings })
           if (info?.hasWarnings) setSubmissionLog(info.log)
         }
       }
       if (updatePreview) {
         if (info) {
-          setDiagnostics(info.diagnostics)
+          setDiagnostics(editorDiagnostics(info.diagnostics))
           setHasWarnings(info.hasWarnings)
           setLog(info.log)
           setDiagnosticSnapshot(snapshot)
         }
-        setSourceMap(typeof map === 'string' ? JSON.parse(map) : [])
+        setSourceMap(lines ? manuscriptRegions(regions, entry, lines) : regions)
+        setLayoutFindings(findings)
         setPdfTarget(null)
+        setPdfPage(1)
         setPdfUrl(URL.createObjectURL(pdf))
-        setPdfFilename(main.split('/').at(-1)?.replace(/\.tex$/i, '.pdf') ?? 'project.pdf')
+        setPdfFilename(entry.split('/').at(-1)?.replace(/\.tex$/i, '.pdf') ?? 'project.pdf')
         setLastCompile(snapshot)
         setNarrowView('pdf')
       }
-      return { submission, feedback: feedback('passed', info?.hasWarnings ? 'Compiled with warnings.' : 'Compiled successfully.', info?.diagnostics, info?.log) }
+      return { submission, feedback: feedback('passed', info?.hasWarnings ? 'Compiled with warnings.' : 'Compiled successfully.', info && editorDiagnostics(info.diagnostics), info?.log) }
     } catch (cause) {
       if (signal.aborted) return
       const message = cause instanceof Error ? cause.message : 'Could not compile the project.'
@@ -925,22 +1090,25 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
 
   function getSubmissionSelection(): SubmissionSelection | undefined {
     if (!submission) return
-    return { target: submission.target, paths: [...submission.target.files.keys()].sort(), excluded: [...submission.excluded],
+    return { target: submission.target, stage, blindCover, paths: submissionFilePaths(submission.target.files), excluded: [...submission.excluded],
       issues: submission.issues, drafts: includeDrafts ? draftPaths.filter(path => submission.target.files.has(path)) : [] }
   }
 
   async function prepareExternalSubmission() {
     const selection = getSubmissionSelection()
-    if (!selection || locked) return
+    if (!selection || selection.stage && selection.stage !== 'catalog-delivery' || locked) return
     const { target, ...info } = selection
-    const snapshot = { main, profile: profileKey, files: target.files }
+    const snapshot: SubmissionSnapshot = { main, profile: profileKey, files: target.files,
+      stage: selection.stage, working: selection.stage ? workingFiles : undefined }
     const token = ++externalPreparation.current
     try {
-      const { zip, checksum } = await exportExternalBuild(target)
+      const { project: rendered } = await compileSource(target, AbortSignal.timeout(120_000))
+      const { zip, checksum } = await exportExternalBuild(rendered)
       if (token !== externalPreparation.current || !sameSubmissionInputs(snapshot, latestSubmission.current)) return
-      setExternalSubmission({ ...info, main, snapshot, zip, checksum, downloadUrl: URL.createObjectURL(zip) })
-    } catch {
-      if (token === externalPreparation.current) throw new Error('Could not prepare the external build ZIP.')
+      setExternalSubmission({ ...info, main: rendered === target ? main : rendered.metadata.mainFile!, snapshot, rendered, zip, checksum,
+        paths: rendered === target ? info.paths : submissionFilePaths(rendered.files), downloadUrl: URL.createObjectURL(zip) })
+    } catch (cause) {
+      if (token === externalPreparation.current) throw new Error(cause instanceof Error ? cause.message : 'Could not prepare the external build ZIP.')
     }
   }
 
@@ -948,9 +1116,29 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     if (!externalSubmission || externalSubmission.checksum !== checksum || !sameSubmissionInputs(externalSubmission.snapshot, latestSubmission.current)) {
       throw new Error('The submission source changed. Prepare and compile the current ZIP before attaching a PDF.')
     }
-    const { main, paths, excluded, drafts, issues, zip, snapshot } = externalSubmission
-    setSubmissionResult({ snapshot, build: { main, paths, excluded, drafts, issues, zip, pdf: pdf.slice(0, pdf.size, 'application/pdf'),
+    const { main, paths, excluded, drafts, issues, zip, snapshot, rendered } = externalSubmission
+    const origin = rendered.metadata.templateOrigin
+    const attached = pdf.slice(0, pdf.size, 'application/pdf')
+    setSubmissionResult({ snapshot, build: { main, paths, excluded, drafts, issues, zip, pdf: attached,
       warnings: false, diagnostics: [], externalEngine: engine, sourceChecksum: checksum } })
+    const layoutProfile = layoutPreflightProfile(rendered.files, origin?.id)
+    if (layoutProfile || snapshot.stage) void import('@/lib/project/pdf-layout-client')
+      .then(({ readPdfLayout }) => readPdfLayout(attached, AbortSignal.timeout(30_000), Number(layoutProfile?.layout?.rules.footerOffset.chosen.value ?? 0),
+        layoutProfile?.layout && Number(layoutProfile.layout.rules.top.chosen.value)))
+      .catch(() => [])
+      .then(async pages => {
+        const layout = layoutProfile ? assessLayout(rendered.files, main, pages, [], undefined, origin?.id) : []
+        const stage = snapshot.stage
+        if (stage) layout.unshift(...assessSubmissionStage(rendered, main, stage, pages, Boolean(rendered !== workingProject)))
+        const delivery = stage ? { stage, buildId: crypto.randomUUID(), entry: main, engine,
+          snapshotSha256: await projectSourceDigest(snapshot.files, snapshot.main), sourceMatch: 'author-confirmed' as const } : undefined
+        const layoutReport = await buildSubmissionLayout(layout, { pdf: attached, zip, sourceChecksum: checksum }, origin, delivery)
+        setSubmissionResult(current => current?.build.pdf === attached
+          ? { ...current, layout, build: { ...current.build, layoutReport } } : current)
+      }).catch(() => {
+        setSubmissionResult(current => current?.build.pdf === attached ? undefined : current)
+        if (sameSubmissionInputs(snapshot, latestSubmission.current)) setSubmissionError('无法保存外部 PDF 的版式检查报告。请重新附加 PDF。')
+      })
     setSubmissionError('')
     setSubmissionLog('')
     setSubmissionCompilerIssues([])
@@ -981,9 +1169,9 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         <Button size="sm" className="bg-workbench-accent text-white hover:bg-workbench-accent-hover" onClick={() => void compile()} disabled={!main || locked}>
           <Play /> {busy ? 'Compiling…' : 'Compile PDF'}
         </Button>
-        <Button size="sm" variant="ghost" aria-label="Compile settings" title="Compile settings" disabled={!main || locked}
+        <Button size="sm" variant="ghost" aria-label="Compile settings" title={activeTemplate ? '原模板编译设置' : 'Compile settings'} disabled={!main || locked}
           onClick={() => setCompileSettingsOpen(true)} className="shrink-0 px-1.5 sm:px-2">
-          <SlidersHorizontal /><span className="hidden text-xs xl:inline">{compilerLabels[profile?.engine ?? 'tectonic']}</span>
+          <SlidersHorizontal /><span className="hidden text-xs xl:inline">{compilerLabels[activeEngine ?? profile?.engine ?? 'tectonic']}</span>
         </Button>
         <WorkbenchSetup storage={journal.loadError || journal.failed.size ? 'unavailable' : journal.ready && storage ? 'ready' : 'checking'} />
         <Button ref={aiTrigger} size="sm" variant={aiOpen ? 'secondary' : 'outline'} aria-expanded={aiOpen} aria-controls="writing-ai"
@@ -1100,6 +1288,8 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
             <section aria-label="PDF Preview" className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-workbench-canvas">
               <div className="flex min-w-0 shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 border-b bg-workbench-panel px-3 py-1.5 text-xs">
                 <h2 className="flex items-center gap-2 font-semibold"><FileText className="size-4 text-workbench-accent" /> PDF Preview</h2>
+                {preflightAvailable && <Button size="sm" variant="outline" onClick={() => setLayoutCheckOpen(true)}>提交前版式检查</Button>}
+                {wordLayoutReview && <Button size="sm" variant="outline" onClick={() => setWordReviewOpen(true)}>版式核对</Button>}
                 {pdfUrl && <Button size="sm" variant="outline" asChild><a href={pdfUrl} download={pdfFilename}><Download /> Download PDF</a></Button>}
               </div>
               {pdfUrl ? <>
@@ -1120,6 +1310,26 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
                 <FileText className="mx-auto mb-3 size-8 text-workbench-muted" />
                 <p role="status" className="text-sm text-slate-600">{busy ? 'Running the LaTeX engine…' : 'Compile the main file to preview your PDF.'}</p>
               </div>}
+              {wordReviewOpen && wordLayoutReview && <Dialog open onOpenChange={setWordReviewOpen}>
+                <DialogContent className="max-h-[90dvh] overflow-y-auto">
+                  <DialogTitle>版式核对</DialogTitle>
+                  <DialogDescription>当前模板的规则和编译结果。</DialogDescription>
+                  <WordLayoutReview layout={wordLayoutReview.rules} issues={[
+                    ...wordLayoutReview.issues,
+                    ...(!diagnosticsStale && error ? [{ message: error }] : []),
+                    ...currentDiagnostics,
+                  ]} locate={(path, line) => { setWordReviewOpen(false); openFile(path, line) }} />
+                </DialogContent>
+              </Dialog>}
+              {layoutCheckOpen && preflightAvailable && <Dialog open onOpenChange={setLayoutCheckOpen}>
+                <DialogContent className="max-h-[90dvh] overflow-y-auto">
+                  <DialogTitle>提交前版式检查</DialogTitle>
+                  <DialogDescription>{pdfStale ? '稿件已更改。重新编译以检查当前稿件。' : '当前编译 PDF 的自动检查结果。'}</DialogDescription>
+                  <LayoutPreflight findings={pdfStale ? undefined : layoutFindings}
+                    onSource={activeTemplate ? undefined : (path, line) => { setLayoutCheckOpen(false); openFile(path, line) }}
+                    onPage={page => { setLayoutCheckOpen(false); changePdfPage(page) }} />
+                </DialogContent>
+              </Dialog>}
             </section>
           </ResizablePanel>
         </ResizablePanelGroup>
@@ -1222,21 +1432,32 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
           <span>{/\.bib$/i.test(selected) ? 'BibTeX' : isTex ? 'LaTeX' : 'Plain text'} · Ctrl / ⌘ + S to save</span>
           {storage && journal.key && <Button variant="outline" size="sm" className="h-7" disabled={locked}
             onClick={() => setRevision({})}>Revision rounds</Button>}
+          {activeTemplate && <span aria-label="当前编译模板" title={activeTemplate.name}>{activeTemplate.name} · {activeTemplate.origin.version}</span>}
+          <Button variant="outline" size="sm" className="h-7" disabled={!main || locked || (!activeTemplate && Boolean(conflicts.length))}
+            onClick={() => setTemplateExport({ files: workingProject.files, main })}>更换模板</Button>
           <Button variant="outline" size="sm" className="h-7" disabled={!main || locked} onClick={() => setSubmissionOpen(true)}>Prepare submission</Button>
         </div>
       </footer>
+      {templateExport && <TemplateExportDialog {...templateExport} active={activeTemplate} database={storage ?? undefined} originalName={originalTemplateName}
+        originalOrigin={project.metadata.templateOrigin}
+        onSetCurrent={storage && storageKey ? setCurrentTemplate : undefined} onClose={() => setTemplateExport(undefined)} />}
       {compileSettingsOpen && <CompileSettingsDialog main={main} paths={texFiles.map(file => file.path)} profile={profile}
         onSave={saveCompileSettings} onClose={() => setCompileSettingsOpen(false)} />}
-      {submission && <SubmissionDialog main={main} drafts={draftPaths} includeDrafts={includeDrafts} paths={submission.paths}
+      {submission && <SubmissionDialog main={main} compileEntry={activeTemplate?.main} drafts={draftPaths} includeDrafts={includeDrafts} paths={submission.paths}
         target={submission.target} working={workingProject} onEvidenceLocate={(path, line) => {
           setSubmissionOpen(false)
           openFile(path, line)
         }}
         excluded={submission.excluded} issues={submission.issues} compilerIssues={submissionCompilerIssues}
-        compatibility={submission.compatibility} external={freshExternal} staleExternal={Boolean(externalSubmission && !freshExternal)}
+        compatibility={activeEngine ? { engine: activeEngine, configuredEngine: activeEngine, eps: false, nestedStyles: false } : submission.compatibility}
+        external={freshExternal} staleExternal={Boolean(externalSubmission && !freshExternal)}
         onPrepareExternal={prepareExternalSubmission} onAttachExternal={attachExternalPdf}
         conflicting={includeDrafts && conflicts.some(path => !submission.excluded.has(path))}
         ready={!locked} busy={busy} error={submissionError} log={submissionLog} result={freshResult} database={storage} storageKey={journal.key}
+        stageOptions={submissionStageOptions} templateOriginId={activeTemplate?.origin.id ?? templateId} stage={stage} onStage={value => { setSelectedStage(value); resetSubmissionBuild() }}
+        onBlindCover={cover => { setUploadedBlindCover(cover); resetSubmissionBuild() }}
+        staleStage={Boolean(stage && submissionResult?.build.layoutReport?.delivery && !freshResult)}
+        layoutAvailable={Boolean(stage || activeTemplate || layoutPreflightProfile(submission.target.files, templateId))} layoutFindings={freshResult ? submissionResult?.layout : undefined} generatedLayout={Boolean(activeTemplate)}
         onDraftChoice={include => { setIncludeDrafts(include); resetSubmissionBuild(true) }}
         onToggle={path => {
           setSubmissionExcluded(current => {

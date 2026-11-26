@@ -7,6 +7,7 @@ import type { RevisionRound } from './revision-rounds'
 import type { ProjectSnapshot } from './snapshots'
 import { isProjectPath } from './source-archive'
 import type { SubmissionVersion } from './submission'
+import { submissionLayoutSchema } from './submission-layout'
 import type { SourceMove } from './writing-ai-evidence'
 import { chatWorkflowSchema, compileFeedbackSchema, revisionSetupSchema, submissionChatSchema, type ChatCheckpoint, type ChatHistory, type ChatTaskStep, type WritingChatMessage } from './writing-chat'
 import type { ChatVerification, ManuscriptBuild } from './writing-chat-validation'
@@ -37,7 +38,14 @@ const submission = identity.extend({
   main: path, paths: z.array(path), excluded: z.array(path), drafts: z.array(path), issues: z.array(issue),
   warnings: z.boolean(), diagnostics: z.array(issue), externalEngine: z.enum(['pdflatex', 'xelatex', 'lualatex']).optional(),
   sourceChecksum: hash.optional(), pdf: storedBlob, zip: storedBlob, evidence: submissionEvidenceSchema.optional(), compileProfile: compileProfileSchema.optional(),
+  layoutReport: submissionLayoutSchema.optional(), materials: z.array(storedBlob).max(24).optional(),
 }).refine(value => !value.evidence || value.evidence.sourceChecksum === value.sourceChecksum && value.sourceChecksum === value.zip.sha256)
+  .refine(value => !value.layoutReport || value.layoutReport.sourceChecksum === value.zip.sha256 && value.layoutReport.pdfChecksum === value.pdf.sha256)
+  .refine(value => (value.layoutReport?.materials?.length ?? 0) === (value.materials?.length ?? 0)
+    && (value.materials ?? []).every((blob, index) => {
+      const item = value.layoutReport?.materials?.[index]
+      return item?.sha256 === blob.sha256 && item.bytes === blob.bytes
+    }))
 const target = z.discriminatedUnion('type', [
   z.object({ type: z.literal('file'), path }),
   z.object({ type: z.literal('section'), anchor: sectionAnchorSchema }),
@@ -120,9 +128,10 @@ export async function encodeBackupHistory(archive: JSZip, history: PortableProje
   }
   const submissions = []
   for (const [index, version] of (history.publication?.submissions ?? []).entries()) {
-    const { pdf, zip, ...info } = version
+    const { pdf, zip, materials, ...info } = version
     submissions.push({ ...info, pdf: await write(`history/submissions/${index}.pdf`, pdf),
-      zip: await write(`history/submissions/${index}.zip`, zip) })
+      zip: await write(`history/submissions/${index}.zip`, zip),
+      materials: materials && await Promise.all(materials.map((blob, number) => write(`history/submissions/${index}/${number}`, blob))) })
   }
   const snapshots = []
   for (const [index, snapshot] of (history.snapshots ?? []).entries()) {
@@ -157,10 +166,12 @@ export async function decodeBackupHistory(archive: JSZip, manifest: z.infer<type
   }
   const submissions = []
   for (const [index, version] of (manifest.publication?.submissions ?? []).entries()) {
-    const { pdf, zip, ...info } = version
+    const { pdf, zip, materials, ...info } = version
     if (info.sourceChecksum && info.sourceChecksum !== zip.sha256) throw new Error('Archived source ZIP checksum does not match.')
     submissions.push({ ...info, pdf: await read(`history/submissions/${index}.pdf`, pdf, 'application/pdf'),
-      zip: await read(`history/submissions/${index}.zip`, zip, 'application/zip') })
+      zip: await read(`history/submissions/${index}.zip`, zip, 'application/zip'),
+      materials: materials && await Promise.all(materials.map((blob, number) =>
+        read(`history/submissions/${index}/${number}`, blob, info.layoutReport?.materials?.[number]?.mime ?? ''))) })
   }
   const snapshots = []
   for (const [index, snapshot] of (manifest.snapshots ?? []).entries()) {

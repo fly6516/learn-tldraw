@@ -4,6 +4,7 @@ import { researchCanvasSchema, type ResearchCanvas } from './research-graph'
 import type { ProjectDirectory, ProjectFile, ProjectFileSystem } from './types'
 import { isProjectPath } from './source-archive'
 import { aiReadExclusionsSchema } from './ai-read-scope'
+import { activeTemplateSchema } from './active-template'
 import { compileProfileSchema } from './compile-profile'
 import { draftConflicts, type PortableWritingState } from './writing-drafts'
 
@@ -52,6 +53,7 @@ const savedManifest = z.object({
       aiReadExclusions: aiReadExclusionsSchema.optional(),
       mainFile: z.string().optional(),
       compileProfile: compileProfileSchema.optional(),
+      activeTemplate: activeTemplateSchema.optional(),
       templateOrigin: z.object({ id: z.string(), version: z.string(), sha256: z.string().regex(/^[0-9a-f]{64}$/) }).optional(),
     }),
     template: z.object({
