@@ -21,10 +21,10 @@ test('imports the original SUEP Word files and compiles the resulting TeX projec
   expect(digest(await readFile(files.cover))).toBe('f06b20bacfc3181be5f7c443e37e940f604e1433b6bfeca79f63051c538ba42b')
   expect(digest(await readFile(files.declaration))).toBe('df4c2d2b90d0b3effb2d704a3c920a4fef2f5e8117850b411a7566302877beb8')
   expect(digest(await readFile(files.body))).toBe('682978def76fb275f269355ea178fbbc06bd8ba1275d49d286bd93f5e45904ff')
-  await page.goto('/research?section=templates&category=school&template=suep-undergraduate')
-  await page.getByRole('button', { name: '使用模板', exact: true }).click()
+  await page.goto('/research')
+  await page.getByRole('button', { name: 'Import Word', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: 'Import Word to TeX' })
-  await expect(dialog.getByLabel('TeX layout')).toHaveValue('suep-undergraduate')
+  await dialog.getByLabel('TeX layout').selectOption('suep-undergraduate')
   await dialog.getByLabel('Project name').fill('上电本科 Word 导入验收')
   await dialog.getByLabel('Word manuscript').setInputFiles(files.body)
   await dialog.getByLabel('Word cover (optional)').setInputFiles(files.cover)
@@ -103,5 +103,19 @@ test('imports the original SUEP Word files and compiles the resulting TeX projec
     expect(pages[index]).toContain(title)
   }
   expect(pages[5]).toContain('潜伏性故障诊断结论')
-  if (checkCatalogDelivery) await compileCatalogDelivery(page, info, templateCatalog.find(entry => entry.id === 'suep-undergraduate')!)
+  if (checkCatalogDelivery) {
+    // Official attachments are applied to a separate manuscript on the catalog path.
+    await page.goto('/research?section=templates&category=school&template=suep-undergraduate')
+    await page.getByRole('button', { name: '手动上传原件', exact: true }).click()
+    await dialog.getByLabel('官方附件包 RAR').setInputFiles(join(fixture!, 'suep-undergraduate.rar'))
+    await dialog.getByLabel('Project name').fill('上电本科独立稿交付验收')
+    await dialog.getByLabel('Word manuscript').setInputFiles(join(fixture!, 'independent.docx'))
+    for (const [label, value] of Object.entries({
+      中文题目: '校园无障碍路径观察', 作者姓名: '验收作者', 学号: '20260001', 所在院系: '电气工程学院',
+      专业年级: '电气工程2026级', 指导教师: '验收导师', 提交日期: '2026年11月27日',
+    })) await dialog.getByLabel(label, { exact: true }).fill(value)
+    await dialog.getByRole('button', { name: 'Create TeX project' }).click()
+    await expect(page.getByRole('heading', { name: '上电本科独立稿交付验收' })).toBeVisible({ timeout: 60_000 })
+    await compileCatalogDelivery(page, info, templateCatalog.find(entry => entry.id === 'suep-undergraduate')!)
+  }
 })

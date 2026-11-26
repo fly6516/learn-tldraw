@@ -122,9 +122,9 @@ for (const entry of templateCatalog) {
       const { dialog, uploaded } = await openSource(page, entry, true)
       if (uploaded) {
         await dialog.getByLabel('Word 样例').setInputFiles(original)
-        if (workflow.guideline) await dialog.getByLabel('学校撰写规范（选填）').setInputFiles(join(fixtures!, entry.id + '-guidelines.pdf'))
+        if (workflow.guideline) await dialog.getByLabel(/学校撰写规范|官方规范 PDF/).setInputFiles(join(fixtures!, entry.id + '-guidelines.pdf'))
       } else if (workflow.guideline) {
-        await expect(dialog).toContainText('已校验官方规范 PDF')
+        await expect(dialog).toContainText('已核验的规范 PDF')
       }
       await dialog.getByRole('button', { name: '生成版式配置' }).click()
       await expect(dialog.getByLabel('纸张')).toBeVisible({ timeout: 35_000 })

@@ -121,11 +121,15 @@ export async function servePinnedTemplateFixtures(page: Page) {
     const source = catalogReleaseSource(entry)
     if (!source || (entry.workflow.kind !== 'zip' && entry.workflow.kind !== 'word')) return route.fallback()
     const expected = params.get('sha256')
+    const asset = params.get('asset')
     if (!expected) {
-      return route.fulfill({ json: { sha256: source.baseline.sha256, url: source.sourceUrl, scope: 'file', matchesBaseline: true } })
+      const attachment = asset === 'guideline' ? source.guideline : asset === 'blind-cover' ? source.blindCover
+        : asset === 'declaration' ? source.declaration : undefined
+      if (asset && !attachment) return route.fallback()
+      return route.fulfill({ json: { sha256: attachment?.sha256 ?? source.baseline.sha256,
+        url: attachment?.url ?? source.sourceUrl, scope: 'file', matchesBaseline: true } })
     }
     let name = entry.id + (entry.workflow.kind === 'zip' ? '.zip' : entry.workflow.original.url.endsWith('.doc') ? '.doc' : '.docx')
-    const asset = params.get('asset')
     if (asset === 'guideline') name = entry.id + '-guidelines.pdf'
     if (asset === 'blind-cover') name = 'njupt-blind-cover.doc'
     if (asset === 'declaration') name = 'njupt-declaration.doc'

@@ -190,10 +190,11 @@ export function WordTemplateBuilder({ database, close, onSave, previous, officia
           {official?.publish && <label className="block space-y-1 text-sm">候选版本号
             <Input name="officialVersion" required maxLength={48} />
           </label>}
-          {official?.file ? <p className="text-sm">
+          {official?.file && <p className="text-sm">
             已校验官方 Word · {!official.publish && <>{official.origin.version} · </>}{official.file.name}
-          </p> : <label className="block space-y-1 text-sm">Word 样例
-            <Input type="file" name="body" required accept=".doc,.docx" />
+          </p>}
+          {(!official?.file || official.publish) && <label className="block space-y-1 text-sm">Word 样例{official?.file && '（可替换）'}
+            <Input type="file" name="body" required={!official?.file} accept=".doc,.docx" />
           </label>}
           {official?.standard && <p className="text-sm">已核验的规范 PDF · {official.standard.name}</p>}
           {(!scopedAttachments && !official?.standard || expectsGuideline && (!official?.standard || official.publish)) && <label className="block space-y-1 text-sm">

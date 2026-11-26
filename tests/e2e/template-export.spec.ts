@@ -11,6 +11,9 @@ import { emptyCanvas } from '../../src/lib/project/research-graph'
 import { submissionDocxConfig } from '../../src/lib/project/submission-docx-config'
 import { submissionMaterialPath } from '../../src/lib/project/submission-materials'
 import { importSourceArchive } from '../../src/lib/project/source-archive'
+import { attachmentManifestDigest } from '../../src/lib/project/official-attachments'
+import { catalogReleaseSource, templateCatalog } from '../../src/lib/project/template-catalog'
+import { catalogWordAttachments } from '../../src/lib/project/word-release-attachments'
 import { externalTexCommand } from '../fixtures/external-tex'
 import { compileProject, confirmTemplatePublication, manageOfficialVersion, replaceProjectSource, reviewArchive, saveCompiledPdf, templateCard } from './support/official-template'
 import { servePinnedTemplateFixtures } from './support/official-template'
@@ -958,7 +961,11 @@ for (const id of ['sjtu-graduate-word', 'jmlr', 'njupt-academic-masters', 'njupt
     await expect(pdf.getByText('sections/study.tex:2', { exact: true })).toBeVisible()
     const upgraded = await backup(page, info.outputPath('upgraded.research-canvas'))
     const { activeTemplate, ...metadata } = upgraded.project.metadata
-    expect(activeTemplate.origin).toEqual({ id, version: nextVersion, sha256: digest })
+    const releaseSource = catalogReleaseSource(templateCatalog.find(entry => entry.id === id)!)!
+    const attachments = professional ? catalogWordAttachments(id)!.map(item => item.role === 'original' ? { ...item, sha256: digest } : item)
+      : word ? undefined : [{ role: 'original' as const, url: releaseSource.url, sha256: digest }]
+    const manifestSha256 = attachments && await attachmentManifestDigest(attachments)
+    expect(activeTemplate.origin).toEqual({ id, version: nextVersion, sha256: digest, ...(manifestSha256 && { manifestSha256 }) })
     expect({ ...upgraded, project: { ...upgraded.project, metadata } }).toEqual({
       ...before, project: { ...before.project, metadata: { ...before.project.metadata, activeTemplate: undefined } },
     })
