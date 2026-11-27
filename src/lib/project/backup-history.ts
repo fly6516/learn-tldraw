@@ -1,5 +1,6 @@
 import type JSZip from 'jszip'
 import { z } from 'zod'
+import { revisionEvidenceSchema } from './revision-evidence'
 import { compileProfileSchema } from './compile-profile'
 import { chapterAnswerSchema } from './ai-edit'
 import { figureAnchorSchema, sectionAnchorSchema, selectionAnchorSchema } from './research-graph'
@@ -59,7 +60,7 @@ const target = z.discriminatedUnion('type', [
   z.object({ type: z.literal('formula'), anchor: figureAnchorSchema }),
   z.object({ type: z.literal('selection'), anchor: selectionAnchorSchema }),
 ])
-const response = z.object({ kind: z.enum(['changed', 'retained']), text, paths: z.array(path) })
+const response = z.object({ kind: z.enum(['changed', 'retained']), text, paths: z.array(path), evidence: revisionEvidenceSchema.optional() })
 const comment = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('comment'), target }),
   z.object({ kind: z.literal('canvas'), nodeId: id }),

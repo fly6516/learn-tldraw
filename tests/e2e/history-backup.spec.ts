@@ -187,7 +187,7 @@ test('restores archived submission files and reviewer replies from Chromium into
   await revisions.getByRole('combobox', { name: 'Revised submission' }).selectOption(revisedLabel!)
   await expect(revisions.getByRole('button', { name: 'Download revision package' })).toBeDisabled()
   await revisions.getByRole('textbox', { name: 'Response', exact: true }).fill('We clarified how the results were summarized.')
-  await revisions.getByRole('checkbox', { name: /^sections\/results\.tex/ }).check()
+  await revisions.getByRole('checkbox', { name: /^sections\/results\.tex · / }).first().check()
   await revisions.getByRole('button', { name: 'Save response' }).click()
   await expect(revisions.getByText('Response saved.')).toBeVisible()
   const packaged = await verifyRevisionPackage(await download(page, 'Download revision package'), originalZip, revisedZip, revisedPdf)

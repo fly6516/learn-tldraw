@@ -12,6 +12,7 @@ import { resolveReviewTarget, reviewTargetChoices, type ReviewItem } from '@/lib
 import { compareRevisionFiles, readRevisionBaseline, type RevisionComment, type RevisionFile, type RevisionRound } from '@/lib/project/revision-rounds'
 import { addRevisionComments, createRevisionRound, linkRevisedSubmission, listRevisionRounds, listSubmissionVersions, readRevisionPackage, readSubmissionFiles, saveRevisionResponse } from '@/lib/project/storage'
 import { buildRevisionPackage } from '@/lib/project/revision-package'
+import { checkedRevisionZipDigest, compareRevisionChanges, type RevisionChange, type RevisionEvidenceBinding } from '@/lib/project/revision-evidence'
 import type { SubmissionVersionInfo } from '@/lib/project/submission'
 import type { ProjectFileSystem } from '@/lib/project/types'
 import type { WritingKey } from '@/lib/project/writing-drafts'
@@ -35,8 +36,9 @@ export function RevisionRoundsDialog({ database, storageKey, initialSubmission, 
   const [compareArchived, setCompareArchived] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [loaded, setLoaded] = useState<{ id: string; baseline?: ProjectFileSystem; error?: string }>()
-  const [revised, setRevised] = useState<{ id: string; baseline: ProjectFileSystem; project?: ProjectFileSystem; files?: RevisionFile[]; error?: string }>()
+  const [loaded, setLoaded] = useState<{ id: string; baseline?: ProjectFileSystem; sha256?: string; error?: string }>()
+  const [revised, setRevised] = useState<{ id: string; baseline: ProjectFileSystem; project?: ProjectFileSystem; files?: RevisionFile[];
+    binding?: RevisionEvidenceBinding; changes?: RevisionChange[]; error?: string }>()
   const round = library?.rounds.find(item => item.id === roundId) ?? library?.rounds[0]
   const version = library?.versions.find(item => item.id === round?.submissionId)
   const createVersion = submissionId || library?.versions[0]?.id || ''
@@ -51,34 +53,38 @@ export function RevisionRoundsDialog({ database, storageKey, initialSubmission, 
 
   const baselineId = tab !== 'comments' ? round?.submissionId : undefined
   const revisedId = tab !== 'comments' ? round?.revisedSubmissionId : undefined
+  const baselineChecksum = version?.sourceChecksum
+  const revisedVersion = library?.versions.find(item => item.id === revisedId)
+  const revisedChecksum = revisedVersion?.sourceChecksum
   useEffect(() => {
     if (!baselineId) return
     let active = true
-    void readSubmissionFiles(database, storageKey, baselineId).then(files => {
+    void readSubmissionFiles(database, storageKey, baselineId).then(async files => {
       if (!files) throw new Error('The archived source ZIP is unavailable.')
-      return readRevisionBaseline(files.zip)
-    }).then(baseline => { if (active) setLoaded({ id: baselineId, baseline }) })
+      const [baseline, sha256] = await Promise.all([readRevisionBaseline(files.zip), checkedRevisionZipDigest(files.zip, baselineChecksum)])
+      if (active) setLoaded({ id: baselineId, baseline, sha256 })
+    })
       .catch(cause => { if (active) setLoaded({ id: baselineId, error: cause instanceof Error ? cause.message : 'Could not read the archived source ZIP.' }) })
     return () => { active = false }
-  }, [baselineId, database, storageKey])
+  }, [baselineId, baselineChecksum, database, storageKey])
 
   const baseline = loaded?.id === baselineId ? loaded?.baseline : undefined
+  const baselineSha256 = loaded?.id === baselineId ? loaded?.sha256 : undefined
   useEffect(() => {
-    if (!revisedId || !baseline) return
+    if (!revisedId || !baseline || !baselineId || !baselineSha256) return
     let active = true
     void readSubmissionFiles(database, storageKey, revisedId).then(async files => {
       if (!files) throw new Error('The revised source ZIP is unavailable.')
-      const project = await readRevisionBaseline(files.zip)
-      return { id: revisedId, baseline, project, files: await compareRevisionFiles(baseline, project) }
+      const [project, revisedSha256] = await Promise.all([readRevisionBaseline(files.zip), checkedRevisionZipDigest(files.zip, revisedChecksum)])
+      const compared = await compareRevisionFiles(baseline, project)
+      return { id: revisedId, baseline, project, files: compared, changes: await compareRevisionChanges(compared),
+        binding: { originalId: baselineId, revisedId, originalSha256: baselineSha256, revisedSha256 } }
     }).then(result => { if (active) setRevised(result) })
       .catch(cause => { if (active) setRevised({ id: revisedId, baseline, error: cause instanceof Error ? cause.message : 'Could not compare the revised ZIP.' }) })
     return () => { active = false }
-  }, [baseline, revisedId, database, storageKey])
+  }, [baseline, baselineId, baselineSha256, revisedChecksum, revisedId, database, storageKey])
 
   const revisedArchive = revised?.id === revisedId && revised?.baseline === baseline ? revised : undefined
-  const revisedVersion = library?.versions.find(item => item.id === revisedId)
-  const evidencePaths = [...new Set([...current.files.values(), ...(baseline?.files.values() ?? []), ...(revisedArchive?.project?.files.values() ?? [])]
-    .filter(file => file.type !== 'directory').map(file => file.path))]
   const updateRound = (updated: RevisionRound) => setLibrary(previous => previous && {
     ...previous, rounds: previous.rounds.map(item => item.id === updated.id ? updated : item),
   })
@@ -156,7 +162,8 @@ export function RevisionRoundsDialog({ database, storageKey, initialSubmission, 
         </>}
         {tab === 'responses' && <RevisionResponses key={round.id} round={round} baseline={version?.name ?? 'Original submission'} busy={busy}
           versions={(library?.versions ?? []).filter(item => item.id !== round.submissionId && (!version || item.createdAt >= version.createdAt))}
-          files={revisedArchive?.files} reportError={(loaded?.id === baselineId ? loaded?.error : undefined) ?? revisedArchive?.error} paths={evidencePaths}
+          files={revisedArchive?.files} changes={revisedArchive?.changes} binding={revisedArchive?.binding}
+          reportError={(loaded?.id === baselineId ? loaded?.error : undefined) ?? revisedArchive?.error}
           onDownloadPackage={() => perform(async () => {
             const input = await readRevisionPackage(database, storageKey, round)
             const bundle = await buildRevisionPackage(input)

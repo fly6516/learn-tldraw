@@ -8,11 +8,12 @@ import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { buildRevisionLetter, type RevisionResponse, type RevisionRound, type RevisionFile } from '@/lib/project/revision-rounds'
 import type { SubmissionVersionInfo } from '@/lib/project/submission'
-import { archiveReplyEvidence, revisionDraftSchema } from '@/lib/project/ai-revision'
+import { revisionDraftSchema } from '@/lib/project/ai-revision'
+import { revisionChangeKey, revisionChangeLocation, sameRevisionEvidenceBinding, type RevisionChange, type RevisionEvidenceBinding } from '@/lib/project/revision-evidence'
 
-export function RevisionResponses({ round, baseline, versions, files, reportError, paths, busy, onLink, onSave, onDownloadPackage }: {
+export function RevisionResponses({ round, baseline, versions, files, changes, binding, reportError, busy, onLink, onSave, onDownloadPackage }: {
   round: RevisionRound; baseline: string; versions: SubmissionVersionInfo[]; files?: RevisionFile[]; reportError?: string
-  paths: string[]; busy: boolean; onLink: (id?: string) => void
+  changes?: RevisionChange[]; binding?: RevisionEvidenceBinding; busy: boolean; onLink: (id?: string) => void
   onSave: (commentId: string, response?: RevisionResponse) => Promise<boolean>
   onDownloadPackage: () => Promise<boolean>
 }) {
@@ -21,8 +22,8 @@ export function RevisionResponses({ round, baseline, versions, files, reportErro
   const [exporting, setExporting] = useState(false)
   const comment = round.comments.find(item => item.id === selected)
   const revised = versions.find(version => version.id === round.revisedSubmissionId)
-  const letter = files && revised ? buildRevisionLetter(round, baseline, revised.name, files) : undefined
-  const unresolved = letter?.unresolved.length ?? round.comments.filter(item => !item.response).length
+  const letter = files && revised && binding && changes ? buildRevisionLetter(round, baseline, revised.name, files, binding, changes) : undefined
+  const unresolved = letter?.unresolved.length ?? round.comments.filter(item => item.response?.kind !== 'retained').length
   const draft = unresolved > 0
 
   function downloadLetter() {
@@ -47,12 +48,14 @@ export function RevisionResponses({ round, baseline, versions, files, reportErro
     {!versions.length && <p className="text-sm text-slate-600">Save the revised manuscript in Prepare submission to verify evidence and export the letter.</p>}
     {round.comments.length > 0 && <label className="grid gap-1 text-sm font-medium">Comment to answer
       <select className="max-w-full rounded border p-1.5" value={selected} onChange={event => setSelected(event.target.value)}>
-        {round.comments.map((item, index) => <option key={item.id} value={item.id}>{index + 1}. {item.reviewer || 'Reviewer'} · {item.response ? 'Answered' : 'Awaiting response'}</option>)}
+        {round.comments.map((item, index) => <option key={item.id} value={item.id}>{index + 1}. {item.reviewer || 'Reviewer'} · {item.response
+          ? item.response.kind === 'changed' && (!letter || letter.unresolved.includes(index + 1)) ? 'Evidence needs review' : 'Answered'
+          : 'Awaiting response'}</option>)}
       </select>
     </label>}
     {comment && <>
       <blockquote className="whitespace-pre-wrap break-words border-l-2 pl-3 text-sm">{comment.text}</blockquote>
-      <ResponseForm key={comment.id} initial={comment.response} paths={paths} files={files} busy={busy}
+      <ResponseForm key={comment.id} initial={comment.response} changes={changes} binding={binding} busy={busy}
         archive={revised ? { original: baseline, revised: revised.name, id: revised.id } : undefined} comment={comment.text}
         onSave={response => onSave(comment.id, response)} />
     </>}
@@ -79,14 +82,15 @@ export function RevisionResponses({ round, baseline, versions, files, reportErro
   </section>
 }
 
-function ResponseForm({ initial, paths, files, busy, onSave, archive, comment }: {
-  initial?: RevisionResponse; paths: string[]; files?: RevisionFile[]; busy: boolean
+function ResponseForm({ initial, changes, binding, busy, onSave, archive, comment }: {
+  initial?: RevisionResponse; changes?: RevisionChange[]; binding?: RevisionEvidenceBinding; busy: boolean
   onSave: (response?: RevisionResponse) => Promise<boolean>
   archive?: { original: string; revised: string; id: string }; comment: string
 }) {
   const [kind, setKind] = useState<RevisionResponse['kind']>(initial?.kind ?? 'changed')
   const [text, setText] = useState(initial?.text ?? '')
-  const [selected, setSelected] = useState(initial?.paths ?? [])
+  const [selection, setSelection] = useState(() => ({ binding: initial?.evidence as RevisionEvidenceBinding | undefined,
+    keys: initial?.evidence?.changes.map(revisionChangeKey) ?? [] }))
   const [saved, setSaved] = useState(false)
   const [query, setQuery] = useState('')
   const [aiError, setAiError] = useState('')
@@ -105,10 +109,12 @@ function ResponseForm({ initial, paths, files, busy, onSave, archive, comment }:
   })
   const aiBusy = preparing || status === 'submitted' || status === 'streaming'
   const streamingReply = messages.at(-1)?.role === 'assistant' ? messages.at(-1) : undefined
-  const states = new Map(files?.map(file => [file.path, file.status]))
-  const options = [...new Set([...selected, ...paths])].sort().filter(path => selected.includes(path) || path.toLowerCase().includes(query.toLowerCase().trim()))
-  const key = JSON.stringify([archive?.id, kind, text, selected, comment])
-  const eligible = Boolean(archive && files && (kind === 'retained' ? text.trim() : selected.some(path => states.has(path) && states.get(path) !== 'Unchanged')))
+  const keys = binding && selection.binding && sameRevisionEvidenceBinding(selection.binding, binding) ? selection.keys : []
+  const options = (changes ?? []).filter(change => keys.includes(revisionChangeKey(change)) || change.path.toLowerCase().includes(query.toLowerCase().trim()))
+  const picked = (changes ?? []).filter(change => keys.includes(revisionChangeKey(change)))
+  const key = JSON.stringify([binding, kind, text, keys, comment])
+  const eligible = Boolean(archive && binding && (kind === 'retained' ? text.trim() : picked.length && picked.length <= 6))
+  const canSave = !busy && Boolean(text.trim() && (kind === 'retained' || binding && picked.length))
   useEffect(() => {
     if (!saved) return
     const timeout = setTimeout(() => setSaved(false), 3000)
@@ -116,14 +122,16 @@ function ResponseForm({ initial, paths, files, busy, onSave, archive, comment }:
   }, [saved])
 
   async function generateReply() {
-    if (!eligible || !files || !archive || aiBusy) return
+    if (!eligible || !archive || aiBusy) return
     setPreparing(true)
     setAiError('')
     clearError()
     setMessages([])
     setProposal(undefined)
     try {
-      const changes = kind === 'changed' ? await archiveReplyEvidence(files, selected) : []
+      const changes = kind === 'changed' ? picked.map(change => ({ path: change.path,
+        status: !change.before ? 'Added' as const : !change.after ? 'Removed' as const : 'Modified' as const,
+        before: change.beforeText.slice(0, 1500), after: change.afterText.slice(0, 1500) })) : []
       await sendMessage({ text: 'Draft a reply to this reviewer using only the attached archive evidence and author note.' }, {
         body: { run: crypto.randomUUID(), workflow: 'revision', scope: [], revision: { kind, comment,
           original: archive.original, revised: archive.revised, changes, authorNote: text.slice(0, 1500) } },
@@ -134,8 +142,9 @@ function ResponseForm({ initial, paths, files, busy, onSave, archive, comment }:
   }
   return <form className="space-y-2 rounded border p-2" onSubmit={async event => {
     event.preventDefault()
-    if (busy || !text.trim() || (kind === 'changed' && !selected.length)) return
-    if (await onSave({ kind, text: text.trim(), paths: kind === 'changed' ? selected : [] })) setSaved(true)
+    if (!canSave) return
+    const evidence = kind === 'changed' && binding ? { ...binding, changes: picked.map(({ path, before, after }) => ({ path, before, after })) } : undefined
+    if (await onSave({ kind, text: text.trim(), paths: evidence ? [...new Set(picked.map(change => change.path))] : [], evidence })) setSaved(true)
   }}>
     <fieldset disabled={busy || aiBusy} className="space-y-2">
       <label className="grid gap-1 text-sm font-medium">Disposition
@@ -147,23 +156,36 @@ function ResponseForm({ initial, paths, files, busy, onSave, archive, comment }:
         <Textarea value={text} onChange={event => { setText(event.target.value); setSaved(false) }} maxLength={12000} />
       </label>
       {kind === 'changed' && <details className="rounded border p-2 text-sm" open>
-        <summary className="cursor-pointer font-medium">Evidence files · {selected.length} selected</summary>
-        <label className="mt-2 grid gap-1">Filter evidence files<input className="rounded border px-2 py-1" type="search" value={query} onChange={event => setQuery(event.target.value)} /></label>
-        <ul className="mt-2 max-h-36 overflow-auto">
-          {options.map(path => <li key={path}><label className="flex items-start gap-2"><input type="checkbox" className="mt-1" checked={selected.includes(path)}
-            onChange={event => { setSelected(previous => event.target.checked ? [...previous, path] : previous.filter(item => item !== path)); setSaved(false) }} />
-            <span className="break-all">{path}{files && ` · ${states.get(path) ?? 'Outside both ZIPs'}`}</span></label></li>)}
+        <summary className="cursor-pointer font-medium">Evidence changes · {picked.length} selected</summary>
+        {initial?.kind === 'changed' && !initial.evidence && <p className="mt-2 text-amber-800">Review the change locations for this saved reply.</p>}
+        {changes?.length ? <label className="mt-2 grid gap-1">Filter changed files<input className="rounded border px-2 py-1" type="search" value={query} onChange={event => setQuery(event.target.value)} /></label>
+          : <p className="mt-2 text-muted-foreground">{changes ? 'No text changes are available to select in these archives.' : 'Choose a revised submission to select exact changes.'}</p>}
+        <ul className="mt-2 max-h-64 divide-y overflow-auto">
+          {options.map(change => {
+            const id = revisionChangeKey(change)
+            return <li key={id} className="space-y-1 py-2"><label className="flex items-start gap-2">
+              <input type="checkbox" className="mt-1" checked={keys.includes(id)} disabled={keys.length >= 100 && !keys.includes(id)}
+                onChange={event => { setSelection({ binding, keys: event.target.checked ? [...keys, id] : keys.filter(item => item !== id) }); setSaved(false) }} />
+              <span className="break-all">{change.path} · {revisionChangeLocation(change)}</span></label>
+              <details className="pl-5"><summary className="cursor-pointer text-muted-foreground">View changed text</summary>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <div className="min-w-0">Original<pre className="max-h-28 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-1 text-xs">{change.beforeText || '—'}</pre></div>
+                  <div className="min-w-0">Revised<pre className="max-h-28 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-1 text-xs">{change.afterText || '—'}</pre></div>
+                </div>
+              </details>
+            </li>
+          })}
         </ul>
       </details>}
     </fieldset>
     <div className="flex flex-wrap items-center gap-2">
-      <Button type="submit" size="sm" disabled={busy || !text.trim() || (kind === 'changed' && !selected.length)}>Save response</Button>
+      <Button type="submit" size="sm" disabled={!canSave || aiBusy}>Save response</Button>
       <Button type="button" size="sm" variant="outline" disabled={busy || aiBusy || !eligible} onClick={() => void generateReply()}>
         {aiBusy ? 'Drafting with AI…' : 'Draft response with AI'}
       </Button>
       {aiBusy && <Button type="button" size="sm" variant="ghost" disabled={status !== 'streaming' && status !== 'submitted'} onClick={() => void stop()}>Cancel draft</Button>}
       {initial && <Button type="button" size="sm" variant="outline" disabled={busy} onClick={async () => {
-        if (await onSave()) { setText(''); setSelected([]); setSaved(false) }
+        if (await onSave()) { setText(''); setSelection({ binding, keys: [] }); setSaved(false) }
       }}>Mark awaiting response</Button>}
       {saved && <span role="status" className="text-sm">Response saved.</span>}
     </div>

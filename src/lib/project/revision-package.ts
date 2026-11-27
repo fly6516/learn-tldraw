@@ -1,6 +1,7 @@
 import JSZip from 'jszip'
 import { buildRevisionLetter, compareRevisionFiles, readRevisionBaseline, type RevisionRound } from './revision-rounds'
 import type { SubmissionVersionInfo } from './submission'
+import { compareRevisionChanges } from './revision-evidence'
 
 export type RevisionPackageInput = {
   round: RevisionRound
@@ -32,7 +33,10 @@ export async function buildRevisionPackage({ round, original, revised }: Revisio
   const [baseline, current, before, after] = await Promise.all([
     identify(original), identify(revised), readRevisionBaseline(original.zip), readRevisionBaseline(revised.zip),
   ])
-  const letter = buildRevisionLetter(round, original.name, revised.name, await compareRevisionFiles(before, after))
+  const compared = await compareRevisionFiles(before, after)
+  const binding = { originalId: original.id, revisedId: revised.id,
+    originalSha256: baseline.version.sourceChecksum, revisedSha256: current.version.sourceChecksum }
+  const letter = buildRevisionLetter(round, original.name, revised.name, compared, binding, await compareRevisionChanges(compared))
   if (letter.unresolved.length) throw new Error('Resolve all reviewer responses and verify their evidence before exporting the revision package.')
 
   const manuscript = await revised.pdf.arrayBuffer()

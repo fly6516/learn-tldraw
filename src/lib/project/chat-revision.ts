@@ -1,4 +1,5 @@
 import { archiveReplyEvidence } from './ai-revision'
+import { checkedRevisionZipDigest, compareRevisionChanges } from './revision-evidence'
 import { indexLatexLabels } from './latex-source'
 import { buildRevisionLetter, compareRevisionFiles, readRevisionBaseline } from './revision-rounds'
 import { addRevisionComment, createRevisionRound, listRevisionRounds, listSubmissionVersions, readSubmissionFiles } from './storage'
@@ -23,7 +24,7 @@ async function revisionArchives(database: IDBDatabase, key: WritingKey, roundNam
   const [a, b] = await Promise.all([readSubmissionFiles(database, key, original.id), readSubmissionFiles(database, key, revised.id)])
   if (!a || !b) throw new Error('The archived source ZIPs are unavailable.')
   const [first, second] = await Promise.all([readRevisionBaseline(a.zip), readRevisionBaseline(b.zip)])
-  return { round, original, revised, project: second, files: await compareRevisionFiles(first, second) }
+  return { round, original, revised, originalZip: a.zip, revisedZip: b.zip, project: second, files: await compareRevisionFiles(first, second) }
 }
 
 export async function prepareChatReply(database: IDBDatabase, key: WritingKey, request: ReplyChatRequest, excluded?: (path: string) => boolean) {
@@ -58,9 +59,12 @@ export async function prepareChatReply(database: IDBDatabase, key: WritingKey, r
 }
 
 export async function prepareChatLetter(database: IDBDatabase, key: WritingKey, roundName?: string) {
-  const { round, original, revised, files } = await revisionArchives(database, key, roundName)
+  const { round, original, revised, originalZip, revisedZip, files } = await revisionArchives(database, key, roundName)
   if (!round.comments.length) throw new Error('This revision round has no reviewer comments.')
-  return { name: round.name, ...buildRevisionLetter(round, original.name, revised.name, files) }
+  const [originalSha256, revisedSha256, changes] = await Promise.all([checkedRevisionZipDigest(originalZip, original.sourceChecksum),
+    checkedRevisionZipDigest(revisedZip, revised.sourceChecksum), compareRevisionChanges(files)])
+  return { name: round.name, ...buildRevisionLetter(round, original.name, revised.name, files,
+    { originalId: original.id, revisedId: revised.id, originalSha256, revisedSha256 }, changes) }
 }
 
 export async function prepareChatRevisionSetup(database: IDBDatabase, key: WritingKey, action: 'newround' | 'comment', args: string[]) {

@@ -183,8 +183,8 @@ test('real model moves Morning Walk Study from writing through submission and re
   }
   await send(page, '/letter Route review')
   const [letter] = await Promise.all([page.waitForEvent('download'),
-    page.getByRole('button', { name: 'Download response letter', exact: true }).click()])
-  expect(letter.suggestedFilename()).toBe('Route review-response.md')
+    page.getByRole('button', { name: 'Download response draft', exact: true }).click()])
+  expect(letter.suggestedFilename()).toBe('Route review-draft-response.md')
 })
 
 test('real model reads Morning Walk Study evidence and applies a multi-batch manuscript task', async ({ page }) => {

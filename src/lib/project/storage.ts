@@ -16,6 +16,7 @@ import type { SubmissionVersion, SubmissionVersionInfo } from './submission'
 import { verifyDocxDelivery, verifyWordFinal, type SubmissionDocxDelivery, type SubmissionDocxDeliveryInfo } from './submission-docx-delivery'
 import { submissionEvidenceLedger } from './submission-evidence'
 import type { RevisionComment, RevisionResponse, RevisionRound } from './revision-rounds'
+import { revisionEvidenceSchema } from './revision-evidence'
 import type { RevisionPackageInput } from './revision-package'
 import { applyWritingDrafts, draftConflicts, editableSource, sameDraft, type PortableWritingState, type WritingDraft, type WritingDrafts, type WritingKey, type WritingView } from './writing-drafts'
 
@@ -379,6 +380,12 @@ export async function addRevisionComments(database: IDBDatabase, key: WritingKey
 export async function saveRevisionResponse(database: IDBDatabase, key: WritingKey, roundId: string, commentId: string, response?: RevisionResponse) {
     return updateRevisionRound(database, key, roundId, round => {
         if (!round.comments.some(item => item.id === commentId)) throw new Error('The reviewer comment is unavailable.')
+        if (response?.evidence) {
+            const evidence = revisionEvidenceSchema.parse(response.evidence)
+            if (evidence.originalId !== round.submissionId || evidence.revisedId !== round.revisedSubmissionId) {
+                throw new Error('The selected archives changed. Review the evidence again.')
+            }
+        }
         return { ...round, comments: round.comments.map(item => item.id === commentId ? { ...item, response } : item) }
     })
 }
@@ -391,16 +398,22 @@ export async function confirmChatReply(database: IDBDatabase, key: WritingKey, t
             throw new Error('The reviewer comment, response, or archive changed. Request a new draft.')
         }
         const response = { kind: target.kind, text, paths: target.paths }
-        return { ...round, revisedSubmissionId: target.revisedId,
-            comments: round.comments.map(item => item.id === comment.id ? { ...item, response } : item) }
+        const updated = setRoundRevisedVersion(round, target.revisedId)
+        return { ...updated, comments: updated.comments.map(item => item.id === comment.id ? { ...item, response } : item) }
     }, target.revisedId, { run: chatRun, step: { kind: 'reply-saved', at: Date.now(), detail: target.roundName } })
 }
 
 export async function linkRevisedSubmission(database: IDBDatabase, key: WritingKey, roundId: string, submissionId?: string) {
     return updateRevisionRound(database, key, roundId, round => {
         if (submissionId === round.submissionId) throw new Error('Choose a separate revised submission.')
-        return { ...round, revisedSubmissionId: submissionId }
+        return setRoundRevisedVersion(round, submissionId)
     }, submissionId)
+}
+
+function setRoundRevisedVersion(round: RevisionRound, revisedSubmissionId?: string): RevisionRound {
+    if (round.revisedSubmissionId === revisedSubmissionId) return round
+    return { ...round, revisedSubmissionId, comments: round.comments.map(comment => comment.response?.evidence
+        ? { ...comment, response: { ...comment.response, evidence: undefined } } : comment) }
 }
 
 async function updateRevisionRound(database: IDBDatabase, key: WritingKey, roundId: string,

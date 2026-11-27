@@ -1,8 +1,9 @@
 import { importSourceArchive, sourceArchiveEntry } from './source-archive'
 import type { ProjectFileSystem } from './types'
 import type { ReviewTarget } from './review-links'
+import { revisionChangeKey, revisionChangeLocation, sameRevisionEvidenceBinding, type RevisionChange, type RevisionEvidence, type RevisionEvidenceBinding } from './revision-evidence'
 
-export type RevisionResponse = { kind: 'changed' | 'retained'; text: string; paths: string[] }
+export type RevisionResponse = { kind: 'changed' | 'retained'; text: string; paths: string[]; evidence?: RevisionEvidence }
 export type RevisionCommentTarget = ReviewTarget | { type: 'file'; path: string } | { type: 'manuscript' }
 
 export type RevisionComment = { id: string; reviewer: string; text: string; response?: RevisionResponse } & (
@@ -49,8 +50,10 @@ function markdownText(text: string) {
     .replace(/^([+-]|\d+[.)])(?=\s)/gm, value => value.replace(/[+\-.)]/g, '\\$&'))
 }
 
-export function buildRevisionLetter(round: RevisionRound, baseline: string, revised: string, files: RevisionFile[]) {
+export function buildRevisionLetter(round: RevisionRound, baseline: string, revised: string, files: RevisionFile[],
+  binding: RevisionEvidenceBinding, changes: RevisionChange[]) {
   const byPath = new Map(files.map(file => [file.path, file.status]))
+  const byChange = new Map(changes.map(change => [revisionChangeKey(change), change]))
   const unresolved: number[] = []
   const lines = [`# ${markdownText(round.name.replace(/\s+/g, ' '))}`, '',
     `Original submission: ${markdownText(baseline.replace(/\s+/g, ' '))}`,
@@ -67,13 +70,16 @@ export function buildRevisionLetter(round: RevisionRound, baseline: string, revi
     }
     lines.push(response.kind === 'retained' ? '**Response · text retained**' : '**Response · manuscript revised**', '', markdownText(response.text), '')
     if (response.kind === 'retained') continue
-    const verified = response.paths.filter(path => byPath.has(path) && byPath.get(path) !== 'Unchanged')
-    const missing = response.paths.filter(path => !verified.includes(path))
-    if (!verified.length || missing.length) unresolved.push(number)
-    if (verified.length) lines.push('Changes verified against the revised source ZIP:', '',
-      ...verified.map(path => `- ${byPath.get(path)} · ${markdownText(path)}`), '')
-    if (!verified.length || missing.length) lines.push('**Evidence needs review in the selected revised ZIP.**',
-      ...missing.map(path => `- ${markdownText(path)}`), '')
+    const evidence = response.evidence
+    const references = evidence && sameRevisionEvidenceBinding(evidence, binding) ? evidence.changes : []
+    const verified = references.flatMap(item => byChange.get(revisionChangeKey(item)) ?? [])
+    if (!verified.length || verified.length !== references.length) {
+      unresolved.push(number)
+      lines.push('**Evidence needs review against the selected original and revised ZIPs.**', '')
+      continue
+    }
+    lines.push('Changes verified against the revised source ZIP:', '', ...verified.map(change =>
+      `- ${byPath.get(change.path)} · ${markdownText(change.path)} (${revisionChangeLocation(change)})`), '')
   }
   return { markdown: lines.join('\n'), unresolved }
 }

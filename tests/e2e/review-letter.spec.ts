@@ -81,7 +81,12 @@ test('reviews a pasted editor letter and exports replies with verified manuscrip
 
   for (const { path, sentence } of fileChanges) {
     await page.getByRole('complementary', { name: 'Project navigation' }).getByTitle(path, { exact: true }).click()
-    await page.getByRole('textbox', { name: 'Project source editor' }).press('Control+End')
+    const editor = page.getByRole('textbox', { name: 'Project source editor' })
+    if (path === 'sections/results.tex') {
+      await editor.press('Control+Home')
+      await page.keyboard.insertText('% Unrelated copyedit in the same file.\n')
+    }
+    await editor.press('Control+End')
     await page.keyboard.insertText(`\n${sentence}\n`)
     await page.getByRole('button', { name: 'Save', exact: true }).click()
     await expect(page.getByText('All changes saved to project')).toBeVisible()
@@ -95,10 +100,23 @@ test('reviews a pasted editor letter and exports replies with verified manuscrip
   const choice = await revisions.getByRole('option', { name: /^Revised submission v2 ·/ }).getAttribute('value')
   await revisions.getByRole('combobox', { name: 'Revised submission' }).selectOption(choice!)
   await expect(revisions.getByRole('button', { name: 'Download revision package' })).toBeDisabled()
+  let resultsLocation = ''
+  let unrelatedLocation = ''
   for (const [index, item] of fileChanges.entries()) {
     await revisions.getByRole('combobox', { name: 'Comment to answer' }).selectOption({ label: `${index + 1}. ${item.reviewer} · Awaiting response` })
     await revisions.getByRole('textbox', { name: 'Response', exact: true }).fill(item.response)
-    await revisions.getByRole('checkbox', { name: `${item.path} · Modified`, exact: true }).check()
+    const candidates = revisions.getByRole('checkbox', { name: new RegExp('^' + item.path.replaceAll('.', '\\.') + ' · ') })
+    await expect(candidates).toHaveCount(index === 2 ? 2 : 1)
+    const target = candidates.last()
+    if (index === 2) {
+      const location = async (input: Locator) => (await input.locator('..').innerText()).split(' · ')[1]
+      resultsLocation = await location(target)
+      unrelatedLocation = await location(candidates.first())
+      const change = target.locator('xpath=../..')
+      await change.getByText('View changed text', { exact: true }).click()
+      await expect(change.getByText(item.sentence, { exact: true })).toBeVisible()
+    }
+    await target.check()
     await revisions.getByRole('button', { name: 'Save response' }).click()
     await expect(revisions.getByRole('option', { name: `${index + 1}. ${item.reviewer} · Answered` })).toHaveCount(1)
   }
@@ -127,6 +145,8 @@ test('reviews a pasted editor letter and exports replies with verified manuscrip
   }
   expect(text).toContain(corrected)
   expect(text).not.toContain('through the journal portal')
+  expect(text).toContain(`sections/results.tex (${resultsLocation})`)
+  expect(text).not.toContain(`sections/results.tex (${unrelatedLocation})`)
   await writeFile(info.outputPath('acceptance.json'), JSON.stringify({ comments: 3, reviewers: fileChanges.map(item => item.reviewer),
     originalSource: digest(originalSource), revisedSource: digest(source), revisedPdf: digest(pdf), letter: digest(letter), package: digest(exported) }, null, 2))
   await page.screenshot({ path: info.outputPath('response-preview.png') })
@@ -136,4 +156,32 @@ test('reviews a pasted editor letter and exports replies with verified manuscrip
   const backup = page.getByRole('dialog', { name: 'Project Backup' })
   await backup.getByRole('button', { name: 'Complete recovery backup' }).click()
   await download(page, backup.getByRole('button', { name: 'Download Backup' }), info.outputPath('review-letter.research-canvas'))
+  await backup.getByRole('button', { name: 'Close', exact: true }).click()
+
+  await page.getByRole('complementary', { name: 'Project navigation' }).getByTitle('sections/results.tex', { exact: true }).click()
+  await page.getByRole('textbox', { name: 'Project source editor' }).press('Control+Home')
+  await page.keyboard.insertText('% Additional copyedit in the third archive.\n')
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(page.getByText('All changes saved to project')).toBeVisible()
+  const other = await archiveVersion(page, 'Revised submission v3')
+  await other.getByRole('button', { name: 'Close', exact: true }).click()
+  await page.getByRole('button', { name: 'Revision rounds', exact: true }).click()
+  await revisions.getByRole('button', { name: 'Responses and letter' }).click()
+  const select = revisions.getByRole('combobox', { name: 'Revised submission' })
+  const third = await revisions.getByRole('option', { name: /^Revised submission v3 ·/ }).getAttribute('value')
+  await select.selectOption(third!)
+  await expect(revisions.getByRole('option', { name: /Evidence needs review/ })).toHaveCount(3)
+  await expect(revisions.getByRole('button', { name: 'Download revision package' })).toBeDisabled()
+  await select.selectOption(choice!)
+  await expect(revisions.getByRole('option', { name: /Evidence needs review/ })).toHaveCount(3)
+  await expect(revisions.getByRole('button', { name: 'Download revision package' })).toBeDisabled()
+  for (const [index, item] of fileChanges.entries()) {
+    await revisions.getByRole('combobox', { name: 'Comment to answer' }).selectOption({ label: `${index + 1}. ${item.reviewer} · Evidence needs review` })
+    await expect(revisions.getByRole('textbox', { name: 'Response', exact: true })).toHaveValue(item.response)
+    await revisions.getByRole('checkbox', { name: new RegExp('^' + item.path.replaceAll('.', '\\.') + ' · ') }).last().check()
+    await revisions.getByRole('button', { name: 'Save response' }).click()
+  }
+  await expect(revisions.getByRole('button', { name: 'Download revision package' })).toBeEnabled()
+  await writeFile(info.outputPath('archive-switch.json'), JSON.stringify({ changedFile: 'sections/results.tex', selected: resultsLocation,
+    unrelated: unrelatedLocation, switchRequiresReview: true, switchBackRequiresReview: true, exportReenabled: true }, null, 2))
 })

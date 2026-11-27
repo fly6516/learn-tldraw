@@ -194,8 +194,9 @@ test('runs writing, preview, submission and a grounded reviewer reply from one c
   await expect(letter.getByRole('heading', { name: 'Round 1', exact: true })).toBeVisible()
   await expect(letter.getByText(/We clarified the synthetic mean temperature/)).toBeVisible()
   const downloadedLetter = page.waitForEvent('download')
-  await letter.getByRole('button', { name: 'Download response letter' }).click()
-  expect((await downloadedLetter).suggestedFilename()).toBe('Round 1-response.md')
+  await expect(letter.getByText(/Evidence needs review/)).toBeVisible()
+  await letter.getByRole('button', { name: 'Download response draft' }).click()
+  expect((await downloadedLetter).suggestedFilename()).toBe('Round 1-draft-response.md')
 
   await request(page, 'Add the following reviewer comment to Round 1, targeting sections/methods.tex: "Clarify sampling."')
   const nextComment = setup.filter({ hasText: 'Clarify sampling.' })
