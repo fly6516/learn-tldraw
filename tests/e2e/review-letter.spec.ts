@@ -27,7 +27,7 @@ async function archiveVersion(page: Page, name: string) {
 }
 
 test('reviews a pasted editor letter and exports replies with verified manuscript changes', async ({ page }, info) => {
-  test.setTimeout(140_000)
+  test.setTimeout(240_000)
   const originalName = 'Original submission'
   const revisedName = 'Revised submission v2'
   const roundName = 'Editor and two reviewers'
@@ -37,6 +37,12 @@ test('reviews a pasted editor letter and exports replies with verified manuscrip
     name: 'Morning Walk Study.zip', mimeType: 'application/zip', buffer: await morningWalkZip(),
   })
   await expect(page.getByRole('heading', { name: 'Morning Walk Study', exact: true })).toBeVisible()
+  if (process.env.RESEARCH_REVIEW_XELATEX === '1') {
+    await page.getByRole('button', { name: 'Compile settings', exact: true }).click()
+    const settings = page.getByRole('dialog', { name: 'Compile settings' })
+    await settings.getByLabel('Engine').selectOption('xelatex')
+    await settings.getByRole('button', { name: 'Save compile settings' }).click()
+  }
   const original = await archiveVersion(page, originalName)
   const originalSource = await download(page, original.getByRole('button', { name: 'Download archived ZIP' }), info.outputPath('original-source.zip'))
   await original.getByRole('button', { name: 'Start revision', exact: true }).click()
@@ -184,4 +190,105 @@ test('reviews a pasted editor letter and exports replies with verified manuscrip
   await expect(revisions.getByRole('button', { name: 'Download revision package' })).toBeEnabled()
   await writeFile(info.outputPath('archive-switch.json'), JSON.stringify({ changedFile: 'sections/results.tex', selected: resultsLocation,
     unrelated: unrelatedLocation, switchRequiresReview: true, switchBackRequiresReview: true, exportReenabled: true }, null, 2))
+  // Correct persisted comments after replies already exist.
+  await revisions.getByRole('button', { name: 'Close', exact: true }).click()
+  await page.getByRole('complementary', { name: 'Project navigation' }).getByTitle('sections/introduction.tex', { exact: true }).click()
+  await page.getByRole('button', { name: 'Review', exact: true }).click()
+  const review = page.getByRole('region', { name: 'Writing review' })
+  await review.getByLabel('Source target').selectOption({ label: 'Section · Introduction · line 1' })
+  const cardTitle = 'Clarify the scope on the introduction card'
+  await review.getByLabel('Comment or task').fill(cardTitle)
+  await review.getByRole('button', { name: 'Add linked card' }).click()
+  await expect(review.getByRole('status')).toHaveText('Linked Canvas card created.')
+  await page.getByRole('complementary', { name: 'Project navigation' }).getByTitle('sections/results.tex', { exact: true }).click()
+
+  await page.getByRole('button', { name: 'Revision rounds', exact: true }).click()
+  const row = (text: string) => saved.getByRole('listitem').filter({ hasText: text })
+  const editorText = 'Clarify the scope of the findings in the introduction.'
+  await row(editorText).getByRole('button', { name: 'Edit comment', exact: true }).click()
+  const edit = revisions.getByRole('form', { name: 'Edit reviewer comment' })
+  await edit.getByLabel('Reviewer or editor').fill('Handling editor')
+  const updatedText = 'Clarify the scope in the first paragraph of the introduction.'
+  await edit.getByLabel('Comment text').fill(updatedText)
+  const cardOption = await edit.getByRole('option', { name: new RegExp(cardTitle) }).getAttribute('value', { timeout: 10_000 })
+  await edit.getByLabel('Source or Canvas card').selectOption(cardOption!)
+  await edit.getByRole('button', { name: 'Save comment changes' }).click()
+  await expect(row(updatedText)).toContainText('Handling editor')
+  await expect(row(updatedText)).toContainText('Needs review')
+  const firstReviewer = 'State how many paired sessions went into the comparison.'
+  const splitText = 'Keep the synthetic nature of the study explicit.'
+  await row(firstReviewer).getByRole('button', { name: 'Split comment' }).click()
+  const split = revisions.getByRole('form', { name: 'Split reviewer comment' })
+  await expect(split.getByLabel('First comment')).toHaveValue(firstReviewer)
+  await expect(split.getByLabel('Second comment')).toHaveValue(splitText)
+  await split.getByRole('button', { name: 'Save split' }).click()
+  await expect(saved.getByRole('listitem')).toHaveCount(4)
+  await row(corrected).getByRole('button', { name: 'Move up' }).click()
+  await expect(saved.getByRole('listitem').nth(2)).toContainText(corrected)
+  const filter = saved.getByLabel('Response status')
+  await filter.selectOption('ready')
+  await expect(saved.getByRole('listitem')).toHaveCount(1)
+  await expect(row(corrected)).toBeVisible()
+  await filter.selectOption('awaiting')
+  await expect(saved.getByRole('listitem')).toHaveCount(1)
+  await expect(row(splitText)).toBeVisible()
+  await filter.selectOption('review')
+  await expect(saved.getByRole('listitem')).toHaveCount(2)
+  await expect(row(updatedText).getByRole('button', { name: 'sections/introduction.tex:1', exact: true })).toBeVisible()
+  await row(updatedText).getByRole('button', { name: 'sections/introduction.tex:1', exact: true }).click()
+  await expect(revisions).toBeHidden()
+  await expect(page.getByRole('region', { name: 'Source editor' }).getByText('sections/introduction.tex', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Revision rounds', exact: true }).click()
+  await row(updatedText).getByRole('button', { name: 'Locate on Canvas' }).click()
+  await expect(revisions).toBeHidden()
+  const properties = page.getByRole('complementary', { name: 'Research node properties' })
+  const details = page.getByRole('button', { name: 'Node details', exact: true })
+  await expect(details).toBeEnabled()
+  if (await details.getAttribute('aria-expanded') !== 'true') await details.click()
+  await properties.getByRole('button', { name: 'Open reply and evidence', exact: true }).click()
+  await expect(revisions.getByRole('region', { name: 'Revision responses' })).toBeVisible()
+  await expect(revisions.getByRole('textbox', { name: 'Response', exact: true })).toHaveValue(fileChanges[0].response)
+  await expect(revisions.getByText(updatedText, { exact: true })).toBeVisible()
+  await expect(revisions.getByRole('button', { name: 'Confirm reviewed response' })).toBeDisabled()
+  await expect(revisions.getByRole('button', { name: 'Download revision package' })).toBeDisabled()
+  await revisions.getByRole('checkbox', { name: /^sections\/introduction\.tex ·/ }).check()
+  await revisions.getByRole('button', { name: 'Confirm reviewed response' }).click()
+  await revisions.getByRole('button', { name: 'Reviewer comments', exact: true }).click()
+  await row(firstReviewer).getByRole('button', { name: 'Open reply and evidence' }).click()
+  await expect(revisions.getByRole('textbox', { name: 'Response', exact: true })).toHaveValue(fileChanges[1].response)
+  await revisions.getByRole('checkbox', { name: /^sections\/methods\.tex ·/ }).check()
+  await revisions.getByRole('button', { name: 'Confirm reviewed response' }).click()
+  await revisions.getByRole('button', { name: 'Reviewer comments', exact: true }).click()
+  await row(splitText).getByRole('button', { name: 'Open reply and evidence' }).click()
+  await revisions.getByLabel('Disposition').selectOption('retained')
+  const retained = 'The manuscript already states that the observations are synthetic.'
+  await revisions.getByLabel('Reason for keeping the text').fill(retained)
+  await revisions.getByRole('button', { name: 'Save response' }).click()
+  await expect(revisions.getByRole('button', { name: 'Download revision package' })).toBeEnabled()
+  await revisions.getByRole('button', { name: 'Preview response letter' }).click()
+  const updatedZip = await download(page, revisions.getByRole('button', { name: 'Download revision package' }), info.outputPath('workbench-revision.zip'))
+  const updatedPackage = await JSZip.loadAsync(updatedZip, { checkCRC32: true })
+  const updatedLetter = await updatedPackage.file('response.md')!.async('string')
+  expect(updatedLetter).toContain('Comment 1 · Handling editor')
+  expect(updatedLetter).toContain('Comment 3 · Reviewer 2')
+  expect(updatedLetter).toContain(retained)
+  expect(updatedLetter).not.toContain('needs review')
+  expect(await updatedPackage.file('manuscript.pdf')!.async('nodebuffer')).toEqual(pdf)
+  expect(await updatedPackage.file('source.zip')!.async('nodebuffer')).toEqual(source)
+  const updatedManifest = JSON.parse(await updatedPackage.file('manifest.json')!.async('string'))
+  expect(updatedManifest.round.comments).toBe(4)
+  for (const entry of updatedManifest.files) expect(digest(await updatedPackage.file(entry.name)!.async('nodebuffer'))).toBe(entry.sha256)
+  await writeFile(info.outputPath('workbench-response.md'), updatedLetter)
+  await writeFile(info.outputPath('workbench-checks.json'), JSON.stringify({
+    reviewers: ['Handling editor', 'Reviewer 1', 'Reviewer 2'], correctedComments: 4,
+    filters: { ready: 1, awaiting: 1, review: 2 }, archiveSwitchRequiresReview: true, canvasToReply: true,
+    originalSource: digest(originalSource), revisedSource: digest(source), revisedPdf: digest(pdf), package: digest(updatedZip),
+  }, null, 2))
+  await page.screenshot({ path: info.outputPath('workbench.png'), animations: 'disabled' })
+  await revisions.getByRole('button', { name: 'Close', exact: true }).click()
+  await page.getByRole('button', { name: 'Project menu' }).click()
+  await page.getByRole('menuitem', { name: 'Project Backup', exact: true }).click()
+  await backup.getByRole('button', { name: 'Complete recovery backup' }).click()
+  await download(page, backup.getByRole('button', { name: 'Download Backup' }), info.outputPath('workbench.research-canvas'))
+
 })

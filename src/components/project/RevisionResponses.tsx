@@ -6,24 +6,23 @@ import { chatText, chatTransport, ChatToolProgress } from './WritingAiWorkbench'
 import { WritingMarkdown } from './WritingMarkdown'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
-import { buildRevisionLetter, type RevisionResponse, type RevisionRound, type RevisionFile } from '@/lib/project/revision-rounds'
+import { revisionResponseStatus, type RevisionComment, type RevisionResponse, type RevisionRound } from '@/lib/project/revision-rounds'
 import type { SubmissionVersionInfo } from '@/lib/project/submission'
 import { revisionDraftSchema } from '@/lib/project/ai-revision'
 import { revisionChangeKey, revisionChangeLocation, sameRevisionEvidenceBinding, type RevisionChange, type RevisionEvidenceBinding } from '@/lib/project/revision-evidence'
 
-export function RevisionResponses({ round, baseline, versions, files, changes, binding, reportError, busy, onLink, onSave, onDownloadPackage }: {
-  round: RevisionRound; baseline: string; versions: SubmissionVersionInfo[]; files?: RevisionFile[]; reportError?: string
+export function RevisionResponses({ round, baseline, versions, letter, changes, binding, reportError, busy, selected, onSelect, onLink, onSave, onDownloadPackage }: {
+  round: RevisionRound; baseline: string; versions: SubmissionVersionInfo[]; letter?: { markdown: string; unresolved: number[] }; reportError?: string
   changes?: RevisionChange[]; binding?: RevisionEvidenceBinding; busy: boolean; onLink: (id?: string) => void
-  onSave: (commentId: string, response?: RevisionResponse) => Promise<boolean>
+  selected?: string; onSelect: (id: string) => void
+  onSave: (comment: RevisionComment, response?: RevisionResponse) => Promise<boolean>
   onDownloadPackage: () => Promise<boolean>
 }) {
-  const [selected, setSelected] = useState(round.comments[0]?.id ?? '')
   const [preview, setPreview] = useState(false)
   const [exporting, setExporting] = useState(false)
-  const comment = round.comments.find(item => item.id === selected)
+  const comment = round.comments.find(item => item.id === selected) ?? round.comments[0]
   const revised = versions.find(version => version.id === round.revisedSubmissionId)
-  const letter = files && revised && binding && changes ? buildRevisionLetter(round, baseline, revised.name, files, binding, changes) : undefined
-  const unresolved = letter?.unresolved.length ?? round.comments.filter(item => item.response?.kind !== 'retained').length
+  const unresolved = letter?.unresolved.length ?? round.comments.filter(item => revisionResponseStatus(item) !== 'ready').length
   const draft = unresolved > 0
 
   function downloadLetter() {
@@ -47,17 +46,19 @@ export function RevisionResponses({ round, baseline, versions, files, changes, b
     </label>
     {!versions.length && <p className="text-sm text-slate-600">Save the revised manuscript in Prepare submission to verify evidence and export the letter.</p>}
     {round.comments.length > 0 && <label className="grid gap-1 text-sm font-medium">Comment to answer
-      <select className="max-w-full rounded border p-1.5" value={selected} onChange={event => setSelected(event.target.value)}>
-        {round.comments.map((item, index) => <option key={item.id} value={item.id}>{index + 1}. {item.reviewer || 'Reviewer'} · {item.response
-          ? item.response.kind === 'changed' && (!letter || letter.unresolved.includes(index + 1)) ? 'Evidence needs review' : 'Answered'
-          : 'Awaiting response'}</option>)}
+      <select className="max-w-full rounded border p-1.5" value={comment?.id ?? ''} onChange={event => onSelect(event.target.value)}>
+        {round.comments.map((item, index) => {
+          const status = revisionResponseStatus(item, Boolean(letter && !letter.unresolved.includes(index + 1)))
+          return <option key={item.id} value={item.id}>{index + 1}. {item.reviewer || 'Reviewer'} · {status === 'ready' ? 'Answered'
+            : status === 'review' ? 'Evidence needs review' : 'Awaiting response'}</option>
+        })}
       </select>
     </label>}
     {comment && <>
       <blockquote className="whitespace-pre-wrap break-words border-l-2 pl-3 text-sm">{comment.text}</blockquote>
-      <ResponseForm key={comment.id} initial={comment.response} changes={changes} binding={binding} busy={busy}
+      <ResponseForm key={JSON.stringify([comment.id, comment.editId, round.revisedSubmissionId])} initial={comment.response} changes={changes} binding={binding} busy={busy}
         archive={revised ? { original: baseline, revised: revised.name, id: revised.id } : undefined} comment={comment.text}
-        onSave={response => onSave(comment.id, response)} />
+        onSave={response => onSave(comment, response)} />
     </>}
     {reportError && <p role="alert" className="text-sm text-red-800">{reportError}</p>}
     {revised && !letter && !reportError && <p role="status" className="text-sm">Comparing the archived submission ZIPs…</p>}
@@ -147,6 +148,7 @@ function ResponseForm({ initial, changes, binding, busy, onSave, archive, commen
     if (await onSave({ kind, text: text.trim(), paths: evidence ? [...new Set(picked.map(change => change.path))] : [], evidence })) setSaved(true)
   }}>
     <fieldset disabled={busy || aiBusy} className="space-y-2">
+      {initial?.reviewRequired && <p role="status" className="text-sm text-amber-800">The comment was edited. Review this saved draft before confirming the response.</p>}
       <label className="grid gap-1 text-sm font-medium">Disposition
         <select className="rounded border p-1.5" value={kind} onChange={event => { setKind(event.target.value === 'retained' ? 'retained' : 'changed'); setSaved(false) }}>
           <option value="changed">Manuscript revised</option><option value="retained">Text retained</option>
@@ -179,7 +181,7 @@ function ResponseForm({ initial, changes, binding, busy, onSave, archive, commen
       </details>}
     </fieldset>
     <div className="flex flex-wrap items-center gap-2">
-      <Button type="submit" size="sm" disabled={!canSave || aiBusy}>Save response</Button>
+      <Button type="submit" size="sm" disabled={!canSave || aiBusy}>{initial?.reviewRequired ? 'Confirm reviewed response' : 'Save response'}</Button>
       <Button type="button" size="sm" variant="outline" disabled={busy || aiBusy || !eligible} onClick={() => void generateReply()}>
         {aiBusy ? 'Drafting with AI…' : 'Draft response with AI'}
       </Button>

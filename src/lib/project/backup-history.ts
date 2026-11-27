@@ -60,11 +60,11 @@ const target = z.discriminatedUnion('type', [
   z.object({ type: z.literal('formula'), anchor: figureAnchorSchema }),
   z.object({ type: z.literal('selection'), anchor: selectionAnchorSchema }),
 ])
-const response = z.object({ kind: z.enum(['changed', 'retained']), text, paths: z.array(path), evidence: revisionEvidenceSchema.optional() })
+const response = z.object({ kind: z.enum(['changed', 'retained']), text, paths: z.array(path), evidence: revisionEvidenceSchema.optional(), reviewRequired: z.literal(true).optional() })
 const comment = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('comment'), target }),
   z.object({ kind: z.literal('canvas'), nodeId: id }),
-]).and(z.object({ id, reviewer: text, text, response: response.optional() }))
+]).and(z.object({ id, reviewer: text, text, editId: id.optional(), response: response.optional() }))
 const round = identity.extend({ submissionId: id, revisedSubmissionId: id.optional(), comments: z.array(comment) })
 const sources = z.record(path, z.object({ saved: text, draft: z.object({ base: text, text }).optional() }))
 const evidence = chapterAnswerSchema.shape.evidence.element.extend({
@@ -88,7 +88,7 @@ const ai = z.object({
     runs: z.record(id, z.object({ main: path.optional(), pathRevision: z.number().int().nonnegative().optional(), sources, revisionOf: id.optional(),
       context: aiContextReceiptSchema.optional(),
       manuscriptId: id.optional(), replacesBatch: id.optional(), verifyRepair: z.boolean().optional(),
-      reply: z.object({ round: id, roundName: text, comment: id, commentText: text, originalId: id, revisedId: id,
+      reply: z.object({ round: id, roundName: text, comment: id, commentText: text, commentEditId: id.optional(), originalId: id, revisedId: id,
         previousRevisedId: id.optional(), previous: response.optional(), paths: z.array(path), kind: z.enum(['changed', 'retained']) }).optional() })),
   })).max(12) }).refine(value => unique(value.conversations) && value.conversations.some(item => item.id === value.selected)).optional(),
   moves: z.array(z.object({ from: path, to: path })),

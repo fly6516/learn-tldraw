@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { buildRevisionLetter, compareRevisionFiles, readRevisionBaseline } from './revision-rounds'
+import { buildRevisionLetter, compareRevisionFiles, editRevisionComment, readRevisionBaseline, revisionResponseStatus } from './revision-rounds'
 import { exportSourceArchive } from './source-archive'
 import { applyWritingDrafts } from './writing-drafts'
 import { compareRevisionChanges } from './revision-evidence'
@@ -69,4 +69,28 @@ test('locates insertions and removals on their respective archived side', async 
     { path: 'main.tex', before: { start: 1, end: 1 }, beforeText: 'Old', afterText: '' },
     { path: 'main.tex', after: { start: 2, end: 2 }, beforeText: '', afterText: 'Inserted' },
   ])
+})
+
+test('reopens a retained reply after correcting or splitting its comment and preserves verification when ordering', () => {
+  const reply = { kind: 'retained', paths: [], text: 'The method already describes the procedure.' }
+  const original = { kind: 'comment', target: { type: 'manuscript' }, id: 'one', reviewer: 'Reviewer 1', text: 'Check the procedure.', response: reply }
+  const unmatched = { kind: 'comment', target: { type: 'manuscript' }, id: 'two', reviewer: 'Editor', text: 'Check the title.' }
+  const round = { id: 'round', name: 'Round', submissionId: 'original', comments: [original, unmatched] }
+  const ordered = editRevisionComment(round, original, { kind: 'move', direction: 1 })
+  expect(ordered.comments).toEqual([unmatched, original])
+  expect(revisionResponseStatus(ordered.comments[1])).toBe('ready')
+
+  const corrected = editRevisionComment(ordered, original, { kind: 'edit', text: original.text, reviewer: 'Reviewer 2',
+    destination: { kind: 'canvas', nodeId: 'existing-card' }, editId: 'v2' })
+  const edited = corrected.comments[1]
+  expect(edited.response.text).toBe(reply.text)
+  expect(edited).toMatchObject({ id: 'one', editId: 'v2', reviewer: 'Reviewer 2', nodeId: 'existing-card' })
+  expect(revisionResponseStatus(edited)).toBe('review')
+  expect(buildRevisionLetter(corrected, 'Original', 'Revised', [], {}, []).unresolved).toEqual([1, 2])
+  expect(() => editRevisionComment(corrected, original, { kind: 'move', direction: -1 })).toThrow('changed')
+
+  const split = editRevisionComment(corrected, edited, { kind: 'split', first: 'Check the setup.', second: 'Check the calibration.', editId: 'v3', secondId: 'three' })
+  expect(split.comments[1]).toMatchObject({ id: 'one', kind: 'canvas', response: { text: reply.text, reviewRequired: true } })
+  expect(split.comments[2]).toMatchObject({ id: 'three', kind: 'comment', reviewer: 'Reviewer 2', target: { type: 'manuscript' } })
+  expect(revisionResponseStatus(split.comments[2])).toBe('awaiting')
 })

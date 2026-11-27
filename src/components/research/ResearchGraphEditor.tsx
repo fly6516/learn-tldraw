@@ -98,7 +98,7 @@ function canSetParent(page: ResearchPage, nodeId: string, parentId: string) {
 }
 
 function NodeDetails({ node, page, onEdit, onFinishEdit, onConnect, onOpenSource, sourceUnavailable, onUnlinkSource, canParent,
-  remoteLinks, references, onOpenReference, onRepairSource }: {
+  remoteLinks, references, onOpenReference, onRepairSource, onOpenRevision }: {
   node: ResearchNode
   page: ResearchPage
   onEdit: (data: ResearchNode['data'], field?: string) => void
@@ -112,6 +112,7 @@ function NodeDetails({ node, page, onEdit, onFinishEdit, onConnect, onOpenSource
   references: ReferenceLocation[]
   onOpenReference: (reference: ReferenceLocation) => void
   onRepairSource?: () => void
+  onOpenRevision: () => void
 }) {
   const { data } = node
   const research = data.resource?.kind === 'research' ? data.resource : undefined
@@ -120,7 +121,8 @@ function NodeDetails({ node, page, onEdit, onFinishEdit, onConnect, onOpenSource
   return (
     <aside aria-label="Research node properties" className="space-y-3 p-3">
       <h2 className="font-semibold">Research Node</h2>
-      {(onOpenSource || onUnlinkSource || onRepairSource) && <div className="flex flex-wrap gap-2">
+      {(onOpenSource || onUnlinkSource || onRepairSource || research?.role === 'review') && <div className="flex flex-wrap gap-2">
+        {research?.role === 'review' && <Button size="sm" variant="outline" onClick={onOpenRevision}>Open reply and evidence</Button>}
         {onOpenSource && <Button size="sm" variant="outline" onClick={onOpenSource}>Open source</Button>}
         {onRepairSource && <Button size="sm" variant="outline" onClick={onRepairSource}>Repair source link</Button>}
         {onUnlinkSource && <Button size="sm" variant="ghost" onClick={onUnlinkSource}>Remove source link</Button>}
@@ -231,7 +233,7 @@ function NodeDetails({ node, page, onEdit, onFinishEdit, onConnect, onOpenSource
 
 export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, onHistory, canUndo, canRedo,
   sample, actions, sourceStatus, onOpenSource, onUnlinkSource, jumpTo, onJumpHandled, overview, validateConnection,
-  canParent, remoteLinks, referenceLocations, onOpenReference, onRepairSource }: {
+  canParent, remoteLinks, referenceLocations, onOpenReference, onRepairSource, onOpenRevision }: {
   page: ResearchPage
   updatePage: (update: (current: ResearchPage) => ResearchPage) => void
   editPage: (update: (current: ResearchPage) => ResearchPage, group?: string) => void
@@ -258,6 +260,7 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
   remoteLinks: (nodeId: string) => Parameters<typeof NodeDetails>[0]['remoteLinks']
   referenceLocations: (data: ResearchNode['data']) => ReferenceLocation[]
   onOpenReference: (reference: ReferenceLocation) => void
+  onOpenRevision: (nodeId: string) => void
   onRepairSource: (nodeId: string) => (() => void) | undefined
 }) {
   const [selectedNodes, setSelectedNodes] = useState<string[]>([])
@@ -595,6 +598,7 @@ export function ResearchGraphEditor({ page, updatePage, editPage, onFinishEdit, 
             canParent={canParent} remoteLinks={remoteLinks(activeNode.id)}
             references={referenceLocations(activeNode.data)} onOpenReference={onOpenReference}
             onRepairSource={onRepairSource(activeNode.id)}
+            onOpenRevision={() => onOpenRevision(activeNode.id)}
             onFinishEdit={onFinishEdit}
             onEdit={(data, field) => editPage(current => ({
               ...current, nodes: current.nodes.map(node => node.id === activeNode.id ? { ...node, data } : node),

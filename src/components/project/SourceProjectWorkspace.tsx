@@ -164,6 +164,7 @@ export interface SourceWorkspaceHandle {
   openFile: (path: string, line?: number) => void
   locate: (location: SourceLocation) => void
   openGeneratedNode: (node: ResearchNodeData) => void
+  openRevisionCard: (nodeId: string) => void
   confirmLeave: () => boolean
   prepareProjectSwitch: () => Promise<boolean>
   snapshotRestoreBlock: (paths?: readonly string[]) => string | undefined
@@ -242,7 +243,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const [writing, setWriting] = useState(false)
   const [submissionOpen, setSubmissionOpen] = useState(false)
   const [templateExport, setTemplateExport] = useState<{ files: ProjectFileSystem['files']; main: string }>()
-  const [revision, setRevision] = useState<{ submissionId?: string }>()
+  const [revision, setRevision] = useState<{ submissionId?: string; cardId?: string }>()
   const [revisionRoundId, setRevisionRoundId] = useState<string>()
   const [includeDrafts, setIncludeDrafts] = useState(false)
   const [selectedStage, setSelectedStage] = useState<SubmissionStage>()
@@ -527,6 +528,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   useImperativeHandle(ref, () => ({
     openFile,
     locate,
+    openRevisionCard: nodeId => setRevision({ cardId: nodeId }),
     snapshotRestoreBlock: paths => {
       if (locked || journal.pending) return 'Wait for Writing to finish its current operation before restoring a snapshot.'
       if (journal.loadError) return 'Local drafts could not be checked. Reopen the project before restoring a snapshot.'
@@ -1442,7 +1444,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
             onRename={canRefactorReferences ? from => openReferenceOperation({ kind: 'label', from }) : undefined} />}
           {panel === 'review' && <WritingReviewPanel key={selected} path={selected} line={reviewCursor?.path === selected ? reviewCursor.line : 1}
             catalog={catalog} canvas={outlineCanvas.canvas} actions={review} canSelect={isTex && currentFile?.type !== 'generated'}
-            readSelection={readReviewSelection} onLocate={locate} />}
+            readSelection={readReviewSelection} onLocate={locate} onOpenRevision={nodeId => setRevision({ cardId: nodeId })} />}
         </div>
       </section>
 
@@ -1519,7 +1521,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
           if (selection) void compile(selection)
         }} />}
       {revision && storage && journal.key && <RevisionRoundsDialog database={storage} storageKey={journal.key}
-        initialSubmission={revision.submissionId} roundId={revisionRoundId} onSelectRound={setRevisionRoundId}
+        initialSubmission={revision.submissionId} initialCard={revision.cardId} roundId={revisionRoundId} onSelectRound={setRevisionRoundId}
         current={workingProject} catalog={catalog} cards={review.items} drafts={revisionDraftPaths} conflicts={conflicts}
         openSource={(path, location) => { setRevision(undefined); openFile(path, location?.line, location) }}
         openCanvas={card => { setRevision(undefined); review.locateCanvas(card) }} onClose={() => setRevision(undefined)} />}

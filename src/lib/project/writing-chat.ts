@@ -105,6 +105,7 @@ export type WritingChatMessage = UIMessage<{
 export type ChatSource = { saved: string; draft?: WritingDraft }
 export type ChatReplyTarget = {
   round: string; roundName: string; comment: string; commentText: string; originalId: string; revisedId: string
+  commentEditId?: string
   previousRevisedId?: string
   previous?: import('./revision-rounds').RevisionResponse; paths: string[]; kind: 'changed' | 'retained'
 }

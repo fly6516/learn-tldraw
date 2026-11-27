@@ -15,7 +15,7 @@ import { restoreSnapshotFiles } from './snapshots'
 import type { SubmissionVersion, SubmissionVersionInfo } from './submission'
 import { verifyDocxDelivery, verifyWordFinal, type SubmissionDocxDelivery, type SubmissionDocxDeliveryInfo } from './submission-docx-delivery'
 import { submissionEvidenceLedger } from './submission-evidence'
-import type { RevisionComment, RevisionResponse, RevisionRound } from './revision-rounds'
+import { editRevisionComment, type RevisionComment, type RevisionResponse, type RevisionRound, type RevisionCommentEdit } from './revision-rounds'
 import { revisionEvidenceSchema } from './revision-evidence'
 import type { RevisionPackageInput } from './revision-package'
 import { applyWritingDrafts, draftConflicts, editableSource, sameDraft, type PortableWritingState, type WritingDraft, type WritingDrafts, type WritingKey, type WritingView } from './writing-drafts'
@@ -377,23 +377,31 @@ export async function addRevisionComments(database: IDBDatabase, key: WritingKey
     }, undefined, chatRun ? { run: chatRun, step: { kind: 'comment-added', at: Date.now() } } : undefined)
 }
 
-export async function saveRevisionResponse(database: IDBDatabase, key: WritingKey, roundId: string, commentId: string, response?: RevisionResponse) {
+export async function updateRevisionComment(database: IDBDatabase, key: WritingKey, roundId: string,
+    expected: RevisionComment, edit: RevisionCommentEdit) {
+    return updateRevisionRound(database, key, roundId, round => editRevisionComment(round, expected, edit))
+}
+
+export async function saveRevisionResponse(database: IDBDatabase, key: WritingKey, roundId: string, expected: RevisionComment, response?: RevisionResponse) {
     return updateRevisionRound(database, key, roundId, round => {
-        if (!round.comments.some(item => item.id === commentId)) throw new Error('The reviewer comment is unavailable.')
+        const current = round.comments.find(item => item.id === expected.id)
+        if (!current || JSON.stringify(current) !== JSON.stringify(expected)) {
+            throw new Error('The reviewer comment or saved reply changed. Reopen the round and review the latest version.')
+        }
         if (response?.evidence) {
             const evidence = revisionEvidenceSchema.parse(response.evidence)
             if (evidence.originalId !== round.submissionId || evidence.revisedId !== round.revisedSubmissionId) {
                 throw new Error('The selected archives changed. Review the evidence again.')
             }
         }
-        return { ...round, comments: round.comments.map(item => item.id === commentId ? { ...item, response } : item) }
+        return { ...round, comments: round.comments.map(item => item.id === expected.id ? { ...item, response } : item) }
     })
 }
 
 export async function confirmChatReply(database: IDBDatabase, key: WritingKey, target: ChatReplyTarget, text: string, chatRun: string) {
     return updateRevisionRound(database, key, target.round, round => {
         const comment = round.comments.find(item => item.id === target.comment)
-        if (!comment || comment.text !== target.commentText || JSON.stringify(comment.response) !== JSON.stringify(target.previous)
+        if (!comment || comment.text !== target.commentText || comment.editId !== target.commentEditId || JSON.stringify(comment.response) !== JSON.stringify(target.previous)
             || round.submissionId !== target.originalId || round.revisedSubmissionId !== target.previousRevisedId) {
             throw new Error('The reviewer comment, response, or archive changed. Request a new draft.')
         }

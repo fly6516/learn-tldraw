@@ -17,7 +17,7 @@ export interface WritingReviewActions {
   locateCanvas: (item: CanvasLocation) => void
 }
 
-export function WritingReviewPanel({ path, line, catalog, canvas, actions, canSelect, readSelection, onLocate }: {
+export function WritingReviewPanel({ path, line, catalog, canvas, actions, canSelect, readSelection, onLocate, onOpenRevision }: {
   path: string
   line: number
   catalog: CanvasSourceCatalog
@@ -26,6 +26,7 @@ export function WritingReviewPanel({ path, line, catalog, canvas, actions, canSe
   canSelect: boolean
   readSelection: () => ReviewTarget | undefined
   onLocate: (location: SourceLocation) => void
+  onOpenRevision: (nodeId: string) => void
 }) {
   const [scope, setScope] = useState('section')
   const [card, setCard] = useState('review')
@@ -137,6 +138,7 @@ export function WritingReviewPanel({ path, line, catalog, canvas, actions, canSe
               {item.source.path}:{item.source.line}
             </button>
             : <span className="text-xs text-muted-foreground">{reviewTarget(item.data) ? 'Source link unavailable' : 'No source link'}</span>}
+          {item.resource.role === 'review' && <Button size="sm" variant="ghost" onClick={() => onOpenRevision(item.nodeId)}>Open reply and evidence</Button>}
           <Button size="sm" variant="ghost" onClick={() => actions.locateCanvas(item)}>Locate on Canvas</Button>
         </div>
       </li>)}

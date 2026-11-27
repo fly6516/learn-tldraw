@@ -660,6 +660,10 @@ function Workspace({ sample, initialProject, notice, projectListHref, onViewChan
               remoteLinks={remoteLinks}
               referenceLocations={data => data.resource?.kind === 'bibliography' && bibliographyLinks.byNode.has(data)
                 ? references?.uses.get(data.resource.key) ?? [] : []}
+              onOpenRevision={nodeId => {
+                switchView('write')
+                writing.current?.openRevisionCard(nodeId)
+              }}
               onOpenReference={openReferenceLocation}
               onRepairSource={nodeId => firstSourceIssue.has(nodeId) ? () => setSourceLinksDialog({ nodeId }) : undefined}
               sourceStatus={node => {

@@ -52,7 +52,7 @@ export async function prepareChatReply(database: IDBDatabase, key: WritingKey, r
   const authorNote = request.authorNote ?? (comment.response?.kind === 'retained' ? comment.response.text.slice(0, 1500) : '')
   if (!changes.length && !authorNote) throw new Error('No changed source matches this comment. Provide an author rationale if the text was retained.')
   const kind = changes.length ? 'changed' as const : 'retained' as const
-  const reply: ChatReplyTarget = { round: round.id, roundName: round.name, comment: comment.id, commentText: comment.text,
+  const reply: ChatReplyTarget = { round: round.id, roundName: round.name, comment: comment.id, commentText: comment.text, commentEditId: comment.editId,
     originalId: original.id, revisedId: revised.id, previousRevisedId: round.revisedSubmissionId, previous: comment.response,
     paths, kind }
   return { reply, revision: { comment: comment.text, original: original.name, revised: revised.name, changes, kind, authorNote } }
