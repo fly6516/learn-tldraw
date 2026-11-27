@@ -55,6 +55,17 @@ In PowerShell set `$env:RESEARCH_LIVE_TEST = '1'` before running the command. To
 local copy of the same fixture, set `RESEARCH_LIVE_TEST_ZIP` to the ZIP path or
 `RESEARCH_LIVE_TEST_PATH` to a locally seeded demo route including `?view=write`.
 
+For the Writing AI release check, configure DeepSeek and a working Tectonic installation.
+Run the live suite twice after building the app:
+
+```sh
+RESEARCH_LIVE_TEST=1 bun run test:e2e tests/e2e/live-writing.spec.ts --repeat-each=2 --reporter=line,json
+```
+
+Keep the report locally with the model, durations and any failure categories. The long
+paper fixture checks the model connection and both ways of editing a late passage.
+For the public manuscript and attachment cases, see [Writing AI quality baseline](docs/ai-quality.md).
+
 **Review context** previews the files, drafts, CSV and diagnostic material available to
 the model in a source request. **Read exclusions** accepts project-relative paths and
 folder paths ending in `/`. With exclusions enabled, previous chat text and compiler
@@ -80,10 +91,15 @@ pdfLaTeX, biblatex, Biber, latexmk, and Poppler `pdftotext` in the test environm
 ZIP, backs up the verified task in Chromium, and imports it in Firefox before archiving.
 It compares the archived ZIP and PDF bytes and checks that an edited copy needs a fresh build.
 
+Run `bun run test:e2e tests/e2e/project-library.spec.ts` for project search, sorting,
+and the built-in templates. Set `LATEX_SYSTEM_TEX_ENABLED=1` and put XeLaTeX and BibTeX
+on PATH with the TeX Live `ctex` and `fandol` packages to also verify the built Chinese PDF.
+
 The publisher regression uses the [Springer Nature December 2024 template ZIP](https://www.springernature.com/gp/authors/campaigns/latex-author-support).
 Set `RESEARCH_PUBLISHER_ZIP` to the downloaded file and run `bun run test:e2e tests/e2e/publisher-template.spec.ts`.
 Keep the template and generated files in an ignored test folder. The regression pins the
-publisher ZIP by SHA-256 and builds two ZIPs downloaded from the browser. It needs
+publisher ZIP by SHA-256, imports it through the template picker, and builds two ZIPs
+downloaded from the browser. It needs
 pdfLaTeX, BibTeX, latexmk, `epstopdf`, Ghostscript, and Poppler `pdftotext`. On Ubuntu,
 install `texlive-latex-extra`, `texlive-science`, and `texlive-font-utils` to supply
 `manyfoot.sty`, `algorithm.sty`, and EPS conversion support.
@@ -93,3 +109,12 @@ the included EPS with `epstopdf` before calling latexmk with shell escape disabl
 
 Use `.env.example` as a reference for local environment options. Keep real credentials,
 private research, and local test outputs out of commits.
+
+## Official template acceptance
+
+See [Template support and verification](docs/official-template-acceptance.md) for
+the toolchain, verified sources, fixture setup, commands, and native Word and
+NJUPT font checks. Keep downloaded publisher files, local attachments, and
+generated evidence in ignored output or a private directory.
+
+To verify local trial packaging, use the [bundle guide](docs/trial-release.md).

@@ -18,20 +18,98 @@ shows the state of browser storage, Tectonic, and the configured model. To compi
 sample, install Tectonic, set `LATEX_COMPILE_ENABLED=1` in `.env.local`, and restart.
 The sample's **Use example edits** runs without a model key.
 
-See [the trial release notes](docs/trial-release.md) for the acceptance checklist and
-[Contributing](CONTRIBUTING.md) for test commands.
+For a packaged local trial, see [Build and run a local trial bundle](docs/trial-release.md).
+For development and verification, see [Contributing](CONTRIBUTING.md).
+
+## User guides
+
+- [Compile settings and engines](docs/compile-profiles.md)
+- [Template support and verification](docs/official-template-acceptance.md)
+- [Recover or transfer a project](docs/project-recovery.md)
+- [Maintain references across files](docs/reference-maintenance.md)
+- [Export a revision package](docs/revision-package.md)
+- [Writing AI quality tests](docs/ai-quality.md)
 
 ## Workflows
 
 - `/research` lists projects stored in the current browser. Create a project, import a LaTeX
   ZIP or Research Canvas backup, or open an existing project. Project links identify one
-  project and its view. The latest project is marked in the list.
+  project and its view. Search by project name within **Projects**, **Archived**, or
+  **Trash**. Sort by most recently opened or by name. Use **Continue writing** or
+  **Open recent canvas** to resume the last opened project.
 - `/research-dev` uses the same views with a sample paper.
 
 The project list keeps an existing single project with its original drafts and history. Each
 import creates an independent copy, including repeated imports of the same backup. From an
 open project, use **Back to projects** to switch without losing local drafts. Archive inactive
-projects or move them to Trash. **Restore** returns either to the active list.
+projects or move them to Trash from the selected project's **Details** panel.
+On small screens, select a row to show its details. **Restore** returns a project
+to the active list. **Delete permanently** appears in Trash and requires confirmation.
+Open project lists in other tabs refresh when projects are added, updated or removed.
+**Download recovery backup** in Details works from Projects, Archived, and Trash.
+It includes the saved files and Canvas, persisted local drafts, submissions, revisions,
+and snapshots. Use **Project Backup** inside the editor to include optional AI history.
+Press `/` to focus search, use the arrow keys to move through project rows, and
+press `Enter` to open an active project. `F2` renames the focused project and
+`Delete` moves it to Trash.
+
+Use **New project** to choose a starting point. **English article** compiles with
+Tectonic. **Chinese research article** uses `ctexart`, the Fandol fonts, and XeLaTeX
+with BibTeX. Enable local TeX Live with `LATEX_SYSTEM_TEX_ENABLED=1` to compile it
+in Writing, or use the existing external build ZIP. Both starters include editable
+sections and an example bibliography. Edit the title and author in `main.tex`.
+Choose **Blank canvas** to begin by mapping ideas.
+
+Open **Paper templates** in the project sidebar. Choose **使用模板** to start a
+project from Word, LaTeX, or a built-in starter. Reference entries open publisher
+resources. The [template support guide](docs/official-template-acceptance.md) lists
+registered versions, applicable submission stages, verified features and limits.
+
+### Import Word to TeX
+
+With LibreOffice and Pandoc available on the local server, set `WORD_IMPORT_ENABLED=1`.
+Use `LIBREOFFICE_BIN` and `PANDOC_BIN` if they are outside the server's PATH.
+Start from **Import Word** in the project list, or **使用模板** on the Shanghai
+Electric Power undergraduate card. The school-specific route uses the verified
+official attachment bundle and offers manual upload if fetching it fails. Supply
+your own `.doc` or `.docx` manuscript and the required cover fields. The
+import preserves the official front matter and converts your manuscript to editable
+LaTeX. Word drawings and embedded equations can become images. Review the import
+report for captions the converter could not match. The running title and layout
+are editable in `suep-layout.tex`.
+
+To build a layout for another school, open **Paper templates → My templates → 从 Word 生成模板**.
+Upload a Word sample and optionally a guide in PDF, Word, or UTF-8 text. Text-based PDF
+guides retain physical page numbers and excerpts for recognized rules. The workbench reads
+Word layout properties locally. AI assistance is optional and sends selected headings and
+formatting excerpts to the configured provider. Review the sources, resolve conflicts,
+then compile the preview and save the layout. With only a Word sample, the saved template
+is marked as a reference layout. Reusing it starts a project from the new manuscript and
+the selected cover or logo, if any.
+
+Saved Word layouts can be reviewed, edited into a new version, or exported and restored
+through the same template ZIP import entry. Open **版式核对** in the project PDF pane
+to check the project's saved rules and locate import or compiler issues. For multi-part
+theses, select the front matter page numbering, chapter breaks and running header mode.
+After renumbering, the importer updates plain-text figure and table references with one
+identifiable target. Review ambiguous references and citations in the PDF pane.
+
+After compiling, open **提交前版式检查** in the PDF pane or **Prepare submission**.
+Reports link to the compiled PDF and its source snapshot. They show recognized
+rules, observed values and any checks that need author review. For official
+versions, candidate publication, and editable DOCX export, see
+[Template support and verification](docs/official-template-acceptance.md).
+
+For Word layout projects, enable `LATEX_COMPILE_ENABLED=1` and
+`LATEX_SYSTEM_TEX_ENABLED=1` with local XeLaTeX. Install the TeX Live CTeX and
+Fandol packages along with the dependencies for the selected template. For
+official Word front matter, use the required fonts or review the result with
+the substitutes available to LibreOffice.
+
+To keep a reusable layout, choose **Import as template** for a LaTeX ZIP or
+**Project menu → Save as template** for a project. Select the entry, compiler and
+files. **My templates** lets you find, rename, download, reuse and delete layouts.
+Each new project receives an independent copy.
 
 Use **Add node** to create a card. **Select** moves nodes and box-selects them, **Pan** moves
 the viewport, and **Connect** links two cards in click order or by dragging from an outgoing
@@ -46,23 +124,10 @@ Use **Project search** from the project menu or Canvas toolbar to find cards, Wr
 or bibliography entries. Source results include local drafts. Linked results offer a direct
 jump to the other view when the match overlaps a linked source target.
 
-Use **Project menu → Project Backup** to download a `.research-canvas` file. In another browser, choose the
-file from the same dialog and confirm **Replace Project**. The backup includes all canvas
-pages, nodes, connections, viewports, and saved project files. Select **Include local drafts**
-to carry those edits and the Writing cursor separately from the saved source. A restored draft
-with a different baseline opens in the normal Writing comparison flow. Version 2 backups are
-still supported. Backups carrying drafts use version 3.
-
-Select the history categories you want to transfer. **Include submissions and revision rounds**
-keeps the exact archived PDF and source ZIP for each version, their reviewer comments and replies,
-and the links between revisions and submissions. **Include project snapshots** keeps saved
-snapshots. **Include AI conversations and task history** also includes manuscript excerpts
-used as evidence and the source move history. Automatic approvals are session-only.
-
-Backups with history use format version 4. Versions 2 and 3 remain supported. Import validates
-history and archive checksums before adding or replacing a project. Included history categories replace
-existing records for the imported project identity. A category you leave unchecked stays outside
-the exported file.
+Use **Project menu → Project Backup** to move the project or protect local drafts.
+See the [recovery guide](docs/project-recovery.md) for the backup options, how to
+restore official template attachments and archived submissions, and what to do
+after a local write fails.
 
 ## Edit and compile an existing LaTeX project
 
@@ -157,11 +222,9 @@ including applicable local drafts. It lists added, removed, modified, and unchan
 opens a side-by-side diff for text. A file excluded from the original ZIP has no archived copy.
 Revision rounds and their submission archives are stored in the current browser.
 
-In **Responses and letter**, write a response for each comment. Link the changed files or
-explain why you kept the text. After archiving the revised submission, select it in the round.
-**Compare files** can then show the two archived ZIPs directly. Preview or download the
-response letter as Markdown. The letter marks unanswered comments and evidence that cannot
-be verified against the selected revised ZIP.
+Use the [revision package guide](docs/revision-package.md) to import a review
+letter, verify replies against archived edits, and export a package. The guide
+also covers the AGU same-round clean manuscript, marked manuscript and reply PDF.
 
 ## Whole-paper Canvas and LaTeX blocks
 
@@ -194,6 +257,8 @@ Set `DEEPSEEK_API_KEY` on the local Next.js server to use the official DeepSeek 
 `DEEPSEEK_MODEL` defaults to `deepseek-flash`. To use OpenAI instead, set `OPENAI_API_KEY`
 and `OPENAI_MODEL`. `OPENAI_BASE_URL` optionally points to a compatible Responses server.
 Keep the key on the server and run the workbench on loopback.
+In **Workbench setup**, choose **Test model connection** to check streaming and tool
+calls with a synthetic request. The check shares no project content.
 
 Open **Writing AI** from the project bar. Use **Dock panel** to place it beside the editor and
 PDF, then drag the separator to set its width. Use **Float panel** to overlay the right side.
@@ -208,6 +273,20 @@ evidence** to jump to the file and line. The preview compiler runs after approva
 its report in the conversation. Follow-up messages carry the latest report when available.
 Conversations are stored per project in this browser. The model receives recent conversation
 text, bounded project sources, and the evidence returned by its tools.
+
+In a long LaTeX file, select lines in the source editor or name a heading, label or
+quoted passage in the chat. Choose a match if several passages qualify. **Review context**
+shows which line ranges are shared. Review or verify the resulting edits against the
+complete project. If a model request stops, **Retry request** resumes the same action
+in the current conversation. After a reload, use the existing task card to continue.
+
+Writing AI also recognizes a small set of English and Chinese research terms such as
+sampling bias and missing data. To read later CSV records, include the path and rows
+in your prompt, for example `Read rows 1902 through 1903 of data/sessions.csv`. Review
+the physical lines before sending. For an attachment, use **Share a PDF page or image**.
+Choose one page with selectable text, or one PNG or JPEG up to 650 KB, then review the
+context. Scanned PDFs require an image or selectable text. Treat image descriptions and
+causal or ambiguous numeric claims as material for author review.
 
 In **Auto**, the assistant can propose changes across up to six available editable LaTeX
 files per turn. **Scope** can narrow the candidate files. Inspect **View diff**, select the
@@ -227,6 +306,8 @@ fresh passing build. A failed or outdated build leaves the project untouched. Un
 local drafts can take part in verification and stay local afterward. After verifying a
 pending proposal, **Save verified changes** reuses the result while the sources, compile
 entry and selection still match. The submission workflow compiles its final ZIP separately.
+After **Apply to drafts**, use **Verify working drafts** before saving from the proposal card.
+Changing the working sources after verification requires another build.
 
 Writing AI can ask for draft-edit permission with a list of files and a reason. **Approve and
 continue** grants access to those files and resumes the request. **Deny request** leaves the
@@ -317,6 +398,9 @@ that support the response before choosing **Draft response with AI**. This workf
 excerpts from the archived ZIPs. **Use AI draft** copies the streamed proposal into the response
 editor for review before saving.
 ## References
+
+See [Maintain references across files](docs/reference-maintenance.md) for bibliography
+merges and safe renames of citation keys and labels.
 
 Open **References** in the LaTeX editor to search project `.bib` entries by key, title,
 author, or year. **Insert** adds `\cite{key}` at the source editor's caret or replaces its

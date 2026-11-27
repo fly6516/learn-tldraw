@@ -17,6 +17,6 @@ Your projects stay in your browser at this address. Before changing browsers,
 ports or devices, use Project menu → Project Backup → Complete recovery backup.
 
 If port 3000 is occupied, check whether the workbench is already running or
-close the other application using that port. If you choose another port, your
+close the other application using that port. To launch on another port, set RESEARCH_TRIAL_PORT before launching. Your
 projects remain at the original address. Return to that address or import a
 recovery backup to access them.

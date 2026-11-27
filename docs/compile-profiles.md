@@ -11,6 +11,7 @@ projects, an installation with TeX Live on PATH can also run **pdfLaTeX** or
 **XeLaTeX**. Enable this in the loopback server environment and restart it.
 
 ```dotenv
+LATEX_COMPILE_ENABLED=1
 LATEX_SYSTEM_TEX_ENABLED=1
 # Optional on Windows. Set this to your installed WSL distribution name.
 LATEX_SYSTEM_TEX_WSL=Ubuntu-24.04
