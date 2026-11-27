@@ -10,7 +10,7 @@ export type RevisionComment = { id: string; reviewer: string; text: string; edit
   | { kind: 'comment'; target: RevisionCommentTarget }
   | { kind: 'canvas'; nodeId: string })
 
-export type RevisionRound = { id: string; name: string; submissionId: string; revisedSubmissionId?: string; createdAt: string; comments: RevisionComment[] }
+export type RevisionRound = { id: string; name: string; submissionId: string; revisedSubmissionId?: string; archiveReviewId?: string; createdAt: string; comments: RevisionComment[] }
 export type RevisionFile = { path: string; status: 'Added' | 'Removed' | 'Modified' | 'Unchanged'; baseline?: string | Blob; current?: string | Blob }
 
 export type RevisionDestination = { kind: 'comment'; target: RevisionCommentTarget } | { kind: 'canvas'; nodeId: string }
@@ -116,6 +116,7 @@ export function buildRevisionLetter(round: RevisionRound, baseline: string, revi
   const byPath = new Map(files.map(file => [file.path, file.status]))
   const byChange = new Map(changes.map(change => [revisionChangeKey(change), change]))
   const unresolved: number[] = []
+  const entries: { heading: string; comment: string; disposition: string; reply: string; evidence: string[] }[] = []
   const lines = [`# ${markdownText(round.name.replace(/\s+/g, ' '))}`, '',
     `Original submission: ${markdownText(baseline.replace(/\s+/g, ' '))}`,
     `Revised submission: ${markdownText(revised.replace(/\s+/g, ' '))}`, '']
@@ -129,7 +130,11 @@ export function buildRevisionLetter(round: RevisionRound, baseline: string, revi
       lines.push('**Awaiting response.**', '')
       continue
     }
-    lines.push(response.kind === 'retained' ? '**Response · text retained**' : '**Response · manuscript revised**', '', markdownText(response.text), '')
+    const disposition = response.kind === 'retained' ? 'Response · text retained' : 'Response · manuscript revised'
+    const entry = { heading: `Comment ${number} · ${comment.reviewer || 'Reviewer'}`, comment: comment.text,
+      disposition, reply: response.text, evidence: [] as string[] }
+    entries.push(entry)
+    lines.push(`**${disposition}**`, '', markdownText(response.text), '')
     if (response.reviewRequired) {
       unresolved.push(number)
       lines.push('**Response needs review after the reviewer comment was edited.**', '')
@@ -144,8 +149,9 @@ export function buildRevisionLetter(round: RevisionRound, baseline: string, revi
       lines.push('**Evidence needs review against the selected original and revised ZIPs.**', '')
       continue
     }
+    entry.evidence = verified.map(change => `${byPath.get(change.path)} · ${change.path} (${revisionChangeLocation(change)})`)
     lines.push('Changes verified against the revised source ZIP:', '', ...verified.map(change =>
       `- ${byPath.get(change.path)} · ${markdownText(change.path)} (${revisionChangeLocation(change)})`), '')
   }
-  return { markdown: lines.join('\n'), unresolved }
+  return { markdown: lines.join('\n'), unresolved, entries }
 }

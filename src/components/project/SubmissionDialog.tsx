@@ -7,7 +7,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import { Download } from 'lucide-react'
 import type { SubmissionIssue, SubmissionVersion, SubmissionVersionInfo } from '@/lib/project/submission'
 import type { WritingKey } from '@/lib/project/writing-drafts'
-import { attachArchivedWordFinal, listSubmissionDocx, listSubmissionVersions, readSubmissionDocx, readSubmissionFiles, saveSubmissionDocx, saveSubmissionVersion } from '@/lib/project/storage'
+import { attachArchivedWordFinal, listAguDeliveries, listRevisionRounds, listSubmissionDocx, listSubmissionVersions, readAguDelivery, readRevisionPackage, readSubmissionDocx, readSubmissionFiles, saveAguDelivery, saveSubmissionDocx, saveSubmissionVersion } from '@/lib/project/storage'
 import { ExternalCompilePanel } from './ExternalCompilePanel'
 import type { CompileCompatibility, ExternalEngine } from '@/lib/project/compile-compatibility'
 import { compilerLabels } from '@/lib/project/compile-profile'
@@ -20,6 +20,8 @@ import type { LayoutFinding } from '@/lib/project/layout-preflight'
 import { blindDeliveryBlocked, njuptBlindCover, submissionStageInfo, type SubmissionStage } from '@/lib/project/submission-stages'
 import { readSubmissionMaterials, submissionMaterialsSchema, type AttachedSubmissionMaterial, type SubmissionMaterialSlot } from '@/lib/project/submission-materials'
 import { packageSubmissionDelivery, verifyArchivedLayout, type SubmissionLayout } from '@/lib/project/submission-layout'
+import { compileAguReply, reviewedAguRevision, validAguMarkedFile, verifyAguDelivery, type AguDeliveryInfo, type AguRevisionBinding } from '@/lib/project/agu-revision-delivery'
+import type { RevisionRound } from '@/lib/project/revision-rounds'
 import { verifyDocxDelivery, type SubmissionDocxDelivery, type SubmissionDocxDeliveryInfo } from '@/lib/project/submission-docx-delivery'
 
 export function download(blob: Blob, name: string) {
@@ -38,9 +40,9 @@ export function submissionFilename(name: string) {
 type VersionDraft = Omit<SubmissionVersion, 'id' | 'createdAt' | 'name'>
 
 export function SubmissionDialog({ main, compileEntry = main, drafts, includeDrafts, onDraftChoice, conflicting, paths, excluded, onToggle,
-  issues, ready, busy, error, log, result, compilerIssues, onClose, onCompile, onLocate, database, storageKey,
+  issues, ready, busy, error, log, result: liveResult, compilerIssues, onClose, onCompile, onLocate, database, storageKey,
   compatibility, external, staleExternal, onPrepareExternal, onAttachExternal, onStartRevision, target, working, onEvidenceLocate, onEditInformation,
-  layoutAvailable, layoutFindings, generatedLayout, stageOptions, templateOriginId, stage, onStage, onBlindCover, staleStage }: {
+  layoutAvailable, layoutFindings: liveFindings, generatedLayout, stageOptions, templateOriginId, stage, onStage, onBlindCover, staleStage }: {
   stageOptions: SubmissionStage[]
   templateOriginId?: string
   stage?: SubmissionStage
@@ -82,6 +84,14 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
   layoutAvailable?: boolean
   layoutFindings?: LayoutFinding[]
 }) {
+  const [agu, setAgu] = useState<{ round: RevisionRound; result: VersionDraft; binding: AguRevisionBinding }>()
+  const [aguRounds, setAguRounds] = useState<RevisionRound[]>([])
+  const [aguRoundId, setAguRoundId] = useState('')
+  const [aguHistory, setAguHistory] = useState<AguDeliveryInfo[]>([])
+  const [savedAgu, setSavedAgu] = useState<string>()
+  const bound = stage === 'agu-revision' ? agu : undefined
+  const result = bound?.result ?? liveResult
+  const layoutFindings = bound?.result.layoutReport?.findings ?? liveFindings
   const [versions, setVersions] = useState<SubmissionVersionInfo[]>([])
   const [docxVersions, setDocxVersions] = useState<SubmissionDocxDeliveryInfo[]>([])
   const [docxReview, setDocxReview] = useState<SubmissionDocxDelivery>()
@@ -109,8 +119,8 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
   const unresolvedMaterials = requiredMaterials.filter(slot => !attached.some(item => item.metadata.slot === slot.id))
   const pendingChecks = currentLayoutReport?.findings.some((finding, index) => finding.status === 'issue' ||
     finding.status === 'manual' && !checked[index])
-  const officialReady = Boolean(currentLayoutReport?.delivery && !unresolvedMaterials.length && !pendingChecks && !issues.some(item => item.severity === 'error') && !blockDelivery && !hashing)
-  const reviewedReport = currentLayoutReport && { ...currentLayoutReport, materials: materialMetadata, confirmed, manualReview: confirmed.flatMap(index => {
+  const officialReady = Boolean(currentLayoutReport?.delivery && !unresolvedMaterials.length && !pendingChecks && !(bound ? bound.result.issues : issues).some(item => item.severity === 'error') && !blockDelivery && !hashing)
+  const reviewedReport = currentLayoutReport && { ...currentLayoutReport, ...(bound && { aguRevision: bound.binding }), materials: materialMetadata, confirmed, manualReview: confirmed.flatMap(index => {
     const ruleId = currentLayoutReport.findings[index]?.ruleId
     return ruleId ? [{ ruleId, confirmedAt: checked[index] }] : []
   }) }
@@ -120,15 +130,100 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
     setLayoutPdf(url)
     return () => URL.revokeObjectURL(url)
   }, [layoutAvailable, compiledPdf])
-  const evidence = useSubmissionEvidence(database, storageKey, target, result)
+  const evidence = useSubmissionEvidence(database, storageKey, target, liveResult)
   useEffect(() => {
     if (!database || !storageKey) return
     let active = true
-    void Promise.all([listSubmissionVersions(database, storageKey), listSubmissionDocx(database, storageKey)])
-      .then(([versions, docx]) => { if (active) { setVersions(versions); setDocxVersions(docx) } })
+    void Promise.all([listSubmissionVersions(database, storageKey), listSubmissionDocx(database, storageKey),
+      listAguDeliveries(database, storageKey), listRevisionRounds(database, storageKey)])
+      .then(([versions, docx, history, rounds]) => { if (active) { setVersions(versions); setDocxVersions(docx); setAguHistory(history); setAguRounds(rounds) } })
       .catch(() => { if (active) setArchiveError('Could not load archived submissions.') })
     return () => { active = false }
   }, [database, storageKey])
+
+  useEffect(() => {
+    if (!database || !storageKey || stage !== 'agu-revision') return
+    let current = true
+    function checkRound() {
+      if (!database || !storageKey) return
+      void listRevisionRounds(database, storageKey).then(rounds => {
+        if (!current) return
+        setAguRounds(rounds)
+        if (bound && JSON.stringify(rounds.find(round => round.id === bound.round.id)) !== JSON.stringify(bound.round)) {
+          setAgu(undefined)
+          setArchiveError('返修轮次已变更。请重新核对回复和对照稿。')
+        }
+      }).catch(() => { if (current) setArchiveError('无法刷新返修轮次。') })
+    }
+    window.addEventListener('focus', checkRound)
+    return () => { current = false; window.removeEventListener('focus', checkRound) }
+  }, [database, storageKey, stage, bound])
+
+  async function loadAguRevision() {
+    if (!database || !storageKey || hashing || saving || busy || !aguRoundId) return
+    setHashing(true)
+    setArchiveError('')
+    setAgu(undefined)
+    setSavedAgu(undefined)
+    try {
+      const rounds = await listRevisionRounds(database, storageKey)
+      setAguRounds(rounds)
+      const round = rounds.find(item => item.id === aguRoundId)
+      if (!round?.revisedSubmissionId) throw new Error('请先在修订轮次中选择已归档的返修稿。')
+      const input = await readRevisionPackage(database, storageKey, round)
+      const verified = await reviewedAguRevision(input)
+      const pdf = await compileAguReply(verified, AbortSignal.timeout(120_000))
+      const slot = config && config.materials?.find(item => item.id === 'response')
+      if (!slot) throw new Error('无法读取 AGU 回复信附件配置。')
+      const files = await readSubmissionMaterials(slot, [pdf])
+      const latest = await listRevisionRounds(database, storageKey)
+      if (JSON.stringify(latest.find(item => item.id === round.id)) !== JSON.stringify(round)) {
+        setAguRounds(latest)
+        throw new Error('生成回复信期间返修轮次已变更，请重新核对。')
+      }
+      const report = { ...verified.clean }
+      setAgu({ round, result: { ...input.revised, layoutReport: report },
+        binding: { ...verified.binding, responsePdfSha256: files[0].metadata.sha256 } })
+      setMaterials({ report, files })
+      setManualReview(undefined)
+    } catch (cause) { setArchiveError(cause instanceof Error ? cause.message : '无法准备本轮修回材料。') }
+    finally { setHashing(false) }
+  }
+
+  async function exportAguRevision() {
+    if (!bound || !database || !storageKey || !reviewedReport || !officialReady || saving) return
+    setSaving(true)
+    setArchiveError('')
+    try {
+      const { archive, ...info } = await saveAguDelivery(database, storageKey, bound.round, reviewedReport,
+        { ...bound.result, materials: attached.map(item => item.blob) })
+      setAguHistory(history => [info, ...history])
+      setSavedAgu(info.sha256)
+      download(archive, submissionFilename(info.binding.roundName) + '-agu-revision.zip')
+    } catch (cause) {
+      setArchiveError(cause instanceof Error ? cause.message : '无法归档正式返修交付。')
+      try {
+        const rounds = await listRevisionRounds(database, storageKey)
+        setAguRounds(rounds)
+        if (JSON.stringify(rounds.find(item => item.id === bound.round.id)) !== JSON.stringify(bound.round)) setAgu(undefined)
+      } catch { /* The original failure remains visible. */ }
+    } finally { setSaving(false) }
+  }
+
+  async function downloadAguRevision(info: AguDeliveryInfo) {
+    if (!database || !storageKey || saving) return
+    setArchiveError('')
+    setSaving(true)
+    try {
+      const record = await readAguDelivery(database, storageKey, info.id)
+      if (!record || record.sha256 !== info.sha256 || !await verifyAguDelivery(record)) {
+        throw new Error('归档交付包 SHA-256 校验失败。')
+      }
+      setSavedAgu(record.sha256)
+      download(record.archive, submissionFilename(info.binding.roundName) + '-agu-revision.zip')
+    } catch (cause) { setArchiveError(cause instanceof Error ? cause.message : '无法读取归档交付。') }
+    finally { setSaving(false) }
+  }
 
   async function archiveDocx(delivery: SubmissionDocxDelivery) {
     if (!database || !storageKey) throw new Error('当前项目存储不可用。')
@@ -168,7 +263,14 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
     setHashing(true)
     setArchiveError('')
     try {
+      if (bound && slot.id === 'marked' && files.length && !await validAguMarkedFile(files[0].name, files[0])) {
+        throw new Error('请上传可识别的 PDF 或 Word 对照稿。')
+      }
       const next = [...attached.filter(item => item.metadata.slot !== slot.id), ...await readSubmissionMaterials(slot, files)]
+      if (bound && slot.id === 'marked' && next.some(item =>
+        item.metadata.slot === 'marked' && item.metadata.sha256 === report.pdfChecksum)) {
+        throw new Error('对照稿与清洁 PDF 相同。请上传标出本轮修改的对照稿。')
+      }
       if (!submissionMaterialsSchema.safeParse(next.map(item => item.metadata)).success) throw new Error('全部附件上限为 64 MB 或 24 份。')
       setMaterials({ report, files: next })
       const index = report.findings.findIndex(item => item.ruleId === slot.rule)
@@ -187,7 +289,7 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
 
   async function archive() {
     const name = versionName.trim()
-    if (!name || !result || !database || !storageKey || saving || hashing || blockDelivery || !evidence.canArchive || layoutAvailable && !currentLayoutReport) return
+    if (bound || !name || !result || !database || !storageKey || saving || hashing || blockDelivery || !evidence.canArchive || layoutAvailable && !currentLayoutReport) return
     setSaving(true)
     setArchiveError('')
     try {
@@ -243,14 +345,15 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
   }
 
   const name = compileEntry.split('/').at(-1)?.replace(/\.tex$/i, '') || 'project'
-  const allIssues = [...issues, ...compilerIssues]
-  return <Dialog open onOpenChange={open => { if (!open && !saving) onClose() }}>
+  const allIssues = bound ? [...bound.result.issues, ...bound.result.diagnostics] : [...issues, ...compilerIssues]
+  return <Dialog open onOpenChange={open => { if (!open && !saving && !hashing) onClose() }}>
     <DialogContent showCloseButton={!saving} className="max-h-[90dvh] overflow-auto sm:max-w-xl">
       <DialogTitle>Prepare submission</DialogTitle>
       <DialogDescription>Build the final source ZIP here or in your own TeX installation. Archived versions keep both files in this browser.</DialogDescription>
       {!!stageOptions.length && <fieldset disabled={busy || saving || hashing} className="space-y-2 rounded-md border p-3 text-sm">
         <label className="flex items-center gap-2 font-medium">提交阶段
           <select className="rounded-md border bg-background px-2 py-1" value={stage ?? ''} onChange={event => {
+            setAgu(undefined); setAguRoundId('')
             onStage(stageOptions.find(option => option === event.target.value))
           }}>
             <option value="">通用检查</option>
@@ -267,7 +370,7 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
       {stage !== 'njupt-blind' && (templateOriginId !== 'njupt-professional-masters' || stage === 'njupt-deposit') && <SubmissionDocxPanel
         key={templateOriginId ?? 'generic-docx'} project={target} main={main} template={templateOriginId} stage={stage} database={database ?? undefined} storageKey={storageKey} disabled={busy || saving || conflicting} download={download}
         onLocate={onEvidenceLocate} onEditInformation={onEditInformation} onArchive={database && storageKey ? archiveDocx : undefined} />}
-      {staleStage && <p role="status" className="rounded border border-amber-200 bg-amber-50 p-2 text-sm text-amber-900">稿件已修改。请重新编译和检查后下载交付包。历史记录仍可复查。</p>}
+      {staleStage && !bound && <p role="status" className="rounded border border-amber-200 bg-amber-50 p-2 text-sm text-amber-900">稿件已修改。请重新编译和检查后下载交付包。历史记录仍可复查。</p>}
       <p className="text-sm">Compile entry <code className="break-all">{compileEntry}</code></p>
       {drafts.length > 0 && <fieldset disabled={busy || saving} className="space-y-1 text-sm">
         <legend className="font-medium">Source to submit</legend>
@@ -293,7 +396,7 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
         {!allIssues.length && <p className="text-slate-600">No issues found by the static checks.</p>}
         <ul className="max-h-52 space-y-1 overflow-auto">
           {allIssues.map((issue, index) => <li key={index} className={issue.severity === 'error' ? 'text-red-800' : 'text-amber-800'}>
-            {issue.location ? <button type="button" disabled={busy || saving} onClick={() => onLocate(issue)} className="block w-full break-words text-left underline">
+            {issue.location ? <button type="button" disabled={busy || saving || Boolean(bound)} onClick={() => onLocate(issue)} className="block w-full break-words text-left underline">
               {issue.message} · {issue.location.path}:{issue.location.line}
             </button> : <p className="break-words">{issue.message}</p>}
           </li>)}
@@ -301,7 +404,7 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
       </section>
       {layoutAvailable && <details className="space-y-2 rounded-md border p-3" open={Boolean(layoutFindings?.some(item => item.status === 'issue')) || undefined}>
         <summary className="cursor-pointer text-sm font-medium">提交前版式检查</summary>
-        <LayoutPreflight findings={layoutFindings} pdfHref={compiledPdf ? layoutPdf : undefined} onSource={generatedLayout ? undefined : onEvidenceLocate}
+        <LayoutPreflight findings={layoutFindings} pdfHref={compiledPdf ? layoutPdf : undefined} onSource={generatedLayout || bound ? undefined : onEvidenceLocate}
           confirmed={confirmed} onConfirm={currentLayoutReport && !saving && !hashing ? (index, enabled) => {
             const next = { ...checked }
             const slot = requiredMaterials.find(slot => slot.rule === currentLayoutReport.findings[index]?.ruleId)
@@ -315,8 +418,8 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
             setManualReview({ report: currentLayoutReport, checked: next })
           } : undefined} />
       </details>}
-      <SubmissionEvidencePanel review={evidence} working={working} disabled={busy || saving}
-        onLocate={finding => onEvidenceLocate(finding.path, claimSourceLine(finding, working))} />
+      {!bound && <SubmissionEvidencePanel review={evidence} working={working} disabled={busy || saving}
+        onLocate={finding => onEvidenceLocate(finding.path, claimSourceLine(finding, working))} />}
       <p role="status" className="text-sm" aria-label="Compilation">
         {busy ? 'Compiling the confirmed source ZIP…' : result?.externalEngine ? `External PDF attached · ${result.externalEngine} · Source match confirmed by you`
           : result ? (result.warnings ? 'Compiled with warnings' : 'Compiled successfully') : error ? 'Compilation failed' : 'Ready to compile'}
@@ -325,9 +428,31 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
         <summary>Compiler output</summary><p className="max-h-40 overflow-auto whitespace-pre-wrap break-words">{error || log}</p>
       </details>}
       {blockDelivery && <p role="alert" className="text-sm text-red-800">盲审隐私检查未通过。修正后重新编译，才可下载或归档。</p>}
+      {stage === 'agu-revision' && !!storageKey && database && <section aria-label="AGU 返修轮次" className="space-y-2 rounded-md border p-3 text-sm">
+        <label className="block">关联返修轮次
+          <select className="ml-2 max-w-full rounded border bg-background px-2 py-1" value={aguRoundId}
+            disabled={busy || saving || hashing} onChange={event => {
+              setAguRoundId(event.target.value)
+              setAgu(undefined)
+              setSavedAgu(undefined)
+              setArchiveError('')
+            }}>
+            <option value="">选择修订轮次</option>
+            {aguRounds.map(round => <option key={round.id} value={round.id}>{round.name}</option>)}
+          </select>
+        </label>
+        <Button size="sm" type="button" variant="outline" disabled={!aguRoundId || busy || saving || hashing}
+          onClick={() => void loadAguRevision()}>载入本轮清洁稿并生成回复 PDF</Button>
+        {bound ? <>
+          <p>原稿归档 · {bound.binding.original.name}</p>
+          <p>清洁稿归档 · {bound.binding.revised.name}</p>
+          <p className="break-all text-xs">清洁源包 SHA-256 <code>{bound.binding.revised.sourceChecksum}</code></p>
+          <p>已加入本轮核验通过的回复 PDF。请对照上述两份归档检查修订痕迹，再确认附件。</p>
+        </> : <p>选择一轮已核验回复并关联 AGU 修回清洁稿的修订记录。换轮次或换稿后需要重新确认材料。</p>}
+      </section>}
       {stage && config && !blockDelivery && <section aria-label="正式提交材料" className="space-y-2 rounded-md border p-3 text-sm">
         <h2 className="font-medium">正式提交材料</h2>
-        <p role="status">{officialReady ? '工作台检查已完成，请按提交系统要求上传。' : '材料待核对。可预览已生成的稿件并归档当前检查记录。'}</p>
+        <p role="status">{officialReady ? stage === 'agu-revision' && !bound ? '本机检查已完成。关联返修轮次后可归档正式交付。' : '工作台检查已完成，请按提交系统要求上传。' : '材料待核对。可预览已生成的稿件并归档当前检查记录。'}</p>
         {result && currentLayoutReport && config.output !== 'attached' && (config.output === 'source'
           ? <Button size="sm" variant="outline" onClick={() => download(result.zip, name + '-source.zip')}>下载清洁版 LaTeX 源包</Button>
           : <Button size="sm" variant="outline" onClick={() => download(result.pdf, name + '.pdf')}>
@@ -341,7 +466,7 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
           return <div key={slot.id} className="space-y-1 border-t pt-2">
             <label className="block">{slot.label}
               <Input type="file" accept={slot.extensions.map(ext => '.' + ext).join(',')} multiple={slot.multiple}
-                disabled={!currentLayoutReport || busy || saving || hashing} onChange={event => {
+                disabled={!currentLayoutReport || busy || saving || hashing || Boolean(bound && slot.id === 'response')} onChange={event => {
                   const files = Array.from(event.target.files ?? [])
                   if (files.length) void updateMaterials(slot, files)
                   event.target.value = ''
@@ -352,16 +477,18 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
               <button type="button" className="underline" onClick={() => download(file.blob, file.metadata.name)}>{file.metadata.name}</button>
               <p className="text-xs">SHA-256 <code>{file.metadata.sha256}</code></p>
             </div>)}
-            {files.length > 0 && <Button type="button" variant="ghost" size="sm" disabled={saving || hashing} onClick={() => void updateMaterials(slot, [])}>移除附件</Button>}
+            {files.length > 0 && !(bound && slot.id === 'response') && <Button type="button" variant="ghost" size="sm" disabled={saving || hashing} onClick={() => void updateMaterials(slot, [])}>移除附件</Button>}
           </div>
         })}
+        {bound && <Button size="sm" disabled={!officialReady || saving || busy}
+          onClick={() => void exportAguRevision()}>归档并下载 AGU 正式返修包</Button>}
       </section>}
       <div className="flex flex-wrap gap-2">
         {result && !blockDelivery ? <>
           {stage ? <section aria-label="本地核验材料" className="space-y-2 rounded-md border p-3 text-sm">
             <h2 className="font-medium">本地核验材料</h2>
             <div className="flex flex-wrap gap-2">
-              <Button size="sm" disabled={!currentLayoutReport?.delivery || hashing} onClick={() => void downloadDelivery()}><Download /> 下载交付包</Button>
+              <Button size="sm" disabled={!currentLayoutReport?.delivery || hashing} onClick={() => void downloadDelivery()}><Download /> {bound ? '下载核验草稿' : '下载交付包'}</Button>
               {config && (config.output === 'source' || config.output === 'attached')
                 ? <Button size="sm" variant="outline" onClick={() => download(result.pdf, name + '.pdf')}>下载校样 PDF</Button>
                 : <Button size="sm" variant="outline" onClick={() => download(result.zip, name + '-source.zip')}>下载复编源包</Button>}
@@ -376,7 +503,7 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
         downloadUrl={external?.downloadUrl}
         busy={busy} ready={ready && !conflicting} onPrepare={onPrepareExternal}
         onAttach={(pdf, engine) => { if (external) onAttachExternal(pdf, engine, external.checksum) }} />}
-      {!blockDelivery && result && database && storageKey && <form className="flex flex-wrap items-end gap-2" onSubmit={event => { event.preventDefault(); void archive() }}>
+      {!bound && !blockDelivery && result && database && storageKey && <form className="flex flex-wrap items-end gap-2" onSubmit={event => { event.preventDefault(); void archive() }}>
         <label className="flex-1 space-y-1 text-sm font-medium"><span>Version name</span>
           <Input value={versionName} onChange={event => setVersionName(event.target.value)} maxLength={100} disabled={saving} />
         </label>
@@ -384,6 +511,16 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
           Save submission version
         </Button>
       </form>}
+      {aguHistory.length > 0 && <section aria-label="AGU 正式交付归档" className="space-y-2 border-t pt-2 text-sm">
+        <h2 className="font-medium">AGU 正式交付归档</h2>
+        {aguHistory.map(info => <details key={info.id} className="rounded border p-2">
+          <summary className="cursor-pointer">{info.binding.roundName} · {info.binding.revised.name} · {new Date(info.createdAt).toLocaleString()}</summary>
+          <p>原稿归档 · {info.binding.original.name}</p>
+          <p className="break-all text-xs">交付 ZIP SHA-256 <code>{info.sha256}</code></p>
+          <Button size="sm" variant="outline" disabled={saving} onClick={() => void downloadAguRevision(info)}>校验并下载原始交付包</Button>
+          {savedAgu === info.sha256 && <p role="status">归档 ZIP SHA-256 校验通过</p>}
+        </details>)}
+      </section>}
       {(!!versions.length || !!docxVersions.length) && <section aria-label="Archived submissions" className="space-y-2 border-t pt-2 text-sm">
         <h2 className="font-medium">Archived submissions</h2>
         {docxVersions.map(version => <details key={version.id} className="rounded border p-2">

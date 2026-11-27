@@ -12,12 +12,14 @@ import type { LocalPaperTemplate } from './template-catalog'
 import { projectBoundReleaseOrigins, sameTemplateOrigin, validateReleaseAttachments, wordAcceptanceSchema, type OfficialTemplateRelease, type TemplateOrigin } from './template-release'
 import type { ProjectSnapshot, ProjectSnapshotInfo } from './snapshots'
 import { restoreSnapshotFiles } from './snapshots'
-import type { SubmissionVersion, SubmissionVersionInfo } from './submission'
+import type { SubmissionFiles, SubmissionVersion, SubmissionVersionInfo } from './submission'
 import { verifyDocxDelivery, verifyWordFinal, type SubmissionDocxDelivery, type SubmissionDocxDeliveryInfo } from './submission-docx-delivery'
 import { submissionEvidenceLedger } from './submission-evidence'
 import { editRevisionComment, type RevisionComment, type RevisionResponse, type RevisionRound, type RevisionCommentEdit } from './revision-rounds'
 import { revisionEvidenceSchema } from './revision-evidence'
 import type { RevisionPackageInput } from './revision-package'
+import { aguDeliveryInfoSchema, buildAguDelivery, type AguDelivery, type AguDeliveryInfo } from './agu-revision-delivery'
+import type { SubmissionLayout } from './submission-layout'
 import { applyWritingDrafts, draftConflicts, editableSource, sameDraft, type PortableWritingState, type WritingDraft, type WritingDrafts, type WritingKey, type WritingView } from './writing-drafts'
 
 const storeName = 'projects'
@@ -311,6 +313,41 @@ export async function readRevisionPackage(database: IDBDatabase, key: WritingKey
         revised: { ...after.result, zip: afterFiles.result.zip, pdf: afterFiles.result.pdf } }
 }
 
+export async function listAguDeliveries(database: IDBDatabase, key: WritingKey): Promise<AguDeliveryInfo[]> {
+    const transaction = database.transaction(storeName)
+    const request = transaction.objectStore(storeName).getAll(historyRange('agu-delivery', key))
+    await complete(transaction)
+    return (request.result as AguDelivery[]).map(delivery => aguDeliveryInfoSchema.parse(delivery))
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+}
+
+export async function readAguDelivery(database: IDBDatabase, key: WritingKey, id: string): Promise<AguDelivery | undefined> {
+    const transaction = database.transaction(storeName)
+    const request = transaction.objectStore(storeName).get(['agu-delivery', ...key, id])
+    await complete(transaction)
+    return request.result
+}
+
+export async function saveAguDelivery(database: IDBDatabase, key: WritingKey, round: RevisionRound,
+    report: SubmissionLayout, files: SubmissionFiles): Promise<AguDelivery> {
+    const input = await readRevisionPackage(database, key, round)
+    const { archive, ...proof } = await buildAguDelivery(input, report, files)
+    const info = aguDeliveryInfoSchema.parse({ ...proof, id: crypto.randomUUID(), createdAt: new Date().toISOString() })
+    const delivery = { ...info, archive }
+    const transaction = database.transaction(storeName, 'readwrite', { durability: 'strict' })
+    const store = transaction.objectStore(storeName)
+    const latest = store.get(['revision-round', ...key, round.id])
+    let saved = false
+    latest.onsuccess = () => {
+        if (JSON.stringify(latest.result) !== JSON.stringify(round)) return
+        store.add(delivery, ['agu-delivery', ...key, info.id])
+        saved = true
+    }
+    await complete(transaction)
+    if (!saved) throw new Error('返修轮次已改变，请重新选择归档并核对材料。')
+    return delivery
+}
+
 export async function readSubmissionEvidence(database: IDBDatabase, key: WritingKey) {
     const transaction = database.transaction(storeName)
     const store = transaction.objectStore(storeName)
@@ -420,7 +457,7 @@ export async function linkRevisedSubmission(database: IDBDatabase, key: WritingK
 
 function setRoundRevisedVersion(round: RevisionRound, revisedSubmissionId?: string): RevisionRound {
     if (round.revisedSubmissionId === revisedSubmissionId) return round
-    return { ...round, revisedSubmissionId, comments: round.comments.map(comment => comment.response?.evidence
+    return { ...round, revisedSubmissionId, archiveReviewId: crypto.randomUUID(), comments: round.comments.map(comment => comment.response?.evidence
         ? { ...comment, response: { ...comment.response, evidence: undefined } } : comment) }
 }
 
@@ -659,6 +696,7 @@ function backupHistoryReader(store: IDBObjectStore, key: WritingKey, selection: 
         docx: store.getAll(historyRange('submission-docx-info', key)),
         docxFiles: readRecord<Pick<SubmissionDocxDelivery, 'sourceZip' | 'generatedDocx' | 'finalDocx'>>('submission-docx-files'),
         rounds: store.getAll(historyRange('revision-round', key)),
+        agu: store.getAll(historyRange('agu-delivery', key)),
     } : undefined
     const snapshots = selection.snapshots ? { list: store.get(snapshotList(key)), projects: readRecord<ProjectFileSystem>('snapshot') } : undefined
     const ai = selection.ai ? {
@@ -680,7 +718,9 @@ function backupHistoryReader(store: IDBObjectStore, key: WritingKey, selection: 
                 if (!docxFiles[info.id]) throw new Error(`Archived DOCX files are unavailable for ${info.name}.`)
                 return { ...info, ...docxFiles[info.id] }
             })
-            backup.publication = { submissions, rounds: publication.rounds.result as RevisionRound[], docx: docx.length ? docx : undefined }
+            const agu = publication.agu.result as AguDelivery[]
+            backup.publication = { submissions, rounds: publication.rounds.result as RevisionRound[],
+                docx: docx.length ? docx : undefined, agu: agu.length ? agu : undefined }
         }
         if (snapshots) {
             const projects = snapshots.projects()
@@ -712,11 +752,12 @@ export async function readBackupHistory(database: IDBDatabase, key: WritingKey, 
 function restoreBackupHistory(store: IDBObjectStore, key: WritingKey, history: PortableProjectHistory) {
     for (const release of history.templateReleases ?? []) store.put(release, projectReleaseKey(key, release))
     if (history.publication) {
-        for (const bucket of ['submission-files', 'submission-info', 'submission-docx-info', 'submission-docx-files', 'revision-round']) store.delete(historyRange(bucket, key))
+        for (const bucket of ['submission-files', 'submission-info', 'submission-docx-info', 'submission-docx-files', 'revision-round', 'agu-delivery']) store.delete(historyRange(bucket, key))
         for (const { pdf, zip, materials, ...info } of history.publication.submissions) {
             store.put({ pdf, zip, materials }, ['submission-files', ...key, info.id])
             store.put(info, ['submission-info', ...key, info.id])
         }
+        for (const delivery of history.publication.agu ?? []) store.put(delivery, ['agu-delivery', ...key, delivery.id])
         for (const round of history.publication.rounds) store.put(round, ['revision-round', ...key, round.id])
         for (const { sourceZip, generatedDocx, finalDocx, ...info } of history.publication.docx ?? []) {
             store.put({ sourceZip, generatedDocx, finalDocx }, ['submission-docx-files', ...key, info.id])
@@ -778,12 +819,13 @@ function recoveryStateReader(store: IDBObjectStore, workspace: string, project: 
     const submissions = store.getAll(historyRange('submission-info', key))
     const docx = store.getAll(historyRange('submission-docx-info', key))
     const rounds = store.getAll(historyRange('revision-round', key))
+    const agu = store.getAll(historyRange('agu-delivery', key))
     const snapshots = store.get(snapshotList(key))
     return () => ({
         version: project.storageRevision ?? project.metadata.updatedAt,
         drafts: Object.fromEntries(drafts.keys.result.map((entry, index) =>
             [(entry as [string, ...WritingKey, string])[3], drafts.values.result[index]])),
-        history: [submissions.result, rounds.result, snapshots.result, ...(docx.result.length ? [docx.result] : [])],
+        history: [submissions.result, rounds.result, snapshots.result, ...(docx.result.length ? [docx.result] : []), ...(agu.result.length ? [agu.result.map(delivery => aguDeliveryInfoSchema.parse(delivery))] : [])],
     })
 }
 

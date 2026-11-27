@@ -1,5 +1,6 @@
 import type JSZip from 'jszip'
 import { z } from 'zod'
+import { aguDeliveryInfoSchema, verifyAguDelivery, type AguDelivery } from './agu-revision-delivery'
 import { revisionEvidenceSchema } from './revision-evidence'
 import { compileProfileSchema } from './compile-profile'
 import { chapterAnswerSchema } from './ai-edit'
@@ -22,7 +23,7 @@ import { aiContextReceiptSchema } from './ai-read-scope'
 
 export type PortableProjectHistory = {
   templateReleases?: OfficialTemplateRelease[]
-  publication?: { submissions: SubmissionVersion[]; rounds: RevisionRound[]; docx?: SubmissionDocxDelivery[] }
+  publication?: { submissions: SubmissionVersion[]; rounds: RevisionRound[]; docx?: SubmissionDocxDelivery[]; agu?: AguDelivery[] }
   snapshots?: ProjectSnapshot[]
   ai?: { history?: ChatHistory; moves: SourceMove[]; tasks: Record<string, ChatTaskStep[]>
     checkpoints: Record<string, ChatCheckpoint>; verifications: Record<string, ChatVerification>; builds?: Record<string, ManuscriptBuild> }
@@ -65,7 +66,7 @@ const comment = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('comment'), target }),
   z.object({ kind: z.literal('canvas'), nodeId: id }),
 ]).and(z.object({ id, reviewer: text, text, editId: id.optional(), response: response.optional() }))
-const round = identity.extend({ submissionId: id, revisedSubmissionId: id.optional(), comments: z.array(comment) })
+const round = identity.extend({ submissionId: id, revisedSubmissionId: id.optional(), archiveReviewId: z.uuid().optional(), comments: z.array(comment) })
 const sources = z.record(path, z.object({ saved: text, draft: z.object({ base: text, text }).optional() }))
 const evidence = chapterAnswerSchema.shape.evidence.element.extend({
   anchor: z.object({ quote: text.max(500), before: text.max(48), after: text.max(48),
@@ -110,7 +111,7 @@ const ai = z.object({
 })
 export const backupHistorySchema = z.object({
   templateReleases: z.array(templateOriginSchema.extend({ manifestSha256: hash, archive: storedBlob })).min(1).max(2).optional(),
-  publication: z.object({ submissions: z.array(submission), rounds: z.array(round), docx: z.array(docxSubmission).refine(unique).optional() }).refine(({ submissions, rounds }) => {
+  publication: z.object({ submissions: z.array(submission), rounds: z.array(round), docx: z.array(docxSubmission).refine(unique).optional(), agu: z.array(aguDeliveryInfoSchema).refine(unique).optional() }).refine(({ submissions, rounds }) => {
     const ids = new Set(submissions.map(value => value.id))
     return unique(submissions) && unique(rounds) && rounds.every(value => ids.has(value.submissionId) && unique(value.comments)
       && (!value.revisedSubmissionId || value.revisedSubmissionId !== value.submissionId && ids.has(value.revisedSubmissionId)))
@@ -152,6 +153,13 @@ export async function encodeBackupHistory(archive: JSZip, history: PortableProje
     if (finalDocx) await write(folder + 'final.docx', finalDocx)
     docx.push(info)
   }
+  const agu = []
+  for (const [index, delivery] of (history.publication?.agu ?? []).entries()) {
+    if (!await verifyAguDelivery(delivery)) throw new Error('Archived AGU delivery checksum does not match.')
+    const { archive: zip, ...info } = delivery
+    await write(`history/agu/${index}.zip`, zip)
+    agu.push(info)
+  }
   const snapshots = []
   for (const [index, snapshot] of (history.snapshots ?? []).entries()) {
     const { project, ...info } = snapshot
@@ -170,7 +178,7 @@ export async function encodeBackupHistory(archive: JSZip, history: PortableProje
   }
   return backupHistorySchema.parse({
     templateReleases: templateReleases.length ? templateReleases : undefined,
-    publication: history.publication && { submissions, rounds: history.publication.rounds, docx: docx.length ? docx : undefined }, snapshots: history.snapshots && snapshots,
+    publication: history.publication && { submissions, rounds: history.publication.rounds, docx: docx.length ? docx : undefined, agu: agu.length ? agu : undefined }, snapshots: history.snapshots && snapshots,
     ai: history.ai && { ...aiHistory, builds: encodedBuilds.length ? encodedBuilds : undefined },
   })
 }
@@ -205,6 +213,10 @@ export async function decodeBackupHistory(archive: JSZip, manifest: z.infer<type
       generatedDocx: await read(folder + 'generated.docx', delivery.generated, submissionDocxMime),
       finalDocx: delivery.final && await read(folder + 'final.docx', delivery.final, submissionDocxMime) })
   }
+  const agu = []
+  for (const [index, delivery] of (manifest.publication?.agu ?? []).entries()) {
+    agu.push({ ...delivery, archive: await read(`history/agu/${index}.zip`, delivery, 'application/zip') })
+  }
   const snapshots = []
   for (const [index, snapshot] of (manifest.snapshots ?? []).entries()) {
     const { archive: entry, hasCanvas, ...info } = snapshot
@@ -234,7 +246,7 @@ export async function decodeBackupHistory(archive: JSZip, manifest: z.infer<type
     }
     templateReleases.push(release)
   }
-  return { ...(templateReleases.length && { templateReleases }), publication: manifest.publication && { submissions, rounds: manifest.publication.rounds, docx: docx.length ? docx : undefined },
+  return { ...(templateReleases.length && { templateReleases }), publication: manifest.publication && { submissions, rounds: manifest.publication.rounds, docx: docx.length ? docx : undefined, agu: agu.length ? agu : undefined },
     snapshots: manifest.snapshots && snapshots,
     ai: manifest.ai && { ...manifest.ai, builds: Object.keys(decodedBuilds).length ? decodedBuilds : undefined } }
 }

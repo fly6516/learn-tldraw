@@ -18,6 +18,15 @@ const finding = z.object({
   page: z.number().int().positive().optional(),
 })
 export const templateOriginSchema = z.object({ id: z.string(), version: z.string(), sha256: checksum, manifestSha256: checksum.optional() })
+export const aguRevisionAnchorSchema = z.object({
+  roundId: z.string().min(1), roundName: z.string().min(1), archiveReviewId: z.uuid().optional(),
+  original: z.object({ id: z.string().min(1), name: z.string().min(1), sourceChecksum: checksum }),
+  revised: z.object({ id: z.string().min(1), name: z.string().min(1), sourceChecksum: checksum, pdfChecksum: checksum }),
+  responseMarkdownSha256: checksum,
+})
+export const aguRevisionBindingSchema = aguRevisionAnchorSchema.extend({ responsePdfSha256: checksum })
+  .refine(binding => binding.original.id !== binding.revised.id)
+
 export const submissionLayoutSchema = z.object({
   version: z.literal(1), sourceChecksum: checksum, pdfChecksum: checksum,
   checkedAt: z.string().refine(value => Number.isFinite(Date.parse(value))),
@@ -25,12 +34,16 @@ export const submissionLayoutSchema = z.object({
   delivery: z.object({ stage: z.enum(submissionStages), buildId: z.uuid(), snapshotSha256: checksum,
     entry: z.string().refine(isProjectPath), engine: z.enum(['pdflatex', 'xelatex', 'lualatex', 'tectonic']), attachmentSha256: checksum.optional(), sourceMatch: z.literal('author-confirmed').optional(), figureAttachmentsRequired: z.boolean().optional() }).optional(),
   materials: submissionMaterialsSchema.optional(),
+  aguRevision: aguRevisionBindingSchema.optional(),
   findings: z.array(finding), confirmed: z.array(z.number().int().nonnegative()),
   manualReview: z.array(z.object({ ruleId: z.string().min(1), confirmedAt: z.iso.datetime() })).optional(),
 }).refine(report => (!report.delivery || Boolean(report.templateOrigin && (report.delivery.stage === 'catalog-delivery' ||
     submissionStageConfig[report.delivery.stage].template === report.templateOrigin.id)))
   && (!report.materials?.length || Boolean(report.delivery && report.materials.every(item =>
     submissionStageConfig[report.delivery!.stage].materials?.some(slot => slot.id === item.slot))))
+  && (!report.aguRevision || (report.delivery?.stage === 'agu-revision' &&
+    report.aguRevision.revised.sourceChecksum === report.sourceChecksum && report.aguRevision.revised.pdfChecksum === report.pdfChecksum &&
+    report.materials?.some(material => material.slot === 'response' && material.sha256 === report.aguRevision!.responsePdfSha256)))
   && new Set(report.confirmed).size === report.confirmed.length
   && report.confirmed.every(index => report.findings[index]?.status === 'manual')
   && (!report.manualReview || (new Set(report.manualReview.map(record => record.ruleId)).size === report.manualReview.length
@@ -71,6 +84,7 @@ export async function packageSubmissionDelivery(report: SubmissionLayout, files:
   }
   zip.file('manifest.json', JSON.stringify({
     ...checked.delivery, template: checked.templateOrigin,
+    ...(checked.aguRevision && { aguRevision: checked.aguRevision }),
     files: {
       'manuscript.pdf': checked.pdfChecksum, 'source.zip': checked.sourceChecksum,
       'report.json': await templateDigest(new TextEncoder().encode(json).buffer), ...materialHashes,

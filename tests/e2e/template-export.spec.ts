@@ -1763,3 +1763,252 @@ test('reuses project information in native PDF, ZJU DOCX, NJUPT blind review and
   await toggle.click()
   await page.screenshot({ path: join(output, 'project-information.png') })
 })
+
+test('archives a verified AGU revision delivery and keeps its exact bytes after changing drafts', async ({ page, browser }, info) => {
+  const fixtures = process.env.RESEARCH_TEMPLATE_PINNED_FIXTURES
+  test.skip(acceptance !== '1' || !fixtures, 'Requires the official AGU pin and local TeX Live.')
+  test.setTimeout(360_000)
+  const output = info.outputPath('agu-revision-delivery')
+  await mkdir(output, { recursive: true })
+  const base = results.replace(/See Section[^\n]+/, String.raw`See Section~\ref{sec:study} and Table~\ref{tab:counts}.`)
+    .replace(/\\begin\{figure\}[\s\S]*?\\end\{figure\}\n/, '')
+  await page.goto('/research')
+  await page.getByLabel('Choose project ZIP or backup').setInputFiles({
+    name: 'AGU revision delivery.research-canvas', mimeType: 'application/zip', buffer: await seedProject(study, base),
+  })
+  await page.getByRole('button', { name: 'Import as new project', exact: true }).click()
+  await page.waitForURL(url => url.searchParams.has('project'))
+  await page.getByRole('button', { name: 'Writing', exact: true }).click()
+  await page.getByRole('button', { name: '更换模板', exact: true }).click()
+  const template = page.getByRole('dialog', { name: '更换模板' })
+  await template.getByRole('combobox', { name: '目标模板' }).selectOption('agu-jgr-atmospheres')
+  const fields = {
+    作者单位: 'Calibration Methods Laboratory', 通讯邮箱: 'casey@example.test', 'Key Point': 'Three channels reproduced the calibration.',
+    '第二条要点（选填）': 'A common reference procedure was used throughout the study.',
+    '第三条要点（选填）': 'Session counts are reported with the independently recorded measurements.',
+    'Plain Language Summary': 'We compared independent measurements against a common reference.',
+    'Open Research Statement': 'Synthetic acceptance data are given in the manuscript.',
+  }
+  for (const [label, value] of Object.entries(fields)) await template.getByLabel(label, { exact: true }).fill(value)
+  await template.getByRole('button', { name: '编译预览', exact: true }).click()
+  const apply = template.getByRole('button', { name: '设为当前模板', exact: true })
+  await expect(apply.or(template.getByRole('alert'))).toBeVisible({ timeout: 95_000 })
+  expect(await template.getByRole('alert').allTextContents()).toEqual([])
+  await apply.click()
+  await expect(template).toBeHidden()
+
+  const open = page.getByRole('button', { name: 'Prepare submission', exact: true })
+  const submission = page.getByRole('dialog', { name: 'Prepare submission' })
+  const chooseStage = submission.getByLabel('提交阶段')
+  const archive = submission.getByRole('region', { name: 'Archived submissions' })
+  const revisions = page.getByRole('dialog', { name: 'Revision rounds' })
+  const roundName = 'AGU calibration revision'
+  const originalName = 'AGU original submitted manuscript'
+  const revisedNames = ['AGU clean revision 1', 'AGU clean revision 2']
+  const changes = ['The calibration compared four independently recorded observer sessions.',
+    'The calibration compared five independently recorded observer sessions.']
+  const commentText = 'Report how many sessions were included in the calibration.'
+  const replies = ['We clarified that four sessions were included in the calibration.',
+    'We updated the final count to five sessions and clarified the inclusion criterion.']
+
+  async function saveStage(name: string, stage: string) {
+    await open.click()
+    await chooseStage.selectOption(stage)
+    const compile = submission.getByRole('button', { name: 'Compile submission files' })
+    const nameInput = submission.getByRole('textbox', { name: 'Version name' })
+    const compileFailed = submission.getByRole('status', { name: 'Compilation' }).filter({ hasText: 'Compilation failed' })
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await compile.click()
+      await expect(nameInput.or(compileFailed)).toBeVisible({ timeout: 90_000 })
+      if (await nameInput.isVisible()) break
+      const output = await submission.getByText('Compiler output', { exact: true }).locator('..').textContent()
+      if (attempt || !/Failed to fetch|Another compile is in progress/.test(output ?? '')) throw new Error(output ?? 'Compilation failed.')
+    }
+    await nameInput.fill(name)
+    await submission.getByRole('button', { name: 'Save submission version' }).click()
+    await expect(archive.getByText(new RegExp('^' + name + ' ·'))).toBeVisible()
+  }
+
+  async function editSource(index: number) {
+    await replaceProjectSource(page, 'sections/results.tex', base + '\n' + changes[index] + '\n')
+    await page.getByRole('button', { name: 'Save', exact: true }).click()
+    await expect(page.getByText('All changes saved to project')).toBeVisible()
+  }
+
+  await saveStage(originalName, 'agu-initial')
+  await archive.getByText(new RegExp('^' + originalName + ' ·')).click()
+  await archive.getByRole('button', { name: 'Start revision', exact: true }).click()
+  await revisions.getByLabel('Round name').fill(roundName)
+  await revisions.getByRole('button', { name: 'Create revision round' }).click()
+  await revisions.getByLabel('Reviewer', { exact: true }).fill('Reviewer 1')
+  await revisions.getByLabel('Reviewer comment', { exact: true }).fill(commentText)
+  await revisions.getByLabel('Source target').selectOption({ label: 'sections/results.tex' })
+  await revisions.getByRole('button', { name: 'Add reviewer comment' }).click()
+  await expect(revisions.getByText(commentText, { exact: true })).toBeVisible()
+  await revisions.getByRole('button', { name: 'Close', exact: true }).click()
+
+  async function buildClean(index: number) {
+    await editSource(index)
+    await saveStage(revisedNames[index], 'agu-revision')
+    await submission.getByRole('button', { name: 'Close', exact: true }).click()
+    await page.getByRole('button', { name: 'Revision rounds', exact: true }).click()
+    await revisions.getByRole('button', { name: 'Responses and letter' }).click()
+    const value = await revisions.getByRole('option', { name: new RegExp('^' + revisedNames[index] + ' ·') }).getAttribute('value')
+    await revisions.getByLabel('Revised submission').selectOption(value!)
+    if (index) await expect(revisions.getByRole('textbox', { name: 'Response', exact: true })).toHaveValue(replies[index - 1])
+  }
+
+  const evidencePaths: string[] = []
+  async function confirmReply(index: number) {
+    await revisions.getByRole('textbox', { name: 'Response', exact: true }).fill(replies[index])
+    const excerpt = revisions.getByText('View changed text', { exact: true })
+    await expect(excerpt.first()).toBeVisible()
+    for (const toggle of await excerpt.all()) await toggle.click()
+    const change = revisions.getByRole('listitem').filter({ hasText: changes[index] })
+    await expect(change).toHaveCount(1)
+    const checkbox = change.getByRole('checkbox')
+    evidencePaths[index] = (await checkbox.locator('..').innerText()).split(' · ')[0]
+    await checkbox.check()
+    await revisions.getByRole('button', { name: 'Save response' }).click()
+    await expect(revisions.getByRole('button', { name: 'Download revision package' })).toBeEnabled()
+    await revisions.getByRole('button', { name: 'Close', exact: true }).click()
+  }
+
+  const linked = submission.getByRole('region', { name: 'AGU 返修轮次' })
+  const formal = submission.getByRole('region', { name: '正式提交材料' })
+  const history = submission.getByRole('region', { name: 'AGU 正式交付归档' })
+  const load = linked.getByRole('button', { name: '载入本轮清洁稿并生成回复 PDF' })
+  const deliver = formal.getByRole('button', { name: '归档并下载 AGU 正式返修包' })
+
+  async function selectRound() {
+    await open.click()
+    await expect(chooseStage).toHaveValue('agu-revision')
+    await linked.getByLabel('关联返修轮次').selectOption({ label: roundName })
+    await load.click()
+  }
+
+  async function saveDownload(action: Locator, filename: string) {
+    const [download] = await Promise.all([page.waitForEvent('download', { timeout: 18_000 }), action.click()])
+      .catch(async error => { throw new Error((await submission.getByRole('alert').allTextContents()).join(' ') || String(error)) })
+    const path = join(output, filename)
+    await download.saveAs(path)
+    return readFile(path)
+  }
+
+  async function packageRound(index: number) {
+    await selectRound()
+    const cleanBinding = linked.getByText('清洁稿归档 · ' + revisedNames[index], { exact: true })
+    await expect(cleanBinding.or(submission.getByRole('alert'))).toBeVisible({ timeout: 95_000 })
+    expect(await submission.getByRole('alert').allTextContents()).toEqual([])
+    await expect(cleanBinding).toBeVisible()
+    await expect(formal.getByRole('button', { name: 'response-to-reviewers.pdf', exact: true })).toBeVisible()
+    await expect(formal.getByLabel('逐条回复审稿意见', { exact: true })).toBeDisabled()
+    await expect(deliver).toBeDisabled()
+    if (index) {
+      await expect(formal.getByRole('button', { name: 'marked-1.pdf', exact: true })).toHaveCount(0)
+    }
+    const reply = await saveDownload(formal.getByRole('button', { name: 'response-to-reviewers.pdf', exact: true }), `reply-${index + 1}.pdf`)
+    const responseText = pdfText(join(output, `reply-${index + 1}.pdf`), output)
+    expect(responseText).toContain(commentText)
+    expect(responseText).toContain(replies[index])
+    expect(responseText).toContain(evidencePaths[index])
+    expect(responseText).toContain('revised L')
+    expect(responseText).toContain(revisedNames[index])
+    const marked = formal.getByLabel('修订痕迹对照稿', { exact: true })
+    if (!index) {
+      const clean = await saveDownload(submission.getByRole('button', { name: '下载校样 PDF' }), 'clean-1.pdf')
+      await marked.setInputFiles({ name: 'incorrect-clean.pdf', mimeType: 'application/pdf', buffer: clean })
+      await expect(submission.getByRole('alert')).toContainText('对照稿与清洁 PDF 相同')
+    }
+    const markStem = 'marked-' + (index + 1)
+    const cleanSource = await saveDownload(formal.getByRole('button', { name: '下载清洁版 LaTeX 源包' }), `clean-source-${index + 1}.zip`)
+    const markedSource = await JSZip.loadAsync(cleanSource, { checkCRC32: true })
+    const changed = await markedSource.file(evidencePaths[index])!.async('string')
+    expect(changed).toContain(changes[index])
+    markedSource.file(evidencePaths[index], changed.replace(changes[index], String.raw`\textbf{[Marked addition]} ${changes[index]}`))
+    const endpoint = new URL('/api/latex/compile?main=agujournaltemplate.tex&engine=pdflatex&bibliography=bibtex', page.url())
+    const markedPdf = await page.request.post(endpoint.href, {
+      headers: { origin: endpoint.origin, 'content-type': 'application/zip' }, data: await markedSource.generateAsync({ type: 'nodebuffer' }),
+    })
+    expect(markedPdf.ok(), markedPdf.ok() ? undefined : await markedPdf.text()).toBe(true)
+    await writeFile(join(output, markStem + '.pdf'), await markedPdf.body())
+    expect(pdfText(join(output, markStem + '.pdf'), output)).toContain('Marked addition')
+    await marked.setInputFiles(join(output, markStem + '.pdf'))
+    await expect(formal.getByRole('button', { name: markStem + '.pdf', exact: true })).toBeVisible()
+    await expect(deliver).toBeDisabled()
+    const checklist = submission.getByText('提交前版式检查', { exact: true })
+    if (await checklist.locator('..').getAttribute('open') === null) await checklist.click()
+    const findings = submission.getByRole('region', { name: '提交前版式检查结果' })
+    await expect(findings.getByRole('status')).toContainText(/^0 项问题/)
+    for (const check of await findings.getByRole('checkbox').all()) await check.check()
+    await expect(findings.getByRole('status')).toHaveText('0 项问题 · 0 项待人工核对')
+    await expect(deliver).toBeEnabled()
+    const zip = await saveDownload(deliver, `formal-revision-${index + 1}.zip`)
+    const bundle = await JSZip.loadAsync(zip, { checkCRC32: true })
+    const manifest = JSON.parse(await bundle.file('manifest.json')!.async('string'))
+    const report = JSON.parse(await bundle.file('report.json')!.async('string'))
+    expect(report.aguRevision.revised.name).toBe(revisedNames[index])
+    expect(report.aguRevision.original.name).toBe(originalName)
+    expect(manifest.aguRevision).toEqual(report.aguRevision)
+    for (const [path, digest] of Object.entries(manifest.files)) expect(hash(await bundle.file(path)!.async('nodebuffer'))).toBe(digest)
+    const sources = await JSZip.loadAsync(await bundle.file('source.zip')!.async('nodebuffer'))
+    expect((await Promise.all(Object.values(sources.files).filter(file => file.name.endsWith('.tex')).map(file => file.async('string')))).join('\n')).toContain(changes[index])
+    expect(await bundle.file(Object.keys(manifest.files).find(path => path.startsWith('materials/response/'))!)!.async('nodebuffer')).toEqual(reply)
+    expect(await bundle.file(Object.keys(manifest.files).find(path => path.startsWith('materials/marked/'))!)!.async('nodebuffer')).toEqual(await readFile(join(output, markStem + '.pdf')))
+    await writeFile(join(output, `report-${index + 1}.json`), JSON.stringify(report, null, 2))
+    await expect(history.getByText(new RegExp(roundName + ' · ' + revisedNames[index]))).toBeVisible()
+    await page.screenshot({ path: join(output, 'agu-submission.png'), animations: 'disabled' })
+    await submission.getByRole('button', { name: 'Close', exact: true }).click()
+    return { zip, report }
+  }
+
+  await buildClean(0)
+  await confirmReply(0)
+  const first = await packageRound(0)
+  await buildClean(1)
+  await expect(revisions.getByRole('button', { name: 'Download revision package' })).toBeDisabled()
+  await revisions.getByRole('button', { name: 'Close', exact: true }).click()
+  await selectRound()
+  await expect(submission.getByRole('alert')).toContainText('Resolve all reviewer responses')
+  await expect(deliver).toHaveCount(0)
+  await submission.getByRole('button', { name: 'Close', exact: true }).click()
+  await page.getByRole('button', { name: 'Revision rounds', exact: true }).click()
+  await revisions.getByRole('button', { name: 'Responses and letter' }).click()
+  await confirmReply(1)
+  const second = await packageRound(1)
+  expect(first.report.aguRevision.archiveReviewId).not.toBe(second.report.aguRevision.archiveReviewId)
+  expect(first.report.aguRevision.revised.sourceChecksum).not.toBe(second.report.aguRevision.revised.sourceChecksum)
+  expect(first.zip).not.toEqual(second.zip)
+
+  await page.reload()
+  await open.click()
+  const old = history.getByText(new RegExp('^' + roundName + ' · ' + revisedNames[0])).locator('..')
+  await old.locator('summary').click()
+  expect(await saveDownload(old.getByRole('button', { name: '校验并下载原始交付包' }), 'original-history.zip')).toEqual(first.zip)
+  await expect(old.getByRole('status')).toContainText('归档 ZIP SHA-256 校验通过')
+  await expect(old).toContainText(hash(first.zip))
+  await submission.getByRole('button', { name: 'Close', exact: true }).click()
+  const recovery = join(output, 'agu-revision.research-canvas')
+  const proof = await backup(page, recovery)
+  expect(proof.publication.agu.map((item: { sha256: string }) => item.sha256)).toEqual(expect.arrayContaining([hash(first.zip), hash(second.zip)]))
+
+  const restored = await browser.newPage()
+  await restored.goto(new URL('/research', page.url()).href)
+  await restored.getByLabel('Choose project ZIP or backup').setInputFiles(recovery)
+  await restored.getByRole('button', { name: 'Import as new project', exact: true }).click()
+  await restored.waitForURL(url => url.searchParams.has('project'))
+  await restored.getByRole('button', { name: 'Writing', exact: true }).click()
+  await restored.getByRole('button', { name: 'Prepare submission', exact: true }).click()
+  const restoredHistory = restored.getByRole('region', { name: 'AGU 正式交付归档' })
+  const restoredOld = restoredHistory.getByText(new RegExp('^' + roundName + ' · ' + revisedNames[0])).locator('..')
+  await restoredOld.locator('summary').click()
+  const [restoredZip] = await Promise.all([restored.waitForEvent('download'),
+    restoredOld.getByRole('button', { name: '校验并下载原始交付包' }).click()])
+  expect(await readFile((await restoredZip.path())!)).toEqual(first.zip)
+  await restored.close()
+  await writeFile(join(output, 'acceptance.json'), JSON.stringify({
+    generatedReplyPdf: true, selectedCleanArchives: revisedNames, markedReattested: true,
+    previousSavedZipUnchanged: true, restoredBrowserZipUnchanged: true,
+    formalExports: [hash(first.zip), hash(second.zip)],
+  }, null, 2))
+})

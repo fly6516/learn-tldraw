@@ -24,7 +24,7 @@ async function identify(archive: RevisionPackageInput['original']) {
     sourceChecksum, compileProfile: archive.compileProfile, externalEngine: archive.externalEngine } }
 }
 
-export async function buildRevisionPackage({ round, original, revised }: RevisionPackageInput) {
+export async function verifyRevision({ round, original, revised }: RevisionPackageInput) {
   if (round.submissionId !== original.id || round.revisedSubmissionId !== revised.id || original.id === revised.id) {
     throw new Error('Choose the archived original and revised versions for this round.')
   }
@@ -39,6 +39,12 @@ export async function buildRevisionPackage({ round, original, revised }: Revisio
   const letter = buildRevisionLetter(round, original.name, revised.name, compared, binding, await compareRevisionChanges(compared))
   if (letter.unresolved.length) throw new Error('Resolve all reviewer responses and verify their evidence before exporting the revision package.')
 
+  return { baseline, current, letter }
+}
+
+export async function buildRevisionPackage(input: RevisionPackageInput) {
+  const { round, revised } = input
+  const { baseline, current, letter } = await verifyRevision(input)
   const manuscript = await revised.pdf.arrayBuffer()
   const response = new TextEncoder().encode(letter.markdown)
   const files = [
