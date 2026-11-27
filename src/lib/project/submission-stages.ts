@@ -66,7 +66,7 @@ export function stagesForTemplate(template?: string): SubmissionStage[] {
 }
 
 type PhaseFinding = Omit<LayoutFinding, 'evidence' | 'sourceUrl'> & { ruleId: string }
-export type BlindEvidence = { attachmentSha256?: string; coverVerified: boolean; identifiers: readonly string[] }
+export type BlindEvidence = { attachmentSha256?: string; coverVerified: boolean; identifiers: readonly string[]; pdfMetadata?: readonly string[] }
 
 function textFiles(project: ProjectFileSystem, main: string) {
   const files = [...project.files].flatMap(([path, file]) => file.type !== 'directory' && typeof file.content === 'string'
@@ -114,7 +114,7 @@ function sections(project: ProjectFileSystem, main: string, stage: SubmissionSta
 
   if (stage === 'njupt-blind') {
     const ids = [...new Set((blind?.identifiers ?? []).map(normalizeIdentity).filter(value => value.length >= 2))]
-    const leaks = [...extracted, ...project.files.keys(), ...files.map(file => file.text)].some(value => {
+    const leaks = [...extracted, ...(blind?.pdfMetadata ?? []), ...project.files.keys(), ...files.map(file => file.text)].some(value => {
       const text = normalizeIdentity(value)
       return ids.some(id => text.includes(id))
     })

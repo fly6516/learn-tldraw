@@ -38,6 +38,7 @@ export const activeTemplateSchema = z.discriminatedUnion('kind', [
     ...common, kind: z.literal('suep-undergraduate'),
     fields: fields.omit({ email: true, declarations: true }),
     cover: documentBytes, declaration: documentBytes,
+    coverFieldsSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
     coverSha256: z.string().regex(/^[a-f0-9]{64}$/), declarationSha256: z.string().regex(/^[a-f0-9]{64}$/),
   }),
   z.object({

@@ -105,6 +105,7 @@ export async function describeSnapshotRestore(current: ProjectFileSystem, target
     activePageChanged: current.canvas?.activePageId !== target.canvas?.activePageId,
     crossPageEdgesChanged: projectValue(current.canvas?.crossPageEdges ?? []) !== projectValue(target.canvas?.crossPageEdges ?? []),
     settingsChanged: current.metadata.projectName !== target.metadata.projectName
+      || projectValue(current.metadata.information) !== projectValue(target.metadata.information)
       || current.metadata.sourceMode !== target.metadata.sourceMode
       || projectValue(current.template) !== projectValue(target.template),
   }

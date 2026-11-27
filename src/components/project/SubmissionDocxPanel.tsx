@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { SuepOfficialAttachments, useSuepAttachments } from './SuepOfficialAttachments'
 import { bindSuepBundle } from '@/lib/project/suep-bundle-client'
 import { suepDocxMembers, suepMemberRoles, suepUndergraduateId, suepUndergraduateOrigin } from '@/lib/project/suep-undergraduate-source'
@@ -18,6 +18,7 @@ import { projectSourceDigest } from '@/lib/project/external-template-build'
 import { exportExternalBuild } from '@/lib/project/submission'
 import { submissionDocxConfig, submissionDocxIds, type SubmissionDocxFields, type SubmissionDocxId } from '@/lib/project/submission-docx-config'
 import { checkDocxSubmission, verifyWordFinal, type SubmissionDocxDelivery } from '@/lib/project/submission-docx-delivery'
+import { plainTitle } from '@/lib/project/project-information'
 import { captureManuscript, suepImportedCover } from '@/lib/project/template-export'
 import type { SubmissionStage } from '@/lib/project/submission-stages'
 import type { ProjectFileSystem } from '@/lib/project/types'
@@ -34,20 +35,40 @@ const njuptLabels = [
   ['degree', '申请学位类别', 40], ['englishDegree', '学位类别英文全称', 80], ['englishAdvisor', '导师英文姓名', 80],
 ] as const
 
-export function SubmissionDocxPanel({ project, main, template, stage, database, storageKey, disabled, download, onLocate, onArchive }: {
+export function SubmissionDocxPanel({ project, main, template, stage, database, storageKey, disabled, download, onLocate, onEditInformation, onArchive }: {
   project: ProjectFileSystem; main: string; template?: string; stage?: SubmissionStage; database?: IDBDatabase; disabled: boolean; download: (blob: Blob, name: string) => void
   storageKey?: WritingKey
   onLocate: (path: string, line: number) => void
+  onEditInformation: () => void
   onArchive?: (delivery: SubmissionDocxDelivery) => Promise<void>
 }) {
   const [open, setOpen] = useState(false)
   const njupt = template === 'njupt-professional-masters' && stage === 'njupt-deposit'
   const available = njupt ? ['njupt-professional-masters'] as const : submissionDocxIds.filter(id => id !== 'njupt-professional-masters')
   const [school, setSchool] = useState<SubmissionDocxId>(() => available.find(id => id === template) ?? available[0])
-  const [fields, setFields] = useState<SubmissionDocxFields>({
+  const [formFields, setFields] = useState<SubmissionDocxFields>({
     title: '', author: '', studentNumber: '', advisor: '', program: '', affiliation: '', date: '',
     chineseAbstract: '', chineseKeywords: '', englishKeywords: '', confidentiality: 'public',
   })
+  const information = project.metadata.information
+  const shared = useMemo(() => {
+    const fields: Partial<SubmissionDocxFields> = {}
+    if (!information) return fields
+    const { chineseTitle, authors, studentNumber, advisor, program, affiliation, date, chineseAbstract, chineseKeywords,
+      englishKeywords, englishAdvisor } = information
+    if (chineseTitle) fields.title = chineseTitle
+    if (authors?.length) fields.author = authors[0]
+    Object.assign(fields, Object.fromEntries(Object.entries({
+      studentNumber, advisor, program, affiliation, date, chineseAbstract, chineseKeywords, englishKeywords,
+      ...(njupt && { englishAdvisor }),
+    }).filter(([, value]) => value)))
+    return fields
+  }, [information, njupt])
+  const fields = useMemo(() => ({ ...formFields, ...shared }), [formFields, shared])
+  function updateField<K extends keyof SubmissionDocxFields>(key: K, value: SubmissionDocxFields[K]) {
+    setFields(current => ({ ...current, [key]: value }))
+  }
+
   const [uploads, setUploads] = useState<{ original?: File; guideline?: File; declaration?: File }>({})
   const [error, setError] = useState('')
   const [busy, setBusy] = useState<'export' | 'attach' | 'archive'>()
@@ -100,19 +121,20 @@ export function SubmissionDocxPanel({ project, main, template, stage, database, 
   function openForm() {
     setOpen(true)
     try {
-      const snapshot = captureManuscript(project.files, main, { allowLongtable: true })
+      const snapshot = captureManuscript(project.files, main, { allowLongtable: true, information })
       const active = project.metadata.activeTemplate
       const importedCover = suep ? suepImportedCover(project.files) : undefined
       const njuptCover = njupt && active?.kind === 'njupt-masters' ? active.fields : undefined
-      const cover = njuptCover ?? (suep && active?.kind === 'suep-undergraduate' ? active.fields : undefined)
+      const cover = njuptCover ?? (active?.origin.id === school
+        && (active.kind === 'suep-undergraduate' || active.kind === 'zju-undergraduate') ? active.fields : undefined)
       const imported = importedCover && { ...importedCover, chineseAbstract: snapshot.importedChineseAbstract ?? '',
         chineseKeywords: snapshot.importedChineseKeywords ?? '' }
       setFields(current => ({ ...current, ...(!current.title ? imported : undefined), ...(cover && !current.title ? {
-        title: cover.chineseTitle, advisor: cover.advisor, studentNumber: cover.studentNumber, program: cover.program,
+        title: cover.chineseTitle, affiliation: cover.affiliation, advisor: cover.advisor, studentNumber: cover.studentNumber, program: cover.program,
         chineseAbstract: cover.chineseAbstract, chineseKeywords: cover.chineseKeywords, date: cover.date,
         ...(njuptCover && { englishAdvisor: njuptCover.englishAdvisor, degree: njuptCover.degree,
           englishDegree: njuptCover.englishDegree, studyMode: njuptCover.studyMode }),
-      } : {}), author: current.author || snapshot.authors.join('、'),
+      } : {}), author: current.author || snapshot.authors.map(plainTitle).join('、'),
         englishKeywords: current.englishKeywords || (/^[^\\\$\{\}]*$/.test(snapshot.keywords) ? snapshot.keywords : '') }))
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '无法读取当前稿件。')
@@ -159,6 +181,8 @@ export function SubmissionDocxPanel({ project, main, template, stage, database, 
       if (stage) data.set('stage', stage)
       data.set('main', main)
       data.set('fields', JSON.stringify(normalized))
+      const title = information?.title
+      if (title) data.set('manuscript-title', title)
       const id = crypto.randomUUID()
       data.set('delivery-id', id)
       if (word) data.set('original', word)
@@ -169,7 +193,7 @@ export function SubmissionDocxPanel({ project, main, template, stage, database, 
       }))
       if (guide) data.set('guideline', guide)
       if (declaration) data.set('declaration', declaration)
-      const [{ zip, checksum }, snapshotSha256] = await Promise.all([exportExternalBuild(project), projectSourceDigest(project.files, main)])
+      const [{ zip, checksum }, snapshotSha256] = await Promise.all([exportExternalBuild(project), projectSourceDigest(project.files, main, title ? { title } : undefined)])
       if ((word?.size ?? 0) + (guide?.size ?? 0) + (declaration?.size ?? 0) + zip.size > 16 * 1024 * 1024) throw new Error('官方原件和项目源包共计不得超过 16 MB。')
       data.set('source', zip, 'manuscript.zip')
       const blob = await (await wordRequest(data, signal)).blob()
@@ -243,6 +267,9 @@ export function SubmissionDocxPanel({ project, main, template, stage, database, 
     } finally { setBusy(undefined) }
   }
 
+  const missing = [...fieldLabels.filter(([key]) => !fields[key]?.trim()).map(([, label]) => label),
+    ...(!fields.chineseAbstract.trim() ? ['中文摘要'] : []), ...(njupt && !fields.studyMode ? ['培养类型'] : [])]
+
   if (!open) return <Button type="button" variant="outline" disabled={disabled || !main} onClick={openForm}>导出 Word（DOCX）</Button>
   return <form aria-label="导出 Word（DOCX）" noValidate className="space-y-3 rounded-md border p-3 text-sm" onSubmit={event => { event.preventDefault(); void exportDocx() }}>
     <h2 className="font-medium">导出 Word（DOCX）</h2>
@@ -265,31 +292,39 @@ export function SubmissionDocxPanel({ project, main, template, stage, database, 
       {declarationPin && <p className="break-all text-xs">声明 SHA-256 {declarationPin.sha256}</p>}
       {config.requirementsUrl && <a className="mr-3 underline" href={config.requirementsUrl} target="_blank" rel="noreferrer">学校撰写标准</a>}
       <a className="underline" href={config.sourceUrl} target="_blank" rel="noreferrer">原件发布来源</a>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button type="button" size="sm" variant="outline" onClick={onEditInformation}>编辑项目信息</Button>
+        {information?.authors && information.authors.length > 1 && <p>学位论文封面使用作者列表的第一位。</p>}
+      </div>
+      {missing.length > 0 && <p role="status" aria-label="DOCX 缺少的必填项" className="text-amber-800">缺少必填项 · {missing.join('、')}</p>}
       <div className="grid gap-2 sm:grid-cols-2">
         {fieldLabels.map(([key, label, maxLength]) => <label key={key} className="block">{label}
-          <Input value={fields[key] ?? ''} maxLength={maxLength} required onChange={event => setFields({ ...fields, [key]: event.target.value })} />
+          {Object.hasOwn(shared, key) && <span aria-hidden="true" className="ml-1 text-workbench-muted">· 项目信息</span>}
+          <Input value={fields[key] ?? ''} maxLength={maxLength} required readOnly={Object.hasOwn(shared, key)}
+            onChange={event => updateField(key, event.target.value)} />
         </label>)}
         {njupt && <label>培养类型
           <select className="mt-1 block w-full rounded border bg-background p-2" value={fields.studyMode ?? ''} onChange={event =>
-            setFields({ ...fields, studyMode: (event.target.value || undefined) as SubmissionDocxFields['studyMode'] })}>
+            updateField('studyMode', (event.target.value || undefined) as SubmissionDocxFields['studyMode'])}>
             <option value="">请选择</option><option value="full-time">全日制</option><option value="part-time">非全日制</option>
           </select>
         </label>}
         {(school === 'zju-basic-medicine-undergraduate' || njupt) && <label>论文公开状态
           <select className="mt-1 block w-full rounded border bg-background p-2" value={fields.confidentiality} onChange={event =>
-            setFields({ ...fields, confidentiality: event.target.value as SubmissionDocxFields['confidentiality'] })}>
+            updateField('confidentiality', event.target.value as SubmissionDocxFields['confidentiality'])}>
             <option value="public">公开</option>
             <option value="restricted">涉密</option>
           </select>
         </label>}
       </div>
       <label className="block">中文摘要
-        <textarea className="block min-h-20 w-full rounded-md border bg-background p-2" required maxLength={5000} value={fields.chineseAbstract}
-          onChange={event => setFields({ ...fields, chineseAbstract: event.target.value })} />
+        {shared.chineseAbstract && <span aria-hidden="true" className="ml-1 text-workbench-muted">· 项目信息</span>}
+        <textarea readOnly={Boolean(shared.chineseAbstract)} className="block min-h-20 w-full rounded-md border bg-background p-2" required maxLength={5000} value={fields.chineseAbstract}
+          onChange={event => updateField('chineseAbstract', event.target.value)} />
       </label>
       <label className="block">致谢（选填）
         <textarea className="block w-full rounded-md border bg-background p-2" maxLength={5000} value={fields.acknowledgment ?? ''}
-          onChange={event => setFields({ ...fields, acknowledgment: event.target.value })} />
+          onChange={event => updateField('acknowledgment', event.target.value)} />
       </label>
       {suep ? suepPin ? <SuepOfficialAttachments state={attachments} disabled={Boolean(busy) || disabled} />
         : <p role="status">正在读取上电官方版本记录</p> : <details className="space-y-2">

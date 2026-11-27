@@ -4,7 +4,7 @@ import type { PdfLayoutPage } from './layout-preflight'
 const pageNumber = /^[-–—]?\s*(\d{1,5}|[IVXLCDM]{1,12}|[ivxlcdm]{1,12})\s*[-–—]?$/
 const readNumber = (text: string) => pageNumber.exec(text.trim())?.[1]
 
-export async function readPdfLayout(pdf: Blob, signal: AbortSignal, footerOffsetMm = 0, topMarginMm?: number): Promise<PdfLayoutPage[]> {
+export async function readPdfLayout(pdf: Blob, signal: AbortSignal, footerOffsetMm = 0, topMarginMm?: number, onMetadata?: (values: string[]) => void): Promise<PdfLayoutPage[]> {
   const data = new Uint8Array(await pdf.arrayBuffer())
   signal.throwIfAborted()
   const thread = new Worker(new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url), { type: 'module' })
@@ -15,6 +15,11 @@ export async function readPdfLayout(pdf: Blob, signal: AbortSignal, footerOffset
   signal.addEventListener('abort', cancel, { once: true })
   try {
     const doc = await task.promise
+    if (onMetadata) {
+      const { info, metadata } = await doc.getMetadata()
+      const entries = [...Object.values(info as Record<string, unknown>), metadata?.getRaw()]
+      onMetadata(entries.filter((value): value is string => typeof value === 'string'))
+    }
     const pages: PdfLayoutPage[] = []
     for (let number = 1; number <= doc.numPages; number++) {
       signal.throwIfAborted()

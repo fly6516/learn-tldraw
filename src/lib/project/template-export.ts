@@ -1,3 +1,4 @@
+import { plainTex, type ProjectInformation } from './project-information'
 import { groupEnd, lineNumber, maskLatexCode } from './latex-source'
 import { findCitations, parseBibliography } from './references'
 import type { LineSources, ManuscriptLine, MappedTex } from './template-source-map'
@@ -35,6 +36,7 @@ export type ManuscriptSnapshot = Readonly<{
   assets: readonly Asset[]
   bibliography: readonly Readonly<{ path: string; content: string }>[]
   unicodeLocation?: Readonly<Location>
+  sourceAuthors?: readonly string[]
 }>
 
 type Chunk = { path: string; source: string; offset: number; start: number; end: number }
@@ -180,7 +182,7 @@ function suepImportSources(files: ReadonlyMap<string, ProjectFile | ProjectDirec
 
 /** Captures the supported LaTeX interchange subset from the current working files. */
 export function captureManuscript(files: ReadonlyMap<string, ProjectFile | ProjectDirectory>, main: string,
-  options?: { allowLongtable?: boolean }): ManuscriptSnapshot {
+  options?: { allowLongtable?: boolean; information?: Pick<ProjectInformation, 'title' | 'authors'> }): ManuscriptSnapshot {
   const imported = suepImportSources(files, main)
   const root = main.slice(0, main.lastIndexOf('/') + 1)
   const chunks: Chunk[] = []
@@ -217,6 +219,8 @@ export function captureManuscript(files: ReadonlyMap<string, ProjectFile | Proje
     return chunk ? { path: chunk.path, line: lineNumber(chunk.source, chunk.offset + index - chunk.start) } : { path: main, line: 1 }
   }
   const masked = maskLatexCode(source, true)
+  const identity = options?.information
+  const identityRanges: Range[] = []
   let title = ''
   let authors: string[] = []
   let abstract = ''
@@ -327,10 +331,12 @@ export function captureManuscript(files: ReadonlyMap<string, ProjectFile | Proje
         problem(at, `\\${name} 请使用普通文字，多个作者可用 \\and 分隔。`)
       }
       if (name === 'title') {
+        if (identity?.title) identityRanges.push({ start: index, end: cursor })
         if (title) problem(at, '发现多个标题。')
         title = value
       }
       if (name === 'author') {
+        if (identity?.authors?.length) identityRanges.push({ start: index, end: cursor })
         if (authors.length) problem(at, '发现多组作者。')
         authors = value.split(/\s*\\and\b\s*/).map(author => author.trim()).filter(Boolean)
       }
@@ -383,7 +389,7 @@ export function captureManuscript(files: ReadonlyMap<string, ProjectFile | Proje
   }
 
   if (ended) requireWhitespace(until, masked.length)
-  if (!ended || !title || !authors.length || !abstract) {
+  if (!ended || !(identity?.title || title) || !(identity?.authors?.length || authors.length) || !abstract) {
     stop(Math.max(bodyStart, 0), '导出需要完整的 document、title、author 和 abstract。')
   }
   for (const reference of references) {
@@ -415,8 +421,12 @@ export function captureManuscript(files: ReadonlyMap<string, ProjectFile | Proje
     abstract: abstractRange ? mappedExcerpt(source, chunks, [abstractRange]).lines : new Map(),
     keywords: keywordRange ? mappedExcerpt(source, chunks, [keywordRange]).lines : new Map(),
   }
-  const unicode = unsupportedJmlrText.exec(masked)
-  let unicodeLocation = unicode ? location(unicode.index) : undefined
+  let unicode: RegExpExecArray | undefined
+  for (const match of masked.matchAll(new RegExp(unsupportedJmlrText, 'gu'))) {
+    if (!identityRanges.some(range => match.index >= range.start && match.index < range.end)) { unicode = match; break }
+  }
+  const sharedUnicode = [identity?.title, ...(identity?.authors ?? [])].some(value => value && unsupportedJmlrText.test(value))
+  let unicodeLocation = unicode ? location(unicode.index) : sharedUnicode ? { path: '项目信息', line: 1 } : undefined
   if (!unicodeLocation) {
     for (const [path, content] of bibliography) {
       const character = unsupportedJmlrText.exec(maskLatexCode(content))
@@ -427,7 +437,10 @@ export function captureManuscript(files: ReadonlyMap<string, ProjectFile | Proje
     }
   }
   return {
-    title, authors, abstract, keywords, importedChineseAbstract: imported?.chineseAbstract,
+    title: identity?.title ? plainTex(identity.title) : title,
+    authors: identity?.authors?.length ? identity.authors.map(plainTex) : authors,
+    ...(identity?.authors?.length && { sourceAuthors: authors }),
+    abstract, keywords, importedChineseAbstract: imported?.chineseAbstract,
     importedChineseKeywords: imported?.chineseKeywords, body: mappedBody.text, lineSources, sections, floats, references,
     assets: Array.from(assets, ([path, blob]) => ({ path, blob })),
     bibliography: Array.from(bibliography, ([path, content]) => ({ path, content })),

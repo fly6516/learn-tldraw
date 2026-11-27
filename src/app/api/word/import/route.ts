@@ -24,6 +24,7 @@ import { hasLayoutConflict, layoutKeys, layoutValues, wordLayoutSchema, type Wor
 import { customWordGeometry, customWordTex, formatCustomWord } from '@/lib/project/custom-word-tex'
 import { submissionDocxConfig, submissionDocxFieldSchema, submissionDocxIdSchema } from '@/lib/project/submission-docx-config'
 import { captureManuscript } from '@/lib/project/template-export'
+import { plainTitle, projectInformationSchema } from '@/lib/project/project-information'
 import { importSourceArchive } from '@/lib/project/source-archive'
 import { docxLatexForPandoc, docxSourceError, prepareDocxAst, validateDocxSource, type PandocDocument } from '@/lib/project/docx-manuscript'
 import { fillSubmissionDocx } from '@/lib/project/submission-docx-package'
@@ -389,7 +390,10 @@ async function exportSubmissionWord(work: string, request: Request, data: FormDa
   const registered = !suep && original instanceof File
     ? await pinned(original, release?.sha256 ?? config.original.sha256, '官方原件') : undefined
   const project = await importSourceArchive(source, wordImportLimit)
-  const manuscript = captureManuscript(project.files, entry, { allowLongtable: true })
+  const identity = projectInformationSchema.pick({ title: true }).safeParse({ title: data.get('manuscript-title') ?? undefined })
+  if (!identity.success) throw new ImportError('稿件主标题的长度或格式无效。')
+  const title = identity.data.title || undefined
+  const manuscript = captureManuscript(project.files, entry, { allowLongtable: true, information: { title, authors: [fields.author] } })
   validateDocxSource(manuscript)
   const { run, office } = await wordJob(work, request.signal)
   let reference: Uint8Array | undefined = registered
@@ -426,7 +430,7 @@ async function exportSubmissionWord(work: string, request: Request, data: FormDa
     declaration = await readFile(join(work, 'declaration.docx'))
   }
   if (!reference) throw new ImportError('缺少登记的 Word 底稿。')
-  provenance += '\n稿件快照 SHA-256 ' + await projectSourceDigest(project.files, entry)
+  provenance += '\n稿件快照 SHA-256 ' + await projectSourceDigest(project.files, entry, title ? { title } : undefined)
   const deliveryId = data.get('delivery-id')
   if (typeof deliveryId === 'string' && /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/.test(deliveryId)) provenance += '\n交付标识 ' + deliveryId
   provenance += '\n' + (release || pin && pin.version !== config.version ? '此版本待 Word 实机核对' : config.status)
@@ -465,7 +469,7 @@ async function exportSubmissionWord(work: string, request: Request, data: FormDa
   // The JSON writer only receives locally staged, validated image names.
   await runPandoc(['--fail-if-warnings', '-f', 'json', '-t', 'docx', 'render.json', '-o', 'draft.docx'], 'body')
   return fillSubmissionDocx({ ...converted, id: config.id, original: reference, draft: await readFile(join(work, 'draft.docx')),
-    cover, declaration, wordMargins, fields: { ...fields, affiliation: fields.affiliation ?? '' }, englishTitle: manuscript.title.replace(/\\([&%#$ _])/g, '$1'), provenance })
+    cover, declaration, wordMargins, fields: { ...fields, affiliation: fields.affiliation ?? '' }, englishTitle: title ?? plainTitle(manuscript.title), provenance })
 }
 
 export async function POST(request: Request) {

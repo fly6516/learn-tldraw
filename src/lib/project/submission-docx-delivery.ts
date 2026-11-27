@@ -50,7 +50,7 @@ export function checkDocxSubmission(project: ProjectFileSystem, main: string, fi
     }
   }
   try {
-    const manuscript = captureManuscript(project.files, main, { allowLongtable: true })
+    const manuscript = captureManuscript(project.files, main, { allowLongtable: true, information: project.metadata.information })
     docxSourceFindings(manuscript).forEach(add)
     for (const float of manuscript.floats) if (float.longTable) findings.push({
       status: 'manual', location: { path: float.path, line: float.line },

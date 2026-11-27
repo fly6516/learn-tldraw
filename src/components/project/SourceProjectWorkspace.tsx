@@ -24,6 +24,8 @@ import { getFileTree, updateFileContent, type FileTreeNode } from '@/lib/project
 import { exportSourceArchive, sourceArchiveEntry } from '@/lib/project/source-archive'
 import { projectSourceDigest, type ExternalTemplatePreview } from '@/lib/project/external-template-build'
 import { activeTemplateEngine, type ActiveTemplate } from '@/lib/project/active-template'
+import { projectInformationKey, sourcesWithProjectInformation, type ProjectInformation } from '@/lib/project/project-information'
+import { ProjectInformationDialog } from './ProjectInformationDialog'
 import type { ProjectFile, ProjectFileSystem, ResearchNodeData } from '@/lib/project/types'
 import { WritingAiWorkbench } from './WritingAiWorkbench'
 import type { ChatAction } from '@/lib/project/writing-chat-actions'
@@ -224,10 +226,13 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
   const main = texFiles.find(file => file.path === project.metadata.mainFile)?.path
     ?? (generateSource && sourcePaths.has('main.tex') ? 'main.tex' : texFiles[0]?.path ?? '')
   const profile = project.metadata.compileProfile
-  const templateSelectionKey = activeTemplate?.selectionId ?? ''
-  const profileKey = compileProfileKey(profile) + (templateSelectionKey ? ':' + templateSelectionKey : '')
+  const information = project.metadata.information
+  const compileKey = (template?: ActiveTemplate) =>
+    JSON.stringify([compileProfileKey(profile), template?.selectionId ?? '', projectInformationKey(information)])
+  const profileKey = compileKey(activeTemplate)
   const originalTemplateName = project.metadata.templateOrigin
     ? project.metadata.templateOrigin.id + ' · ' + project.metadata.templateOrigin.version : '原项目版式'
+  const [informationOpen, setInformationOpen] = useState(false)
   const [compileSettingsOpen, setCompileSettingsOpen] = useState(false)
   const [wordReviewOpen, setWordReviewOpen] = useState(false)
   const [selection, setSelected] = useState<string>()
@@ -855,6 +860,25 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     markSourceChanged()
   }
 
+  async function saveProjectInformation(information: ProjectInformation) {
+    if (!storage || !storageKey || locked || writeInProgress.current) throw new Error('本机项目暂时无法保存，请稍后重试。')
+    writeInProgress.current = true
+    setWriting(true)
+    try {
+      const stored = await flushProject(project)
+      const metadata = { ...stored.metadata, updatedAt: new Date().toISOString() }
+      if (Object.keys(information).length) metadata.information = information
+      else delete metadata.information
+      const saved = await writeProject(storage, storageKey, { ...stored, metadata }, stored)
+      acceptStoredProject(saved, stored)
+      markSourceChanged()
+      setLayoutFindings(undefined)
+    } finally {
+      writeInProgress.current = false
+      setWriting(false)
+    }
+  }
+
   async function setCurrentTemplate(template?: ActiveTemplate, preview?: TemplatePreview | ExternalTemplatePreview) {
     if (!storage || !storageKey || locked || writeInProgress.current) throw new Error('本机项目暂时无法保存，请稍后重试。')
     if (template && conflicts.length) throw new Error('请先处理稿件的本地草稿冲突。')
@@ -872,7 +896,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       const external = preview && 'sourceSha256' in preview ? preview : undefined
       if (template?.kind === 'mit-thesis') {
         const current = latestTemplateSource.current
-        if (!external || external.sourceSha256 !== await projectSourceDigest(current.files, current.main)
+        if (!external || external.sourceSha256 !== await projectSourceDigest(current.files, current.main, information)
           || current !== latestTemplateSource.current) throw new Error('稿件在外部编译后发生了变化，请重新准备源包。')
       }
       const saved = await writeProject(storage, storageKey, { ...stored, metadata }, stored, external)
@@ -882,7 +906,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
       if (template && preview && templateExport) {
         setPdfUrl(URL.createObjectURL(preview.pdf))
         setPdfFilename(template.main.replace(/\.tex$/i, '.pdf'))
-        setLastCompile({ ...templateExport, profile: compileProfileKey(profile) + ':' + template.selectionId })
+        setLastCompile({ ...templateExport, profile: compileKey(template) })
         setSourceMap(preview.regions)
         setPdfPage(1)
         setNarrowView('pdf')
@@ -897,7 +921,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
     Promise<{ project: ProjectFileSystem; lines?: LineSources; blind?: BlindEvidence }> {
     if (!source.metadata.activeTemplate) {
       if (stage === 'njupt-blind') throw new Error('请先在「更换模板」中启用已配置题名与专业字段的南邮专硕版式。')
-      return { project: source }
+      return { project: sourcesWithProjectInformation(source, main) }
     }
     const { projectWithActiveTemplate } = await import('@/lib/project/template-export-client')
     return projectWithActiveTemplate(source, main, signal, stage, cover)
@@ -949,7 +973,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         if (submissionSelection) throw new Error('当前 MIT 版式需要外部 LuaLaTeX。在此面板准备外部编译 ZIP 后上传 PDF。')
         if (chatSignal) return { feedback: feedback('failed', 'Use the workbench to verify the current MIT external build.') }
         const preview = storage && storageKey ? await readExternalTemplatePreview(storage, storageKey, source) : undefined
-        const digest = preview ? await projectSourceDigest(source.files, main) : undefined
+        const digest = preview ? await projectSourceDigest(source.files, main, source.metadata.information) : undefined
         if (signal.aborted) return
         if (preview && digest === preview.sourceSha256 && sameSources(source.files, latestTemplateSource.current.files)
           && main === latestTemplateSource.current.main) {
@@ -966,7 +990,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         return
       }
       const { project: target, lines, blind } = await compileSource(source, signal, stage, cover)
-      const switched = target !== source
+      const switched = Boolean(lines)
       const entry = switched ? target.metadata.mainFile! : main
       const editorDiagnostics = (issues: CompileDiagnostic[]) => switched
         ? issues.map(issue => ({ ...issue, path: '', message: `${issue.path}:${issue.line} · ${issue.message}` }))
@@ -1016,7 +1040,8 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         const inspectionSignal = AbortSignal.any([signal, AbortSignal.timeout(30_000)])
         const footerOffset = Number(layoutProfile?.layout?.rules.footerOffset.chosen.value ?? 0)
         const topMargin = layoutProfile?.layout && Number(layoutProfile.layout.rules.top.chosen.value)
-        const pages = await import('@/lib/project/pdf-layout-client').then(({ readPdfLayout }) => readPdfLayout(pdf, inspectionSignal, footerOffset, topMargin))
+        const pages = await import('@/lib/project/pdf-layout-client').then(({ readPdfLayout }) => readPdfLayout(pdf, inspectionSignal, footerOffset, topMargin,
+          blind && (values => { blind.pdfMetadata = values })))
           .catch(() => [])
         if (signal.aborted) return
         findings = layoutProfile && stage !== 'njupt-blind' ? assessLayout(target.files, entry, pages, regions, info, targetTemplate) : []
@@ -1036,7 +1061,7 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
         if (info?.hasWarnings && !diagnostics.length) diagnostics.push({ severity: 'warning', message: 'The compiler reported warnings without a source location. See the compiler output.' })
         const delivery = stage ? { stage, buildId: crypto.randomUUID(), entry,
           engine: target.metadata.compileProfile?.engine ?? 'tectonic' as const,
-          snapshotSha256: await projectSourceDigest(source.files, main), figureAttachmentsRequired, attachmentSha256: blind?.attachmentSha256 } : undefined
+          snapshotSha256: await projectSourceDigest(source.files, main, source.metadata.information), figureAttachmentsRequired, attachmentSha256: blind?.attachmentSha256 } : undefined
         submission = { main: entry, paths: switched ? submissionFilePaths(target.files) : paths, excluded, drafts, issues, pdf, zip: archive, warnings: Boolean(info?.hasWarnings), diagnostics,
           sourceChecksum: packaged?.checksum, compileProfile: target.metadata.compileProfile,
           layoutReport: findings ? await buildSubmissionLayout(findings, { pdf, zip: archive, sourceChecksum: packaged?.checksum }, target.metadata.templateOrigin, delivery) : undefined }
@@ -1173,6 +1198,8 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
           onClick={() => setCompileSettingsOpen(true)} className="shrink-0 px-1.5 sm:px-2">
           <SlidersHorizontal /><span className="hidden text-xs xl:inline">{compilerLabels[activeEngine ?? profile?.engine ?? 'tectonic']}</span>
         </Button>
+        <Button size="sm" variant="outline" disabled={!storage || !storageKey || locked}
+          onClick={() => setInformationOpen(true)}>项目信息</Button>
         <WorkbenchSetup storage={journal.loadError || journal.failed.size ? 'unavailable' : journal.ready && storage ? 'ready' : 'checking'} />
         <Button ref={aiTrigger} size="sm" variant={aiOpen ? 'secondary' : 'outline'} aria-expanded={aiOpen} aria-controls="writing-ai"
           aria-label="Writing AI" title="Writing AI" className="shrink-0 px-2 sm:px-3" onClick={toggleChapterAi}>
@@ -1438,13 +1465,21 @@ export function SourceProjectWorkspace({ project, ref, active, actions, generate
           <Button variant="outline" size="sm" className="h-7" disabled={!main || locked} onClick={() => setSubmissionOpen(true)}>Prepare submission</Button>
         </div>
       </footer>
-      {templateExport && <TemplateExportDialog {...templateExport} active={activeTemplate} database={storage ?? undefined} originalName={originalTemplateName}
+      {informationOpen && <ProjectInformationDialog information={information} projectName={project.metadata.projectName}
+        onSave={saveProjectInformation} onClose={() => setInformationOpen(false)} />}
+      {templateExport && <TemplateExportDialog {...templateExport} information={information} onEditInformation={() => {
+        setTemplateExport(undefined)
+        setInformationOpen(true)
+      }} active={activeTemplate} database={storage ?? undefined} originalName={originalTemplateName}
         originalOrigin={project.metadata.templateOrigin}
         onSetCurrent={storage && storageKey ? setCurrentTemplate : undefined} onClose={() => setTemplateExport(undefined)} />}
       {compileSettingsOpen && <CompileSettingsDialog main={main} paths={texFiles.map(file => file.path)} profile={profile}
         onSave={saveCompileSettings} onClose={() => setCompileSettingsOpen(false)} />}
       {submission && <SubmissionDialog main={main} compileEntry={activeTemplate?.main} drafts={draftPaths} includeDrafts={includeDrafts} paths={submission.paths}
-        target={submission.target} working={workingProject} onEvidenceLocate={(path, line) => {
+        target={submission.target} working={workingProject} onEditInformation={() => {
+          setSubmissionOpen(false)
+          setInformationOpen(true)
+        }} onEvidenceLocate={(path, line) => {
           setSubmissionOpen(false)
           openFile(path, line)
         }}

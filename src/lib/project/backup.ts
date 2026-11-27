@@ -5,6 +5,7 @@ import type { ProjectDirectory, ProjectFile, ProjectFileSystem } from './types'
 import { isProjectPath } from './source-archive'
 import { aiReadExclusionsSchema } from './ai-read-scope'
 import { activeTemplateSchema } from './active-template'
+import { projectInformationSchema } from './project-information'
 import { compileProfileSchema } from './compile-profile'
 import { draftConflicts, type PortableWritingState } from './writing-drafts'
 import { projectBoundReleaseOrigins, sameTemplateOrigin } from './template-release'
@@ -54,6 +55,7 @@ const savedManifest = z.object({
       aiReadExclusions: aiReadExclusionsSchema.optional(),
       mainFile: z.string().optional(),
       compileProfile: compileProfileSchema.optional(),
+      information: projectInformationSchema.optional(),
       activeTemplate: activeTemplateSchema.optional(),
       templateOrigin: z.object({ id: z.string(), version: z.string(), sha256: z.string().regex(/^[0-9a-f]{64}$/), manifestSha256: z.string().regex(/^[0-9a-f]{64}$/).optional() }).optional(),
     }),

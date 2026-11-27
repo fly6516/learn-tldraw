@@ -55,13 +55,13 @@ try {
 
 export type ExternalTemplatePreview = TemplatePreview & { sourceSha256: string }
 
-export async function projectSourceDigest(files: ProjectFileSystem['files'], main: string) {
+export async function projectSourceDigest(files: ProjectFileSystem['files'], main: string, information?: ProjectFileSystem['metadata']['information']) {
   const entries = [...files].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
   const data = await Promise.all(entries.flatMap(([path, file]) => {
     if (file.type === 'directory') return []
     return [hash(file.content ?? file.blob ?? '').then(digest => [path, digest])]
   }))
-  return hash(JSON.stringify({ main, data }))
+  return hash(JSON.stringify({ main, data, information }))
 }
 
 function hash(value: string | Blob) {

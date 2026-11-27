@@ -6,6 +6,7 @@ import { suepUndergraduateId } from '@/lib/project/suep-undergraduate-source'
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
+import { isArticleTemplate, missingTemplateFields, plainTitle, sharedTemplateFields, withTemplateFields, type ProjectInformation } from '@/lib/project/project-information'
 import { captureManuscript, suepImportedCover } from '@/lib/project/template-export'
 import { exportTargets, exportWithTemplate, prepareExternalTemplate, supportsSwitchRelease, switchTargetForRelease, type ExportFields } from '@/lib/project/template-export-client'
 import { attachExternalTemplate, type ExternalTemplatePreview } from '@/lib/project/external-template-build'
@@ -28,25 +29,30 @@ type ExternalBuild = Awaited<ReturnType<typeof prepareExternalTemplate>> & { url
 type ExternalFiles = { pdf?: File; sync?: File; receipt?: File }
 type Output = { pdf: string; archive: string; name: string; template: ActiveTemplate; preview: TemplatePreview | ExternalTemplatePreview }
 
-export function TemplateExportDialog({ files, main, active, database, originalName, originalOrigin, onSetCurrent, onClose }: {
+export function TemplateExportDialog({ files, main, active, database, originalName, originalOrigin, information, onEditInformation, onSetCurrent, onClose }: {
   files: ProjectFileSystem['files']; main: string; active?: ActiveTemplate; originalName: string; originalOrigin?: TemplateOrigin
   database?: IDBDatabase
+  information?: ProjectInformation
+  onEditInformation: () => void
   onSetCurrent?: (template?: ActiveTemplate, preview?: TemplatePreview | ExternalTemplatePreview) => Promise<void>; onClose: () => void
 }) {
   const [input] = useState(() => {
-    try { return { manuscript: captureManuscript(files, main) } }
+    try { return { manuscript: captureManuscript(files, main, { information }) } }
     catch (cause) { return { error: cause instanceof Error ? cause.message : '无法读取稿件快照。' } }
   })
   const importedCover = suepImportedCover(files)
   const [selection, setSelection] = useState(active?.origin.id ?? (importedCover ? originalOrigin?.id : undefined) ?? exportTargets.find(item => item.entry.exportProfile === 'zju-undergraduate')?.entry.id ?? exportTargets[0].entry.id)
   const [version, setVersion] = useState<string>()
-  const [fields, setFields] = useState<ExportFields>(() => ({
-    ...initialFields, ...(importedCover && {
-      chineseTitle: importedCover.title, program: importedCover.program, studentNumber: importedCover.studentNumber,
-      affiliation: importedCover.affiliation, advisor: importedCover.advisor, date: importedCover.date,
-      chineseAbstract: input.manuscript?.importedChineseAbstract ?? '', chineseKeywords: input.manuscript?.importedChineseKeywords ?? '',
-    }), ...active?.fields,
-  }))
+  function defaults(templateId: string): ExportFields {
+    return {
+      ...initialFields, ...(importedCover && {
+        chineseTitle: importedCover.title, program: importedCover.program, studentNumber: importedCover.studentNumber,
+        affiliation: importedCover.affiliation, advisor: importedCover.advisor, date: importedCover.date,
+        chineseAbstract: input.manuscript?.importedChineseAbstract ?? '', chineseKeywords: input.manuscript?.importedChineseKeywords ?? '',
+      }), ...(active?.origin.id === templateId && active.fields),
+    }
+  }
+  const [templateFields, setFields] = useState<ExportFields>(() => defaults(selection))
   const [releases, setReleases] = useState<Awaited<ReturnType<typeof listOfficialTemplateReleases>>>()
   const [releaseError, setReleaseError] = useState('')
   const [saving, setSaving] = useState(false)
@@ -67,6 +73,9 @@ export function TemplateExportDialog({ files, main, active, database, originalNa
   }), base]
   const target = versions.find(item => item.version === (version ?? (active?.origin.id === selection ? active.origin.version : importedCover && originalOrigin?.id === selection ? originalOrigin.version : undefined)))
     ?? versions[0]
+  const shared = sharedTemplateFields(information, isArticleTemplate(target.entry.exportProfile))
+  const fields = { ...templateFields, ...shared }
+  const missing = missingTemplateFields(target.entry.exportProfile ?? '', selection, fields)
   const zju = target.entry.exportProfile === 'zju-undergraduate'
   const suep = target.entry.exportProfile === 'suep-undergraduate'
   const suepOriginal = useSuepAttachments(suep
@@ -126,7 +135,7 @@ export function TemplateExportDialog({ files, main, active, database, originalNa
 
   async function compile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!input.manuscript || loadingReleases || suep && !suepOriginal.receipt) return
+    if (!input.manuscript || missing.length || loadingReleases || suep && !suepOriginal.receipt) return
     cancel()
     clearOutput()
     setError('')
@@ -137,7 +146,7 @@ export function TemplateExportDialog({ files, main, active, database, originalNa
     try {
       if (mit) {
         const prepared = await prepareExternalTemplate(input.manuscript, files, main, target, fields, controller.signal,
-          active?.kind === 'mit-thesis' ? active : undefined)
+          active?.kind === 'mit-thesis' ? active : undefined, information)
         if (task.current !== controller) return
         const url = URL.createObjectURL(prepared.build.archive)
         objectUrls.current.push(url)
@@ -189,7 +198,10 @@ export function TemplateExportDialog({ files, main, active, database, originalNa
     setError('')
     setSaving(true)
     try {
-      await onSetCurrent(template, preview)
+      // Keep the user's template-specific entries as fallbacks without duplicating shared fields.
+      const selected = template && withTemplateFields(template, Object.fromEntries(Object.keys(shared)
+        .map(key => [key, templateFields[key as keyof typeof shared] ?? ''])))
+      await onSetCurrent(selected, preview)
       onClose()
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '无法保存当前模板。')
@@ -207,9 +219,10 @@ export function TemplateExportDialog({ files, main, active, database, originalNa
   function field(key: Exclude<keyof ExportFields, 'declarations' | 'original' | 'guideline' | 'cover' | 'declaration'>, label: string, options: { optional?: boolean; multiline?: boolean; maxLength?: number } = {}) {
     const props = {
       className: inputStyle, value: fields[key] ?? '', required: !options.optional, maxLength: options.maxLength ?? 160,
+      readOnly: Object.hasOwn(shared, key),
     }
     return <label className="grid min-w-0 gap-1 text-xs font-medium">
-      {label}
+      <span>{label}{props.readOnly && <span aria-hidden="true" className="ml-1 text-workbench-muted">· 项目信息</span>}</span>
       {options.multiline ? <textarea {...props} rows={3} onChange={event => updateField(key, event.target.value)} />
         : <input {...props} onChange={event => updateField(key, event.target.value)} />}
     </label>
@@ -244,7 +257,7 @@ export function TemplateExportDialog({ files, main, active, database, originalNa
                 setError('')
                 setSelection(event.target.value)
                 setVersion(undefined)
-                setFields({ ...initialFields, ...(event.target.value === active?.origin.id && active?.fields) })
+                setFields(defaults(event.target.value))
               }}>
                 {exportTargets.map(({ entry }) =>
                   <option key={entry.id} value={entry.id}>{entry.name}</option>)}
@@ -266,6 +279,11 @@ export function TemplateExportDialog({ files, main, active, database, originalNa
               </select>
             </label>
             <p className="break-all text-xs text-workbench-muted">SHA-256 {target.sha256}</p>
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-workbench-line p-2 text-xs">
+              <p className="break-words">稿件 · {plainTitle(input.manuscript.title)} · {input.manuscript.authors.map(plainTitle).join('、')}</p>
+              <Button type="button" size="sm" variant="outline" onClick={onEditInformation}>编辑项目信息</Button>
+            </div>
+            {missing.length > 0 && <p role="status" aria-label="模板缺少的必填项" className="text-xs text-amber-800">缺少必填项 · {missing.join('、')}</p>}
             <div className={'grid gap-2 ' + (output ? '' : 'sm:grid-cols-2')}>
               {mit ? <>
                 {field('affiliation', 'MIT Department')}
@@ -301,7 +319,7 @@ export function TemplateExportDialog({ files, main, active, database, originalNa
                 {field('studentNumber', '学号', suep ? { maxLength: 20 } : {})}
                 {field('advisor', '指导教师', suep ? { maxLength: 40 } : {})}
                 {field('program', njuptProfessional ? '专业（领域）' : '年级与专业', suep ? { maxLength: 40 } : {})}
-                {field('affiliation', suep ? '所在院系' : '所在学院', suep ? { maxLength: 40 } : {})}
+                {field('affiliation', suep ? '所在院系' : '所在学院', { optional: njupt, maxLength: suep ? 40 : 160 })}
                 {field('date', '提交日期', suep ? { maxLength: 30 } : {})}
                 {field('chineseAbstract', '中文摘要', { multiline: true, maxLength: 6000 })}
                 {field('chineseKeywords', '中文关键词')}
@@ -374,7 +392,7 @@ export function TemplateExportDialog({ files, main, active, database, originalNa
                 onChange={event => updateField('declaration', event.target.files?.[0])} />
             </label>}
             <div className="flex flex-wrap gap-2">
-              <Button type="submit" disabled={busy || loadingReleases || suep && !suepOriginal.receipt} className="bg-workbench-accent text-white">{mit ? "准备外部编译源包" : "编译预览"}</Button>
+              <Button type="submit" disabled={busy || !!missing.length || loadingReleases || suep && !suepOriginal.receipt} className="bg-workbench-accent text-white">{mit ? "准备外部编译源包" : "编译预览"}</Button>
               {busy && <Button type="button" variant="outline" onClick={cancel}>取消导出</Button>}
             </div>
           </fieldset>

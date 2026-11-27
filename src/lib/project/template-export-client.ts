@@ -9,12 +9,14 @@ import type { ProjectFileSystem } from './types'
 import { importSourceArchive } from './source-archive'
 import { maskLatexCode } from './latex-source'
 import { captureManuscript, type ManuscriptSnapshot } from './template-export'
+import { missingTemplateFields, plainTex, plainTitle, templateWithProjectInformation, type ProjectInformation } from './project-information'
 import { compileWordProjectWithSync, readWordTemplate, wordRequest } from './word-conversion-client'
 import { hasLayoutConflict, layoutKeys, layoutValues, wordLayoutSchema, type WordLayout } from './word-layout'
 import { joinMappedTex, manuscriptRegions, type LineSources, type MappedTex } from './template-source-map'
 import { numericPublisherBibliography, publisherArticle, publisherArticleIds, type PublisherArticleId } from './publisher-article'
 import { suepGeometry, suepTexLayout } from './suep-word-layout'
-import { suepUndergraduateId } from './suep-undergraduate-source'
+import { suepUndergraduateId, type SuepBundlePin } from './suep-undergraduate-source'
+import { suepCoverFields } from './suep-cover'
 import { officialAttachment } from './official-attachments'
 import { wordReleaseFile } from './word-release-client'
 import { bindSuepBundle, prepareSuepBundle, restoreSuepBundle } from './suep-bundle-client'
@@ -71,22 +73,11 @@ async function officialFile(target: ExportTarget, signal: AbortSignal, upload?: 
   return new File([upload], 'official.' + ext)
 }
 
-async function snapshotDigest({ assets, lineSources: _lineSources, ...text }: ManuscriptSnapshot) {
+async function snapshotDigest({ assets, lineSources: _lineSources, sourceAuthors: _sourceAuthors, ...text }: ManuscriptSnapshot) {
   const assetsWithHashes = await Promise.all(assets.map(async ({ path, blob }) =>
     [path, await templateDigest(await blob.arrayBuffer())]))
   const serialized = JSON.stringify({ ...text, assets: assetsWithHashes })
   return templateDigest(new TextEncoder().encode(serialized).buffer)
-}
-
-function plainTex(text: string) {
-  const escapes: Record<string, string> = {
-    '\\': '\\textbackslash{}', '^': '\\textasciicircum{}', '~': '\\textasciitilde{}',
-  }
-  return text.replace(/[\\{}%#&_$^~]/g, char => escapes[char] ?? '\\' + char)
-}
-
-function plainTitle(text: string) {
-  return text.replace(/\\([&%#$ _])/g, '$1')
 }
 
 function bibliography(manuscript: ManuscriptSnapshot) {
@@ -134,6 +125,9 @@ function manuscriptPart(manuscript: ManuscriptSnapshot, name: keyof ManuscriptSn
 function jmlrBuild(template: JmlrTemplate, manuscript: ManuscriptSnapshot): Build {
   assertEnglishManuscript(manuscript, 'JMLR')
   const { fields, options, documentClass, packageName, style, main } = template
+  if ([fields.affiliation, fields.email].some(value => /\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}|\p{Script=Hangul}/u.test(value))) {
+    throw new Error('JMLR 的作者单位和联系邮箱请使用英文。')
+  }
   const author = manuscript.authors.map(name => {
     const email = fields.email.trim() ? ' \\email ' + plainTex(fields.email.trim()) : ''
     return '\\name ' + name + email + ' \\\\\n\\addr ' + plainTex(fields.affiliation.trim())
@@ -312,7 +306,7 @@ async function wordThesisBuild(template: WordThesisTemplate, manuscript: Manuscr
   const word = new File([Uint8Array.from(atob(template.word), char => char.charCodeAt(0))], 'official.docx')
   const values = layoutValues(layout)
   const manuscriptTitle = plainTitle(manuscript.title)
-  const authorName = manuscript.authors.map(plainTitle).join('、')
+  const authorName = thesisAuthor(manuscript)
   const cover = blindCover && njupt ? await njuptBlindExportFront(blindCover, { ...template.fields, title: manuscriptTitle, name: '' })
     : zju ? await zjuExportCover(word, fields.declarations, [
     fields.chineseTitle.trim(), authorName + '  ' + fields.studentNumber.trim(),
@@ -428,6 +422,30 @@ function prlBuild(template: Extract<ActiveTemplate, { kind: 'prl-article' }>, ma
     notes: 'Uses the official APS PRL preprint submission option and the verified REVTeX class and bibliography style.' }
 }
 
+function thesisAuthor(manuscript: ManuscriptSnapshot) {
+  // A shared author list is ordered; a thesis cover has a single student field.
+  return (manuscript.sourceAuthors ? manuscript.authors.slice(0, 1) : manuscript.authors).map(plainTitle).join('、')
+}
+
+function suepCoverValues(fields: Pick<TemplateFields, 'chineseTitle' | 'affiliation' | 'program' | 'studentNumber' | 'advisor' | 'date'>, manuscript: ManuscriptSnapshot) {
+  const { chineseTitle: title, affiliation, program, studentNumber, advisor, date } = fields
+  return suepCoverFields.parse({ title, affiliation, program, studentNumber, advisor, date, author: thesisAuthor(manuscript) })
+}
+
+async function suepCoverDigest(fields: ReturnType<typeof suepCoverValues>) {
+  return templateDigest(new TextEncoder().encode(JSON.stringify(fields)).buffer)
+}
+
+async function renderSuepFront(pin: SuepBundlePin, role: 'cover' | 'declaration', signal: AbortSignal,
+  cover?: ReturnType<typeof suepCoverValues>) {
+  const form = new FormData()
+  form.set('intent', 'render-front')
+  bindSuepBundle(form, pin)
+  form.set('suep-role', role)
+  if (cover) form.set('suep-cover-fields', JSON.stringify(cover))
+  return encodeDocument(await (await wordRequest(form, signal)).blob())
+}
+
 async function prepareSuep(target: ExportTarget, fields: ExportFields, signal: AbortSignal, manuscript: ManuscriptSnapshot) {
   const { workflow } = target.entry
   if (workflow.kind !== 'word-import' || workflow.profile !== 'suep-undergraduate') throw new Error('缺少上电本科 Word 配置。')
@@ -435,23 +453,13 @@ async function prepareSuep(target: ExportTarget, fields: ExportFields, signal: A
   const pin = { id: suepUndergraduateId, version: target.version, sha256: target.sha256 } as const
   const { manifest } = await (fields.original ? prepareSuepBundle(pin, signal, fields.original)
     : restoreSuepBundle(pin, signal, target.release?.kind === 'word-import' ? target.release.archive : undefined))
-  async function render(role: 'cover' | 'declaration') {
-    const form = new FormData()
-    form.set('intent', 'render-front')
-    bindSuepBundle(form, pin)
-    form.set('suep-role', role)
-    if (role === 'cover') form.set('suep-cover-fields', JSON.stringify({
-      title: fields.chineseTitle, affiliation: fields.affiliation, program: fields.program,
-      author: manuscript.authors.map(plainTitle).join('、'), studentNumber: fields.studentNumber,
-      advisor: fields.advisor, date: fields.date,
-    }))
-    return encodeDocument(await (await wordRequest(form, signal)).blob())
-  }
-  const cover = await render('cover')
-  const declaration = await render('declaration')
+  const values = suepCoverValues(fields, manuscript)
+  const cover = await renderSuepFront(pin, 'cover', signal, values)
+  const declaration = await renderSuepFront(pin, 'declaration', signal)
   const { chineseTitle, chineseAbstract, chineseKeywords, affiliation, program, studentNumber, advisor, date } = fields
   return { kind: 'suep-undergraduate' as const, main: workflow.compile.mainFile,
     cover, declaration, fields: { chineseTitle, chineseAbstract, chineseKeywords, affiliation, program, studentNumber, advisor, date },
+    coverFieldsSha256: await suepCoverDigest(values),
     coverSha256: manifest.members.cover.sha256, declarationSha256: manifest.members.declaration.sha256 }
 }
 
@@ -611,7 +619,7 @@ function mitBuild(template: Extract<ActiveTemplate, { kind: 'mit-thesis' }>, man
 
 export async function prepareExternalTemplate(manuscript: ManuscriptSnapshot, files: ProjectFileSystem['files'],
   main: string, target: ExportTarget, fields: ExportFields, signal: AbortSignal,
-  current?: Extract<ActiveTemplate, { kind: 'mit-thesis' }>) {
+  current?: Extract<ActiveTemplate, { kind: 'mit-thesis' }>, information?: ProjectInformation) {
   const registered = exportTargets.find(item => item.entry.exportProfile === 'mit-thesis'
     && item.entry.id === target.entry.id && item.version === target.version && item.sha256 === target.sha256)
   if (!registered) throw new Error('MIT 版本与目录登记原件不匹配。')
@@ -621,7 +629,7 @@ export async function prepareExternalTemplate(manuscript: ManuscriptSnapshot, fi
     name: entry.name, origin: { id: entry.id, version, sha256, ...(target.release?.manifestSha256 && { manifestSha256: target.release.manifestSha256 }) } })
   if (template.kind !== 'mit-thesis') throw new Error('缺少 MIT 编译配置。')
   const { files: rendered, lines } = await assembleTemplate(manuscript, template, signal)
-  const sourceSha256 = await projectSourceDigest(files, main)
+  const sourceSha256 = await projectSourceDigest(files, main, information)
   const build = await packageExternalTemplate(rendered, lines, manuscript.lineSources.body, sourceSha256)
   signal.throwIfAborted()
   return { build, template }
@@ -815,10 +823,23 @@ async function compileTemplateTarget(manuscript: ManuscriptSnapshot, target: Exp
 
 export async function projectWithActiveTemplate(project: ProjectFileSystem, main: string, signal: AbortSignal,
   stage?: SubmissionStage, uploadedCover?: File) {
-  const template = project.metadata.activeTemplate
-  if (!template) return { project }
-  const manuscript = captureManuscript(project.files, main)
-  if (stage !== 'njupt-blind') return renderTemplate(manuscript, template, signal, stage && { stage })
+  const configured = project.metadata.activeTemplate
+  if (!configured) return { project }
+  const information = project.metadata.information
+  const template = templateWithProjectInformation(configured, information)
+  const missing = missingTemplateFields(template.kind, template.origin.id, template.fields, stage === 'njupt-blind')
+  if (missing.length) throw new Error('当前模板缺少必填项 · ' + missing.join('、') + '。请在「项目信息」或「更换模板」补齐。')
+  const manuscript = captureManuscript(project.files, main, { information })
+  if (stage !== 'njupt-blind') {
+    if (information && template.kind === 'suep-undergraduate') {
+      const values = suepCoverValues(template.fields, manuscript)
+      if (await suepCoverDigest(values) !== template.coverFieldsSha256) {
+        const cover = await renderSuepFront({ ...template.origin, id: suepUndergraduateId }, 'cover', signal, values)
+        return renderTemplate(manuscript, { ...template, cover }, signal, stage && { stage })
+      }
+    }
+    return renderTemplate(manuscript, template, signal, stage && { stage })
+  }
   if (template.kind !== 'njupt-masters' || template.origin.id !== 'njupt-professional-masters' || template.fields.studyMode !== 'full-time') {
     throw new Error('已核验的南邮专硕盲审封面适用于全日制。请先在「更换模板」中启用南邮专硕版式并填写适用字段。')
   }
@@ -826,10 +847,20 @@ export async function projectWithActiveTemplate(project: ProjectFileSystem, main
   const cover = uploadedCover ?? (template.blindCover ? new File([Uint8Array.from(atob(template.blindCover), char => char.charCodeAt(0))], 'blind-cover.doc')
     : await fetchOfficialFile(template.origin.id, attachmentSha256, 'blind-cover', signal))
   if (await templateDigest(await cover.arrayBuffer()) !== attachmentSha256) throw new Error('盲审封面原件 SHA-256 校验失败。请选择学校发布的全日制专硕盲审封面。')
-  const result = await renderTemplate(manuscript, template, signal, { stage, blindCover: new File([await normalizedWord(cover, signal)], 'blind-cover.docx') })
-  return { ...result, blind: { coverVerified: true, attachmentSha256, identifiers: [
-    ...manuscript.authors.map(plainTitle), template.fields.studentNumber, template.fields.advisor, template.fields.englishAdvisor ?? '',
-  ] } }
+  const anonymous = { ...manuscript, authors: [], sourceAuthors: undefined }
+  const blindTemplate = { ...template, fields: { ...template.fields, studentNumber: '', advisor: '', englishAdvisor: '', affiliation: '', date: '' } }
+  const result = await renderTemplate(anonymous, blindTemplate, signal, { stage, blindCover: new File([await normalizedWord(cover, signal)], 'blind-cover.docx') })
+  const affiliations = [information?.affiliation, information?.englishAffiliation]
+    .filter(value => value && !/^(?:南京邮电大学|Nanjing University of Posts and Telecommunications)$/i.test(value))
+  const identifiers = [
+    ...manuscript.authors.map(plainTitle), ...(manuscript.sourceAuthors ?? []).map(plainTitle),
+    ...(information?.authors ?? []), information?.email, ...affiliations,
+    template.fields.studentNumber, template.fields.advisor, template.fields.englishAdvisor,
+    configured.kind === 'njupt-masters' ? configured.fields.studentNumber : undefined,
+    configured.kind === 'njupt-masters' ? configured.fields.advisor : undefined,
+    configured.kind === 'njupt-masters' ? configured.fields.englishAdvisor : undefined,
+  ].filter((value): value is string => Boolean(value?.trim()))
+  return { ...result, blind: { coverVerified: true, attachmentSha256, identifiers } }
 }
 
 type SubmissionRender = { stage: SubmissionStage; blindCover?: File }

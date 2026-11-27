@@ -39,7 +39,7 @@ type VersionDraft = Omit<SubmissionVersion, 'id' | 'createdAt' | 'name'>
 
 export function SubmissionDialog({ main, compileEntry = main, drafts, includeDrafts, onDraftChoice, conflicting, paths, excluded, onToggle,
   issues, ready, busy, error, log, result, compilerIssues, onClose, onCompile, onLocate, database, storageKey,
-  compatibility, external, staleExternal, onPrepareExternal, onAttachExternal, onStartRevision, target, working, onEvidenceLocate,
+  compatibility, external, staleExternal, onPrepareExternal, onAttachExternal, onStartRevision, target, working, onEvidenceLocate, onEditInformation,
   layoutAvailable, layoutFindings, generatedLayout, stageOptions, templateOriginId, stage, onStage, onBlindCover, staleStage }: {
   stageOptions: SubmissionStage[]
   templateOriginId?: string
@@ -77,6 +77,7 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
   target: ProjectFileSystem
   working: ProjectFileSystem
   onEvidenceLocate: (path: string, line?: number) => void
+  onEditInformation: () => void
   generatedLayout?: boolean
   layoutAvailable?: boolean
   layoutFindings?: LayoutFinding[]
@@ -263,9 +264,9 @@ export function SubmissionDialog({ main, compileEntry = main, drafts, includeDra
           <a href={njuptBlindCover.page} target="_blank" rel="noreferrer" className="underline">封面发布页</a>
         </label>}
       </fieldset>}
-      {(templateOriginId !== 'njupt-professional-masters' || stage === 'njupt-deposit') && <SubmissionDocxPanel
+      {stage !== 'njupt-blind' && (templateOriginId !== 'njupt-professional-masters' || stage === 'njupt-deposit') && <SubmissionDocxPanel
         key={templateOriginId ?? 'generic-docx'} project={target} main={main} template={templateOriginId} stage={stage} database={database ?? undefined} storageKey={storageKey} disabled={busy || saving || conflicting} download={download}
-        onLocate={onEvidenceLocate} onArchive={database && storageKey ? archiveDocx : undefined} />}
+        onLocate={onEvidenceLocate} onEditInformation={onEditInformation} onArchive={database && storageKey ? archiveDocx : undefined} />}
       {staleStage && <p role="status" className="rounded border border-amber-200 bg-amber-50 p-2 text-sm text-amber-900">稿件已修改。请重新编译和检查后下载交付包。历史记录仍可复查。</p>}
       <p className="text-sm">Compile entry <code className="break-all">{compileEntry}</code></p>
       {drafts.length > 0 && <fieldset disabled={busy || saving} className="space-y-1 text-sm">

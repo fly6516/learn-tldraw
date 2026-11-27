@@ -1603,3 +1603,163 @@ for (const pilot of ['njupt', 'agu'] as const) {
     if (finalDigest) expect(proof.publication.docx[0].final.sha256).toBe(finalDigest)
   })
 }
+
+test('reuses project information in native PDF, ZJU DOCX, NJUPT blind review and JMLR', async ({ page }, info) => {
+  const fixtures = process.env.RESEARCH_TEMPLATE_PINNED_FIXTURES
+  test.skip(acceptance !== '1' || !fixtures, 'Requires pinned official files and the local TeX and Word converters.')
+  test.setTimeout(420_000)
+  const output = info.outputPath('project-information')
+  await mkdir(output, { recursive: true })
+  const sharedTitle = 'Shared Calibration Metadata Study'
+  const newTitle = 'Shared Calibration Metadata Revised'
+  const chineseTitle = '共享信息校准研究'
+  const author = 'Rowan Archive'
+  const student = '2026118791'
+  const advisor = '周证据'
+  const email = 'rowan.qa@example.test'
+  const affiliation = 'Metadata Verification Laboratory'
+  const values = {
+    稿件主标题: sharedTitle, 中文题目: chineseTitle, 学号: student, 指导教师: advisor, 导师英文姓名: 'Zhengju Zhou',
+    '所在学院／作者单位': '样稿核验学院', 单位英文全称: affiliation, 通讯邮箱: email,
+    '专业（领域）': '电子信息', 提交日期: '2026-11-26', 中文关键词: '校准；模板',
+    英文关键词: 'calibration; metadata', 中文摘要: '本独立样稿用于检验论文题名和封面字段复用。',
+    '作者姓名（每行一位，按署名顺序）': author,
+  }
+
+  await page.goto('/research')
+  await page.getByLabel('Choose project ZIP or backup').setInputFiles({
+    name: 'project-information.research-canvas', mimeType: 'application/zip',
+    buffer: await seedProject(study, results + '\n\\section*{Acknowledgments}\nRowan Archive thanks the instrumentation team.\n'),
+  })
+  await page.getByRole('button', { name: 'Import as new project', exact: true }).click()
+  await page.waitForURL(url => url.searchParams.has('project'))
+  await page.getByRole('button', { name: 'Writing', exact: true }).click()
+  const toggle = page.getByRole('button', { name: '项目信息', exact: true })
+  const edit = page.getByRole('dialog', { name: '项目信息' })
+  const openSwitch = page.getByRole('button', { name: '更换模板', exact: true })
+  const template = page.getByRole('dialog', { name: '更换模板', exact: true })
+  const openSubmission = page.getByRole('button', { name: 'Prepare submission', exact: true })
+  const submission = page.getByRole('dialog', { name: 'Prepare submission' })
+  const setCurrent = template.getByRole('button', { name: '设为当前模板', exact: true })
+  const preview = template.getByRole('button', { name: '编译预览', exact: true })
+
+  await openSwitch.click()
+  const missing = template.getByRole('status', { name: '模板缺少的必填项' })
+  await expect(missing).toContainText('学号')
+  await expect(preview).toBeDisabled()
+  await template.getByRole('button', { name: '编辑项目信息' }).click()
+  for (const [key, value] of Object.entries(values)) await edit.getByLabel(key, { exact: true }).fill(value)
+  await edit.getByRole('button', { name: '保存项目信息' }).click()
+  await expect(edit).toBeHidden()
+
+  async function compilePdf(filename: string) {
+    await compileProject(page)
+    const path = join(output, filename)
+    await saveCompiledPdf(page, path)
+    return pdfText(path, output)
+  }
+
+  expect(await compilePdf('original-layout.pdf')).toContain(sharedTitle)
+
+  async function apply(id: string) {
+    await expect(preview).toBeEnabled({ timeout: 30_000 })
+    await preview.click()
+    await expect(setCurrent.or(template.getByRole('alert'))).toBeVisible({ timeout: 120_000 })
+    expect(await template.getByRole('alert').allTextContents()).toEqual([])
+    await setCurrent.click()
+    await expect(template).toBeHidden()
+    expect((await page.getByLabel('当前编译模板').textContent())?.trim(), id).toBeTruthy()
+  }
+
+  await openSwitch.click()
+  await expect(template.getByRole('textbox', { name: '学号', exact: true })).toHaveValue(student)
+  await expect(missing).toHaveCount(0)
+  await apply('zju-basic-medicine-undergraduate')
+  const zju = await compilePdf('zju-formal.pdf')
+  expect(zju.replace(/\s/g, '')).toContain(chineseTitle)
+  expect(zju).toContain(author)
+  expect(zju).toContain(student)
+
+  await openSubmission.click()
+  await submission.getByRole('button', { name: '导出 Word（DOCX）', exact: true }).click()
+  const docx = submission.getByRole('form', { name: '导出 Word（DOCX）' })
+  await expect(docx.getByRole('textbox', { name: '中文题目', exact: true })).toHaveValue(chineseTitle)
+  await expect(docx.getByRole('textbox', { name: '作者姓名', exact: true })).toHaveValue(author)
+  await expect(docx.getByRole('textbox', { name: '学号', exact: true })).toHaveValue(student)
+  const downloadDocx = page.waitForEvent('download')
+  await docx.getByRole('button', { name: '生成并下载 DOCX' }).click()
+  const file = join(output, 'zju-formal.docx')
+  await (await downloadDocx).saveAs(file)
+  const document = await JSZip.loadAsync(await readFile(file))
+  const text = (await document.file('word/document.xml')!.async('string')).replace(/<[^>]+>/g, '')
+  for (const value of [chineseTitle, student, author, advisor, '声明', 'Independent observation counts']) expect(text).toContain(value)
+  expect(text).not.toContain('Casey Lin')
+  await submission.getByRole('button', { name: 'Close', exact: true }).click()
+
+  await openSwitch.click()
+  await template.getByRole('combobox', { name: '目标模板' }).selectOption('njupt-professional-masters')
+  await expect(missing).toContainText('培养类型')
+  await expect(missing).toContainText('申请学位类别')
+  await expect(missing).not.toContainText('学号')
+  await template.getByLabel('培养类型').selectOption('full-time')
+  await template.getByLabel('申请学位类别').fill('电子信息硕士')
+  await template.getByLabel('学位类别英文全称').fill('Master of Electronic Information')
+  await apply('njupt-professional-masters')
+  await openSubmission.click()
+  await submission.getByRole('combobox', { name: '提交阶段' }).selectOption('njupt-blind')
+  await expect(submission.getByRole('button', { name: '导出 Word（DOCX）' })).toHaveCount(0)
+  await submission.getByRole('button', { name: 'Compile submission files' }).click()
+  const delivery = submission.getByRole('button', { name: '下载交付包', exact: true })
+  await expect(delivery).toBeVisible({ timeout: 120_000 })
+  await (await Promise.all([page.waitForEvent('download'),
+    submission.getByRole('button', { name: '下载匿名 PDF' }).click()]))[0].saveAs(join(output, 'njupt-anonymous.pdf'))
+  await readDelivery(page, delivery, output, 'njupt-blind')
+  const anonymous = pdfText(join(output, 'njupt-anonymous.pdf'), output)
+  const metadata = externalTexCommand('pdfinfo', [join(output, 'njupt-anonymous.pdf')], output)
+  const report = await readFile(join(output, 'njupt-blind-report.json'), 'utf8')
+  expect(JSON.parse(report).findings.find((item: { ruleId: string }) => item.ruleId === 'blind-identities').status).toBe('pass')
+  expect(anonymous.replace(/\s/g, '')).toContain(chineseTitle)
+  const blindSource = await JSZip.loadAsync(await readFile(join(output, 'njupt-blind-source.zip')))
+  const blindText = (await Promise.all(Object.values(blindSource.files)
+    .filter(entry => /\.(?:tex|bib|md)$/i.test(entry.name)).map(entry => entry.async('string')))).join('\n')
+  for (const secret of [author, student, advisor, email, affiliation, values['所在学院／作者单位'], 'Zhengju Zhou',
+    'Casey Lin', 'instrumentation team', '原创性声明']) {
+    expect([anonymous, metadata, report, blindText].join('\n')).not.toContain(secret)
+  }
+  await submission.getByRole('button', { name: 'Close', exact: true }).click()
+
+  await replaceProjectSource(page, 'sections/results.tex', results + '\nContact ' + email + ' for details.\n')
+  await expect(page.getByText(/1 local draft/)).toBeVisible()
+  await openSubmission.click()
+  await submission.getByRole('radio', { name: /Include local drafts/ }).check()
+  await submission.getByRole('button', { name: 'Compile submission files' }).click()
+  await expect(submission.getByRole('alert')).toContainText('盲审隐私检查未通过', { timeout: 120_000 })
+  await expect(delivery).toHaveCount(0)
+  await expect(submission.getByRole('button', { name: '下载匿名 PDF' })).toHaveCount(0)
+  await submission.getByRole('button', { name: 'Close', exact: true }).click()
+  page.once('dialog', dialog => dialog.accept())
+  await page.getByRole('button', { name: 'Discard drafts' }).click()
+  await expect(page.getByText('All changes saved to project')).toBeVisible()
+
+  await openSwitch.click()
+  await template.getByRole('combobox', { name: '目标模板' }).selectOption('jmlr')
+  await expect(template.getByRole('textbox', { name: '作者单位', exact: true })).toHaveValue(affiliation)
+  await expect(missing).toHaveCount(0)
+  await apply('jmlr')
+  await toggle.click()
+  await expect(edit.getByLabel('学号', { exact: true })).toHaveValue(student)
+  await edit.getByLabel('稿件主标题', { exact: true }).fill(newTitle)
+  await edit.getByRole('button', { name: '保存项目信息' }).click()
+  await expect(edit).toBeHidden()
+  await page.reload()
+  await expect(page.getByLabel('当前编译模板')).toContainText('JMLR')
+  const jmlr = await compilePdf('jmlr.pdf')
+  for (const value of [newTitle, author, affiliation, email, 'Shannon']) expect(jmlr).toContain(value)
+  expect(jmlr).not.toContain(student)
+  const saved = await backup(page, join(output, 'project-information.research-canvas'))
+  expect(saved.project.metadata.information.title).toBe(newTitle)
+  expect(saved.snapshots).toHaveLength(1)
+  expect(saved.project.files.find((entry: { path: string }) => entry.path === 'main.tex').content).toBe(manuscript)
+  await toggle.click()
+  await page.screenshot({ path: join(output, 'project-information.png') })
+})
